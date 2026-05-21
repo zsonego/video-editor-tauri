@@ -30,6 +30,8 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -39,7 +41,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          args: --bundles app,dmg
+          args: --target universal-apple-darwin --bundles app,dmg
 
       - name: Archive app bundle
         run: |
