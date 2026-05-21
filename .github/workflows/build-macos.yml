@@ -36,14 +36,14 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build macOS bundle
+      - name: Build macOS .app and .dmg bundles
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           args: --target universal-apple-darwin --bundles app,dmg
 
-      - name: Archive app bundle
+      - name: Archive macOS .app bundle
         run: |
           APP_PATH="$(find src-tauri/target -type d -path '*/release/bundle/macos/*.app' | head -n 1)"
           if [ -z "$APP_PATH" ]; then
@@ -56,14 +56,14 @@ jobs:
       - name: Upload macOS app
         uses: actions/upload-artifact@v4
         with:
-          name: macos-app
+          name: macos-app-universal
           path: macos-app.zip
           if-no-files-found: error
 
       - name: Upload macOS dmg
         uses: actions/upload-artifact@v4
         with:
-          name: macos-dmg
+          name: macos-dmg-universal
           path: |
             src-tauri/target/release/bundle/dmg/*.dmg
             src-tauri/target/*/release/bundle/dmg/*.dmg
