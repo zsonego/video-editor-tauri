@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "艾咔",
+  "version": "0.1.0",
+  "identifier": "com.loogear.video-editor-tauri",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "艾咔",
+        "width": 1280,
+        "height": 850,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": [
+      "icons/logo.png",
+      "icons/logo.png",
+      "icons/logo.png",
+      "icons/icut.icns",
+      "icons/icut.ico"
+    ]
+  }
+}

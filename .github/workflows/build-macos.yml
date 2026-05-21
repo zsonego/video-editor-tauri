@@ -1,0 +1,61 @@
+name: Build macOS
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  build-macos:
+    name: Build macOS app
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build macOS bundle
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: --bundles app,dmg
+
+      - name: Archive app bundle
+        run: |
+          cd src-tauri/target/release/bundle/macos
+          ditto -c -k --sequesterRsrc --keepParent *.app ../../../../../macos-app.zip
+
+      - name: Upload macOS app
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-app
+          path: macos-app.zip
+          if-no-files-found: error
+
+      - name: Upload macOS dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
