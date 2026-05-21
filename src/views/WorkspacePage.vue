@@ -1,9 +1,11 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import logoImage from "../assets/logo.png";
-import videoSource from "../assets/video2.mp4";
 
 const emit = defineEmits(["logout"]);
+
+const videoSource =
+  "https://github.com/zsonego/video-editor-tauri/releases/download/new/video2.mp4";
 
 const weddingImage =
   "https://lh3.googleusercontent.com/aida-public/AB6AXuAKUjxUCNitv9tXTzfgFJpJ4Ej2XBvFvC1QMHEvkCguRpbLnSBT-kk_vXIIoyD7N1vu54LtsFl8I-qrAPoQ5ugSt1UZmfUCbNYNGVgsNUoAepuaVksq5X2i4VxN6p5yZNN7-98lafAPrgTXJlKD7WRNAb90zS7OTDMthSpKGyVhyjdK3iFjr4wWg4esqt0UjogKVo_E-UDa7AgxhHefXqneVydxtp_jQThpAjL49uUw3p6I71h6jgJM4UVFvJNhRD7JEsqJepC6_ZD5";
