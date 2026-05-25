@@ -1,14 +1,29 @@
 <script setup>
-import { ref } from "vue";
-import LoginPage from "./views/LoginPage.vue";
-import WorkspacePage from "./views/WorkspacePage.vue";
+import { useRouter } from "vue-router";
+import SystemMessageHost from "./components/SystemMessageHost.vue";
 
-const currentPage = ref("login");
+const router = useRouter();
+
+function handleLoginSuccess() {
+  const redirect = typeof router.currentRoute.value.query.redirect === "string"
+    ? router.currentRoute.value.query.redirect
+    : "/home";
+
+  router.replace(redirect);
+}
+
+function handleLogout() {
+  localStorage.removeItem("loginState");
+  localStorage.removeItem("userInfo");
+  router.replace("/login");
+}
 </script>
 
 <template>
-  <LoginPage v-if="currentPage === 'login'" @login="currentPage = 'workspace'" />
-  <WorkspacePage v-else @logout="currentPage = 'login'" />
+  <RouterView v-slot="{ Component }">
+    <component :is="Component" @login="handleLoginSuccess" @logout="handleLogout" />
+  </RouterView>
+  <SystemMessageHost />
 </template>
 
 <style>

@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE xmeml>
+<xmeml version="5">
+
+    <!-- 模板定义 -->
+    <project id="o5p8a1s4d7f0g3j6q9w2e" name="顾小童周岁纪念" version="1.0" timeunit="millisecond">
+        <meta>
+            <template id="seqvvgcrrjs0yizf4tn" version="1.0"</template> <!--使用的模板信息 -->        
+            <status>0</status> <!--状态：0-编辑中 1-已导出 -->
+            <last-updtime>2026-05-19 16:35:20 /> <!--最近更新时间 -->            
+        </meta>
+        <!-- ========== 素材集 ========== -->
+        <!-- assets目录下为已替换为用户实际的，assets-demo下为未替换的示例 -->
+        <media-asset id="serhw8q52e9zp4s273w">
+            <asset id="i3o6p9a2s5d8f1g4j7q0w" filepath= "assets/a01.mp4"/>
+            <asset id="y7u1i4o7p0a3s6d9f2g5j" filepath= "assets/a02.mp4"/>      
+            <asset id="c4v7x0z3a6s9d2f5g8j1k" filepath= "assets/a03.mp4"/>
+            <asset id="t8r1y4u7i0o3p6a9s2d5f" filepath= "assets-demo/104.mp4"/>
+            <asset id="k2n5m8q1w4e7r0t3y6u9i" filepath= "assets-demo/105.mp4"/>                                  
+        </media-asset>
+
+        <media-asset id="xw8vn3m9jfk2t6qc7eu0r">
+            <asset id="a7t2x9k4p6m8q1r3v5w0e2" filepath= "assets/b01.mp4"/>
+            <asset id="j3f8s0d5g9h2k6l4z7x1c9" filepath= "assets/b02.mp4"/>      
+            <asset id="b5n7m2q4w6e8r0t3y9u1i7" filepath= "assets/b03.mp4"/>          
+        </media-asset>
+
+        <!-- ========== 视频片段（对应中间剪辑层） ========== -->
+        <clips id="z7x1c4v8b2n5m9q0w3e6r" target-track="clips">
+            <clip id="u4p7a0d3f6g9j2k5p8s1t">
+                <!-- 剪辑区域1， 对应的素材集下的具体素材及时间偏移（毫秒） -->
+                <area id="e7r0t3y6u1i4o7p9a2s5d" asset-id="i3o6p9a2s5d8f1g4j7q0w" offset="1200" />
+                <area id="b8n2m5q9w3e6r0t7y1u4i" asset-id="i3o6p9a2s5d8f1g4j7q0w" offset="0" />
+                <!-- 以上两个素材在模板中对应的media-asset相同且index均为1，所以实际分配为同一个素材 -->                
+                <!-- 个性文本标题 -->
+                <subtitle id="m9n2b4v6c8x1z3a5s7d0f2" text="顾小童周岁快乐" />                
+            </clip>
+
+            <clip id="v4c7x1z5a8s2d6f9g3j7k">
+                <area id="h2k5p8s1d4f7g0j3q6w9e" asset-id="y7u1i4o7p0a3s6d9f2g5j" offset="2000" />
+            </clip>
+        </clips>
+    </project>
+
+</xmeml>
