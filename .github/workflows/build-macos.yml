@@ -1,4 +1,4 @@
-name: Build macOS
+name: Build macOS DMG
 
 on:
   workflow_dispatch:
@@ -8,8 +8,8 @@ on:
       - master
 
 jobs:
-  build-macos:
-    name: Build macOS app
+  build-macos-dmg:
+    name: Build macOS DMG for Apple Silicon
     runs-on: macos-latest
 
     steps:
@@ -31,40 +31,22 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-apple-darwin,aarch64-apple-darwin
+          targets: aarch64-apple-darwin
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build macOS .app and .dmg bundles
+      - name: Build macOS Apple Silicon dmg
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          args: --target universal-apple-darwin --bundles app,dmg
+          args: --target aarch64-apple-darwin --bundles dmg
 
-      - name: Archive macOS .app bundle
-        run: |
-          APP_PATH="$(find src-tauri/target -type d -path '*/release/bundle/macos/*.app' | head -n 1)"
-          if [ -z "$APP_PATH" ]; then
-            echo "No .app bundle found"
-            find src-tauri/target -path '*/bundle/*' -print
-            exit 1
-          fi
-          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" macos-app.zip
-
-      - name: Upload macOS app
+      - name: Upload macOS Apple Silicon dmg
         uses: actions/upload-artifact@v4
         with:
-          name: macos-app-universal
-          path: macos-app.zip
-          if-no-files-found: error
-
-      - name: Upload macOS dmg
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-dmg-universal
+          name: macos-dmg-apple-silicon
           path: |
-            src-tauri/target/release/bundle/dmg/*.dmg
-            src-tauri/target/*/release/bundle/dmg/*.dmg
+            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
           if-no-files-found: error
