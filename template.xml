@@ -6,7 +6,8 @@
     <template id="seqvvgcrrjs0yizf4tn" name="儿童周岁片-巴比伦风格" version="1.0" timeunit="millisecond">
         <video>
             <duration>600000</duration> <!--视频总时长, 单位：毫秒 -->            
-            <resolution>1920*1080</resolution> <!--输出分辨率 -->            
+            <resolution>1920*1080</resolution> <!--输出分辨率 -->
+            <demo-path>template/assets/template.mp4</demo-path> <!-- 完整演示视频 -->
         </video>
 
         <!-- ========== 视频整体分层 ========== -->
@@ -34,19 +35,18 @@
                 <minResolution width="1920" height="1080" /> <!-- 最小分辨率 -->
             </constraints>
             <comment>......</comment> <!--备注说明 -->
-            <!-- 示例素材列表，全都在assets-demo路径下 -->
+            <!-- 示例素材列表，全都在assets-demo路径下. 示例素材列表长度决定了该素材集包含素材数 -->
             <default-asset>
-                <asset id="i3o6p9a2s5d8f1g4j7q0w" filepath= "assets-demo/101.mp4"/>
-                <asset id="y7u1i4o7p0a3s6d9f2g5j" filepath= "assets-demo/102.mp4"/>      
-                <asset id="c4v7x0z3a6s9d2f5g8j1k" filepath= "assets-demo/103.mp4"/>
-                <asset id="t8r1y4u7i0o3p6a9s2d5f" filepath= "assets-demo/104.mp4"/>
-                <asset id="k2n5m8q1w4e7r0t3y6u9i" filepath= "assets-demo/105.mp4"/>                                  
+                <asset id="i3o6p9a2s5d8f1g4j7q0w" filepath= "template/assets/1.mp4"/>
+                <asset id="y7u1i4o7p0a3s6d9f2g5j" filepath= "template/assets/2.mp4"/>      
+                <asset id="c4v7x0z3a6s9d2f5g8j1k" filepath= "template/assets/3.mp4"/>
+                <asset id="t8r1y4u7i0o3p6a9s2d5f" filepath= "template/assets/4.mp4"/>
+                <asset id="k2n5m8q1w4e7r0t3y6u9i" filepath= "template/assets/5.mp4"/>                                  
             </default-asset>            
         </media-asset>
 
         <media-asset id="xw8vn3m9jfk2t6qc7eu0r" name="裤装">
             <type>video</type> <!--类型 -->            
-            <count>3</count> <!--所需数量 -->
             <!-- 约束 -->          
             <constraints>                
                 <minDuration>3000</minDuration> <!-- 最短时长，毫秒 -->
@@ -55,45 +55,54 @@
                 <minResolution width="1920" height="1080" />
             </constraints>
             <comment>......</comment> <!--备注说明 -->
-            <!-- 示例素材列表，全都在assets-demo路径下 -->
+            <!-- 示例素材列表，全都在assets-demo路径下. 示例素材列表长度决定了该素材集包含素材数 -->
             <default-asset>
-                <asset id="a7t2x9k4p6m8q1r3v5w0e2" filepath= "assets-demo/201.mp4"/>
-                <asset id="j3f8s0d5g9h2k6l4z7x1c9" filepath= "assets-demo/202.mp4"/>      
-                <asset id="b5n7m2q4w6e8r0t3y9u1i7" filepath= "assets-demo/203.mp4"/>       
+                <asset id="a7t2x9k4p6m8q1r3v5w0e2" filepath= "template/assets/6.mp4"/>
+                <asset id="j3f8s0d5g9h2k6l4z7x1c9" filepath= "template/assets/7.mp4"/>      
+                <asset id="b5n7m2q4w6e8r0t3y9u1i7" filepath= "template/assets/8.mp4"/>            
+            </default-asset>           
+        </media-asset>
+
+          <media-asset id="xw8vn3m9jfk2t6qgh6u0r" name="小孩子大头照">
+            <type>video</type> <!--类型 -->            
+            <!-- 约束 -->          
+            <constraints>                
+                <minDuration>3000</minDuration> <!-- 最短时长，毫秒 -->
+                <maxDuration>10000</maxDuration> <!-- 最长时长，毫秒 -->
+                <aspectRatio>16:9</aspectRatio> <!-- 画面比例 -->
+                <minResolution width="1920" height="1080" />
+            </constraints>
+            <comment>......</comment> <!--备注说明 -->
+            <!-- 示例素材列表，全都在assets-demo路径下. 示例素材列表长度决定了该素材集包含素材数 -->
+            <default-asset>
+                <asset id="a7t2x9k4p6m8q1r3v5w0e2" filepath= "template/assets/4.mp4"/>
+                <asset id="j3f8s0d5g9h2k6l4z7x1c9" filepath= "template/assets/5.mp4"/>      
+                <asset id="b5n7m2q4w6e8r0t3y9u1i7" filepath= "template/assets/6.mp4"/>            
             </default-asset>           
         </media-asset>
 
         <!-- ========== 视频片段（对应中间剪辑层） ========== -->
         <clips id="z7x1c4v8b2n5m9q0w3e6r" target-track="clips">
-            <clip id="u4p7a0d3f6g9j2k5p8s1t">
-                <filepath>common/clip-1.mp4</filepath>
-                <starttime>12000</starttime> <!-- 片段开始时间（毫秒） -->
+            <clip id="u4p7a0d3f6g9j2k5p8s1t" name="舞蹈片段">
                 <duration>13000</duration> <!-- 片段时长（毫秒） -->
-                <comment>......</comment>
-                <!--片段备注说明 -->
+                <comment>......</comment> <!--片段备注说明 -->               
 
                 <!-- 剪辑区域1， 对应的素材集：裙装 -->
                 <area id="e7r0t3y6u1i4o7p9a2s5d" media-asset="serhw8q52e9zp4s273w" index="1">
                     <!-- 源视频区域定义 -->
                     <source>                        
-                        <x-point>400</x-point> <!-- 剪辑起点X坐标 -->
-                        <y-point>300</y-point> <!-- 剪辑起点y坐标 -->
-                        <width>100</width> <!-- 剪辑宽度 -->
-                        <height>180</height> <!-- 剪辑高度 -->
-                        <starttime>12000</starttime> <!-- 从该素材的第几毫秒开始剪辑-->
                         <duration>5000</duration> <!-- 剪辑时长（毫秒） -->
                     </source>
                     <!-- 变换规则 -->
                     <transform>
-                        <scale>0.8</scale> <!-- 缩放 -->
-                        <rotate>0</rotate> <!-- 旋转角度（顺时针） -->
                         <mirror>none</mirror> <!--镜像效果 none | horizontal | vertical -->
-                        <speed>0.8</speed> <!-- 播放速度 1-原速  <1 慢放  >快放 -->
+                        <speed>0.8</speed> <!-- 播放速度 1-原速  <1 慢放  >1快放 -->
                     </transform>
                     <!-- 目标区域定义 -->
                     <destination> 
                         <position x="500" y="350" /> <!-- 目标起点坐标 -->
-                        <starttime>3000</starttime> <!-- 在目标视频片段中第几毫秒插入-->
+                        <width>100</width> <!-- 目标宽度 -->
+                        <height>180</height> <!-- 目标高度 -->
                         <!-- 注：在目标视频中的播放时长 = source.duration * trasform.speed -->
                     </destination>
                 </area>
@@ -102,27 +111,22 @@
                 <area id="b8n2m5q9w3e6r0t7y1u4i" media-asset="serhw8q52e9zp4s273w" index="1">
                     <!-- 源视频区域定义 -->
                     <source>                        
-                        <x-point>400</x-point> <!-- 剪辑起点X坐标 -->
-                        <y-point>300</y-point> <!-- 剪辑起点y坐标 -->
-                        <width>100</width> <!-- 剪辑宽度 -->
-                        <height>180</height> <!-- 剪辑高度 -->
-                        <starttime>3000</starttime> <!-- 从该素材的第几毫秒开始剪辑-->
                         <duration>5000</duration> <!-- 剪辑时长（毫秒） -->
                     </source>
                     <!-- 变换规则 -->
                     <transform>
-                        <scale>0.8</scale> <!-- 缩放 -->
-                        <rotate>0</rotate> <!-- 旋转角度（顺时针） -->
                         <mirror>none</mirror> <!--镜像效果 none | horizontal | vertical -->
-                        <speed>0.8</speed> <!-- 播放速度 1-原速  <1 慢放  >快放 -->
+                        <speed>0.8</speed> <!-- 播放速度 1-原速  <1 慢放  >1快放 -->
                     </transform>
                     <!-- 目标区域定义 -->
                     <destination> 
                         <position x="500" y="350" /> <!-- 目标起点坐标 -->
-                        <starttime>3000</starttime> <!-- 在目标视频片段中第几毫秒插入-->
+                        <width>100</width> <!-- 目标宽度 -->
+                        <height>180</height> <!-- 目标高度 -->                        
                         <!-- 注：在目标视频中的播放时长 = source.duration * trasform.speed -->
                     </destination>
                 </area>
+                ......
 
                 <!-- 个性文本标题 -->
                 <subtitle id="m9n2b4v6c8x1z3a5s7d0f2" startTime="12000" duration="3000">
@@ -130,21 +134,20 @@
                     <maxlen>10</textlen> <!--标题最大长度 -->
                     <default>天线宝宝周岁快乐</default> <!--标题默认值 -->
                     <font family="SimHei" size="48" color="#FFFFFF" />
-                    <position x="960" y="800" align="center" />
+                    <position x="960" y="800"/>
                 </subtitle>
 
                 <!-- 转场特效 -->
                 <filter>
-                    <effect>交叉溶解</effect>
+                    <!-- Cross-Fade | Scale-Transition | Slide-Blur, 分别对应交叉溶解，缩放转场，滑动模糊 -->
+                    <effect>Cross-Fade</effect> 
                     <starttime>19000</starttime> <!-- 特效开始时间（毫秒） -->
-                    <duration>2000</duration> <!-- 持续2000毫秒，可持续到下一个判断 -->
+                    <duration>2000</duration> <!-- 持续2000毫秒，可持续到下一个片段 -->
                 </filter>
                 
             </clip>
 
-            <clip id="v4c7x1z5a8s2d6f9g3j7k">
-                <filepath>common/clip-2.mp4</filepath>
-                <starttime>320000</starttime> <!-- 片段开始时间（毫秒） -->
+            <clip id="v4c7x1z5a8s2d6f9g3j7k" name="户外活动">
                 <duration>5000</duration> <!-- 片段时长（毫秒） -->
                 <comment>......</comment>
                 <!--片段备注说明 -->
@@ -152,28 +155,24 @@
                 <!-- 剪辑区域1， 对应的素材集：套裙 -->
                 <area id="h2k5p8s1d4f7g0j3q6w9e" mediaset="serhw8q52e9zp4s273w" index=2>
                     <source>                        
-                        <x-point>400</x-point> <!-- 剪辑起点X坐标 -->
-                        <y-point>300</y-point> <!-- 剪辑起点y坐标 -->
-                        <width>100</width> <!-- 剪辑宽度 -->
-                        <height>180</height> <!-- 剪辑高度 -->
-                        <starttime>3000</starttime> <!-- 从该素材的第几毫秒开始剪辑-->
                         <duration>5000</duration> <!-- 剪辑时长（毫秒） -->
                     </source>
                     <!-- 变换规则 -->
                     <transform>
-                        <scale>0.8</scale> <!-- 缩放 -->
-                        <rotate>0</rotate> <!-- 旋转角度（顺时针） -->
                         <mirror>none</mirror> <!--镜像效果 none | horizontal | vertical -->
-                        <speed>0.8</speed> <!-- 播放速度 1-原速  <1 慢放  >快放 -->
+                        <speed>0.8</speed> <!-- 播放速度 1-原速  <1 慢放  >1快放 -->
                     </transform>
                     <!-- 目标区域定义 -->
                     <destination> 
                         <position x="500" y="350" /> <!-- 目标起点坐标 -->
-                        <starttime>3000</starttime> <!-- 在目标视频片段中第几毫秒插入-->
+                        <width>100</width> <!-- 目标宽度 -->
+                        <height>180</height> <!-- 目标高度 -->                      
                         <!-- 注：在目标视频中的播放时长 = source.duration * trasform.speed -->
                     </destination>
                 </area>
+                ......
             </clip>
+            ......
         </clips>
     </template>
 

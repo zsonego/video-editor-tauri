@@ -323,24 +323,90 @@ materialMappingList 字段说明：
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | templateId | string | 模板 ID |
-| version | string | 版本号 |
+| version | string | 版本号，仅保留两段格式，例如 `1.0`、`1.1`、`2.0` |
 | templateFileUrl | string | 模板文件下载地址，XML 格式 |
-| materialPackageUrl | string | 模板素材压缩包下载地址 |
+| materialPackageUrl | string | 模板素材压缩包下载地址，ZIP 格式 |
 
 ### 响应示例
 
 ```json
 {
   "templateId": "tpl001",
-  "version": "1.0.0",
-  "templateFileUrl": "https://example.com/templates/tpl001.xml",
-  "materialPackageUrl": "https://example.com/templates/tpl001.zip"
+  "version": "1.0",
+  "templateFileUrl": "/api/template/download",
+  "materialPackageUrl": "/api/template/material-package/download"
 }
 ```
 
 ---
 
-## API-8 收藏/取消收藏
+## API-8 下载剪辑模板文件
+
+### 接口地址
+
+`GET /api/template/download`
+
+### 接口说明
+
+下载服务根目录下的 `template.xml` 模板文件。
+
+### 请求参数
+
+无
+
+### 响应说明
+
+成功时直接返回 XML 文件内容，响应头如下：
+
+| 响应头 | 说明 |
+| --- | --- |
+| Content-Type | `application/xml; charset=utf-8` |
+| Content-Disposition | `attachment; filename="template.xml"` |
+
+### 调用示例
+
+```text
+GET http://localhost:9527/api/template/download
+```
+
+---
+
+## API-9 下载模板素材包
+
+### 接口地址
+
+`GET /api/template/material-package/download`
+
+### 接口说明
+
+读取服务根目录 `assets` 文件夹下的所有视频素材，并打包为 `materials.zip` 返回。
+
+当前会打包以下视频后缀文件：
+
+`mp4`、`mov`、`avi`、`mkv`、`webm`、`m4v`
+
+### 请求参数
+
+无
+
+### 响应说明
+
+成功时直接返回 ZIP 文件内容，响应头如下：
+
+| 响应头 | 说明 |
+| --- | --- |
+| Content-Type | `application/zip` |
+| Content-Disposition | `attachment; filename="materials.zip"` |
+
+### 调用示例
+
+```text
+GET http://localhost:9527/api/template/material-package/download
+```
+
+---
+
+## API-10 收藏/取消收藏
 
 ### 接口地址
 
@@ -373,7 +439,7 @@ materialMappingList 字段说明：
 
 ---
 
-## API-9 新建工程基本信息
+## API-11 新建工程基本信息
 
 ### 接口地址
 
@@ -408,7 +474,7 @@ materialMappingList 字段说明：
 
 ---
 
-## API-10 更新工程信息
+## API-12 更新工程信息
 
 ### 接口地址
 
@@ -441,7 +507,7 @@ materialMappingList 字段说明：
 
 ---
 
-## API-11 从工程导出视频
+## API-13 从工程导出视频
 
 ### 接口地址
 
@@ -478,7 +544,7 @@ materialMappingList 字段说明：
 
 ---
 
-## API-12 上传结果视频
+## API-14 上传结果视频
 
 ### 接口地址
 
@@ -510,7 +576,7 @@ materialMappingList 字段说明：
 
 ---
 
-## API-13 发送短信验证码
+## API-15 发送短信验证码
 
 ### 接口地址
 
@@ -543,7 +609,7 @@ materialMappingList 字段说明：
 
 ---
 
-## API-14 修改密码
+## API-16 修改密码
 
 ### 接口地址
 
@@ -578,7 +644,7 @@ materialMappingList 字段说明：
 
 ---
 
-## API-15 退出登录
+## API-17 退出登录
 
 ### 接口地址
 
@@ -606,4 +672,3 @@ materialMappingList 字段说明：
   "message": "退出成功"
 }
 ```
-

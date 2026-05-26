@@ -99,7 +99,7 @@ function close(id) {
   top: 20px;
   left: 50%;
   z-index: 9999;
-  width: min(560px, calc(100vw - 32px));
+  width: min(420px, calc(100vw - 40px));
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -111,10 +111,10 @@ function close(id) {
   pointer-events: auto;
   display: flex;
   align-items: flex-start;
-  gap: 12px;
-  padding: 14px 16px;
+  gap: 10px;
+  padding: 12px 13px;
   border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 16px;
+  border-radius: 12px;
   background: rgba(7, 18, 42, 0.94);
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
   backdrop-filter: blur(18px);
@@ -169,13 +169,13 @@ function close(id) {
 
 .message-close {
   flex: 0 0 auto;
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   display: grid;
   place-items: center;
   padding: 0;
   border: 0;
-  border-radius: 10px;
+  border-radius: 8px;
   background: rgba(255, 255, 255, 0.04);
   color: rgba(255, 255, 255, 0.58);
 }

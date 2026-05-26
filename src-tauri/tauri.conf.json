@@ -19,7 +19,15 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$HOME/**",
+          "$LOCALDATA/aicut/template/**",
+          "$APPDATA/aicut/template/**"
+        ]
+      }
     }
   },
   "bundle": {
@@ -29,8 +37,8 @@
       "icons/logo.png",
       "icons/logo.png",
       "icons/logo.png",
-      "icons/icut.icns",
-      "icons/icut.ico"
+      "icons/AICut.icns",
+      "icons/AICut.ico"
     ]
   }
 }

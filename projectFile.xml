@@ -5,9 +5,9 @@
     <!-- 模板定义 -->
     <project id="o5p8a1s4d7f0g3j6q9w2e" name="顾小童周岁纪念" version="1.0" timeunit="millisecond">
         <meta>
-            <template id="seqvvgcrrjs0yizf4tn" version="1.0"</template> <!--使用的模板信息 -->        
+            <template id="seqvvgcrrjs0yizf4tn" version="1.0"></template> <!--使用的模板信息 -->        
             <status>0</status> <!--状态：0-编辑中 1-已导出 -->
-            <last-updtime>2026-05-19 16:35:20 /> <!--最近更新时间 -->            
+            <last-updtime>2026-05-19 16:35:20</last-updtime> <!--最近更新时间 -->            
         </meta>
         <!-- ========== 素材集 ========== -->
         <!-- assets目录下为已替换为用户实际的，assets-demo下为未替换的示例 -->

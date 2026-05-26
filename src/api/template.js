@@ -7,3 +7,7 @@ export function getTemplateCategories(data = {}) {
 export function getTemplates(data = {}) {
   return request("/api/templates", { data });
 }
+
+export function getTemplateDetail(data = {}) {
+  return request("/api/template/detail", { data });
+}

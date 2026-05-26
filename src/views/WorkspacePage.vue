@@ -7,8 +7,15 @@ import {
   reactive,
   ref,
 } from 'vue';
+import { convertFileSrc, invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { getMyProjects } from '../api/project';
-import { getTemplateCategories, getTemplates } from '../api/template';
+import {
+  getTemplateCategories,
+  getTemplateDetail,
+  getTemplates,
+} from '../api/template';
 import { systemMessage } from '../utils/message';
 import logoImage from '../assets/logo.png';
 
@@ -21,8 +28,8 @@ const weddingImage =
   'https://lh3.googleusercontent.com/aida-public/AB6AXuAKUjxUCNitv9tXTzfgFJpJ4Ej2XBvFvC1QMHEvkCguRpbLnSBT-kk_vXIIoyD7N1vu54LtsFl8I-qrAPoQ5ugSt1UZmfUCbNYNGVgsNUoAepuaVksq5X2i4VxN6p5yZNN7-98lafAPrgTXJlKD7WRNAb90zS7OTDMthSpKGyVhyjdK3iFjr4wWg4esqt0UjogKVo_E-UDa7AgxhHefXqneVydxtp_jQThpAjL49uUw3p6I71h6jgJM4UVFvJNhRD7JEsqJepC6_ZD5';
 const travelImage =
   'https://lh3.googleusercontent.com/aida-public/AB6AXuDt5PYLfvUtvuJfd9ZXljOhgs6n3G7R0iINSiXx-ZoXEu-JOruIUsel9dwYttKDKMJnsKyDopxdF1OY733OuzNsL3fzYyTIDqFUACrdIIv2WryUoF4T3fSxwuP0j8mZObr1sEQwYVdgKlIoermFPZEBOVTTSBzlsJ8xe_pFnMkrTTANjkAS3J7tgsoYud_mRfeEeHnCF8uJ4VIt6O-cmoH_30lPeXfZjAqGD3k7VhyUN2QIdI-_YCtH7HLHbJyCB7-YCGLmEaCFw9BH';
-const previewImage =
-  'https://lh3.googleusercontent.com/aida-public/AB6AXuAMcVYT2orNSDIC1Dv0--M8nRRmT3Z9u7QTh4ZauGBirOaFxvTQTX0Oy24AemimD6kAYfwyMZadW9d6ymXe8RbrOA9DCqlfmyjoC5BGRhUzB8FsE0ZUlTKOfEnXypm4GpzVoGQm_h4jb2P0z5ZY9vDEoO9eUqfGKS8PnooFtD4fxqwhKvd1QYIOTervYiOuZIO2e-_SOKMM9fGYOuiKIABVknNauRvRFZheB9iwOFViroat8J0NFhKjLczc5nerSjIT7iCRyk9Esps';
+const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:9527';
 
 const categories = ref([]);
 const recommendationCards = [
@@ -78,16 +85,6 @@ const templateSegments = {
     { name: '片段 3: 伴娘合影', shot: '中景', count: 3 },
   ],
 };
-const sourcePool = [
-  { name: '视频 1', duration: '00:08', tag: '主镜头' },
-  { name: '视频 2', duration: '00:12', tag: '特写' },
-  { name: '视频 3', duration: '00:10', tag: '转场' },
-  { name: '视频 4', duration: '00:15', tag: '氛围' },
-  { name: '视频 5', duration: '00:09', tag: '补充' },
-  { name: '视频 6', duration: '00:18', tag: '空镜' },
-  { name: '视频 7', duration: '00:11', tag: '细节' },
-  { name: '视频 8', duration: '00:14', tag: '收尾' },
-];
 const finishedGroups = [
   {
     name: '主线叙事',
@@ -123,7 +120,7 @@ const finishedVideos = [
   },
 ];
 
-const activeCategory = ref(0);
+const activeCategory = ref(-1);
 const sidebarHidden = ref(true);
 const currentViewState = ref('subtopics');
 const mainMode = ref('grid');
@@ -131,9 +128,23 @@ const activeTemplateName = ref('');
 const previewTitle = ref('新娘备婚');
 const previewSubtitle = ref('5个片段 · 记录点滴');
 const previewModalVisible = ref(false);
+const templateDetailLoading = ref(false);
+const startEditingLoading = ref(false);
+const templateDownloadVisible = ref(false);
+const templateDownloadCanceling = ref(false);
+const templateDownloadTitle = ref('');
+const templateDownloadStatus = ref('');
+const templateDownloadProgress = ref(0);
+const templateDownloadCancelRequested = ref(false);
+const activeDownloadId = ref('');
+const activeTemplateId = ref('');
+const activeTemplateLocalInfo = ref(null);
+const activeTemplateDemoSource = ref(videoSource);
+const activeProjectDir = ref('');
 const timelineCollapsed = ref(true);
 const showFinishedControls = ref(false);
 const selectedVideoName = ref('视频 1');
+const selectedVideoKey = ref('');
 const selectedStyleName = ref('视频轨道 V1');
 const subtitleText = ref('这是一段字幕内容');
 const timelinePulse = ref(false);
@@ -164,6 +175,9 @@ const playerSpeed = ref(1);
 const playerProgress = ref(0);
 const playerTimeLabel = ref('00:00 / 00:00');
 const modalPaused = ref(true);
+const selectedVideoDuration = ref('00:00');
+const selectedVideoSource = ref(videoSource);
+const importedVideoObjectUrls = new Set();
 
 const timeline = reactive({
   totalDuration: 50,
@@ -171,20 +185,19 @@ const timeline = reactive({
   startTime: 0,
 });
 
-const stylePresets = ref([
-  { id: 1, name: '极简留白', count: 5, imported: false, videos: [] },
-  { id: 2, name: '胶片质感', count: 4, imported: false, videos: [] },
-  { id: 3, name: '动态转场', count: 2, imported: false, videos: [] },
-]);
-
 const draftProjects = ref([]);
+const segmentImportState = reactive({});
 
 const sidebarContextLabel = computed(() => {
   if (currentViewState.value === 'finished') return '成片素材';
-  if (currentViewState.value === 'segments') return '模板详情';
-  if (currentViewState.value === 'import') return '风格库';
+  if (currentViewState.value === 'segments') return '';
+  if (currentViewState.value === 'import') return '';
   return '';
 });
+const sidebarToggleVisible = computed(
+  () => activeCategory.value >= 0 || currentViewState.value !== 'subtopics',
+);
+const timelineToggleVisible = computed(() => mainMode.value === 'player');
 const sidebarTitle = computed(() => {
   if (currentViewState.value === 'finished') return '已导入视频';
   if (currentViewState.value === 'segments') return activeTemplateName.value;
@@ -194,6 +207,24 @@ const sidebarTitle = computed(() => {
 const visibleSegments = computed(
   () =>
     templateSegments[activeTemplateName.value] || templateSegments['婚礼亮点'],
+);
+const importSegments = computed(() =>
+  visibleSegments.value.map((segment, index) => {
+    const id = `${activeTemplateName.value || 'template'}-${index}-${segment.name}`;
+    const state = segmentImportState[id] || {};
+    const count = Number(segment.count) || 0;
+    const videos = state.videos || [];
+    const remainingCount = Math.max(0, count - videos.length);
+
+    return {
+      ...segment,
+      id,
+      count,
+      imported: Boolean(state.imported),
+      videos,
+      remainingCount,
+    };
+  }),
 );
 const visibleDraftProjects = computed(() =>
   draftFilter.value === 'all'
@@ -210,7 +241,24 @@ const timelineLeftPercent = computed(
 );
 const timelineRangeLabel = computed(() => {
   const endTime = timeline.startTime + timeline.selectedDuration;
-  return `${timeline.startTime.toFixed(1)}s - ${endTime.toFixed(1)}s`;
+  return `${formatTimelineTick(timeline.startTime)} - ${formatTimelineTick(endTime)}`;
+});
+const timelineRulerTicks = computed(() => {
+  const totalDuration = Math.max(1, Number(timeline.totalDuration) || 1);
+  const targetTickCount = 5;
+  const rawStep = totalDuration / targetTickCount;
+  const step = Math.max(1, Math.ceil(rawStep));
+  const ticks = [];
+
+  for (let value = 0; value < totalDuration; value += step) {
+    ticks.push(value);
+  }
+
+  if (ticks[ticks.length - 1] !== totalDuration) {
+    ticks.push(totalDuration);
+  }
+
+  return ticks;
 });
 const selectedClipTitle = computed(
   () => `${selectedVideoName.value} - 主体内容`,
@@ -251,6 +299,10 @@ function toggleSidebar(show) {
 
 function openPreview(title, subtitle) {
   showFinishedControls.value = false;
+  activeTemplateId.value = '';
+  activeTemplateLocalInfo.value = null;
+  activeTemplateDemoSource.value = videoSource;
+  activeProjectDir.value = '';
   activeTemplateName.value = title;
   previewTitle.value = title;
   previewSubtitle.value = subtitle;
@@ -260,7 +312,152 @@ function openPreview(title, subtitle) {
   resetModalPreviewVideo();
 }
 
+function getTemplateMaterialSummary(segments) {
+  const styleCount = segments.length;
+  const videoCount = segments.reduce(
+    (total, segment) => total + (Number(segment.count) || 0),
+    0,
+  );
+
+  return `${videoCount}个视频素材 · ${styleCount}类素材风格`;
+}
+
+function enterTemplatePreview(topic, templateId, localInfo) {
+  const title = topic.title || templateId;
+  const segments = parseTemplateSegments(localInfo.xmlContent);
+  const demoPath = parseTemplateDemoPath(localInfo.xmlContent);
+
+  templateSegments[title] = segments;
+  openPreview(title, getTemplateMaterialSummary(segments));
+  activeTemplateId.value = templateId;
+  activeTemplateLocalInfo.value = localInfo;
+  activeTemplateDemoSource.value = resolveTemplateVideoSource(demoPath) || videoSource;
+  activeProjectDir.value = '';
+  nextTick(resetModalPreviewVideo);
+}
+
+async function openTemplatePreview(topic) {
+  if (templateDetailLoading.value) {
+    return;
+  }
+
+  const templateId = topic.templateId || topic.id;
+
+  if (!templateId) {
+    systemMessage.error('模板 ID 不存在');
+    return;
+  }
+
+  templateDetailLoading.value = true;
+  templateDownloadCanceling.value = false;
+  templateDownloadCancelRequested.value = false;
+  templateDownloadTitle.value = topic.title || templateId;
+  templateDownloadStatus.value = '';
+  templateDownloadProgress.value = 0;
+  activeDownloadId.value = '';
+  let unlistenProgress = null;
+
+  try {
+    const detailResponse = await getTemplateDetail({ templateId });
+    const detail = getResponsePayload(detailResponse) || {};
+    const templateFileUrl = detail.templateFileUrl;
+    const materialPackageUrl = detail.materialPackageUrl;
+    const templateVersion = String(detail.version ?? '');
+
+    if (!templateFileUrl || !materialPackageUrl) {
+      throw new Error('模板详情缺少下载地址');
+    }
+
+    const cachedInfo = await invoke('get_cached_template_assets', {
+      templateId,
+      templateVersion,
+    });
+    if (cachedInfo) {
+      enterTemplatePreview(topic, templateId, cachedInfo);
+      return;
+    }
+
+    const downloadId = `${templateId}-${Date.now()}`;
+    activeDownloadId.value = downloadId;
+    templateDownloadVisible.value = true;
+    templateDownloadStatus.value = '正在获取模板详情...';
+
+    unlistenProgress = await listen('template-download-progress', (event) => {
+      const payload = event.payload || {};
+      if (payload.downloadId !== downloadId) return;
+
+      templateDownloadProgress.value = Number(payload.progress) || 0;
+      templateDownloadStatus.value =
+        payload.status || templateDownloadStatus.value;
+    });
+
+    if (templateDownloadCancelRequested.value) {
+      throw new Error('Download canceled');
+    }
+
+    templateDownloadStatus.value = '正在下载模板 XML 和素材包...';
+    templateDownloadProgress.value = Math.max(
+      templateDownloadProgress.value,
+      3,
+    );
+    const localInfo = await invoke('prepare_template_assets', {
+      templateId,
+      templateVersion,
+      templateFileUrl,
+      materialPackageUrl,
+      apiBaseUrl: API_BASE_URL,
+      downloadId,
+    });
+    templateDownloadStatus.value = '正在解析模板片段...';
+    templateDownloadProgress.value = Math.max(
+      templateDownloadProgress.value,
+      98,
+    );
+    enterTemplatePreview(topic, templateId, localInfo);
+  } catch (error) {
+    const message = error?.message || String(error || '');
+    const isCanceled =
+      message.includes('取消') || message.toLowerCase().includes('canceled');
+    if (!isCanceled) {
+      systemMessage.error(message || '模板详情加载失败');
+    }
+  } finally {
+    templateDetailLoading.value = false;
+    templateDownloadVisible.value = false;
+    templateDownloadCanceling.value = false;
+    templateDownloadCancelRequested.value = false;
+    templateDownloadStatus.value = '';
+    templateDownloadProgress.value = 0;
+    activeDownloadId.value = '';
+    if (unlistenProgress) {
+      unlistenProgress();
+    }
+  }
+}
+
+async function cancelTemplateDownload() {
+  if (!activeDownloadId.value || templateDownloadCanceling.value) return;
+
+  const downloadId = activeDownloadId.value;
+  templateDownloadCanceling.value = true;
+  templateDownloadCancelRequested.value = true;
+  templateDownloadStatus.value = '正在取消下载...';
+
+  try {
+    await invoke('cancel_template_download', {
+      downloadId,
+    });
+  } catch (error) {
+    systemMessage.error(error?.message || '取消下载失败');
+    templateDownloadCanceling.value = false;
+  }
+}
+
 function hidePreviewModal() {
+  if (startEditingLoading.value) {
+    return;
+  }
+
   previewModalVisible.value = false;
   resetModalPreviewVideo();
   if (currentViewState.value === 'segments') {
@@ -268,20 +465,58 @@ function hidePreviewModal() {
   }
 }
 
-function confirmSelection() {
-  previewModalVisible.value = false;
-  startEditing();
+async function confirmSelection() {
+  if (startEditingLoading.value) {
+    return;
+  }
+
+  startEditingLoading.value = true;
+
+  try {
+    const started = await startEditing();
+    if (started) {
+      previewModalVisible.value = false;
+      resetModalPreviewVideo();
+    }
+  } finally {
+    startEditingLoading.value = false;
+  }
 }
 
-function startEditing() {
+async function startEditing() {
+  if (activeTemplateId.value && !activeProjectDir.value) {
+    try {
+      const workspace = await invoke('create_project_workspace', {
+        templateId: activeTemplateId.value,
+      });
+      activeProjectDir.value = workspace.projectDir;
+    } catch (error) {
+      systemMessage.error(error?.message || '项目目录创建失败');
+      return false;
+    }
+  }
+
+  await initializeDefaultTemplateAssets();
   currentViewState.value = 'import';
   mainMode.value = 'player';
   timelineCollapsed.value = false;
   showFinishedControls.value = false;
-  nextTick(() => {
+  await nextTick();
+
+  const firstSegmentWithVideo = importSegments.value.find(
+    (segment) => segment.videos.length > 0,
+  );
+  if (firstSegmentWithVideo) {
+    selectVideoForTimeline(
+      firstSegmentWithVideo.videos[0],
+      firstSegmentWithVideo.name,
+    );
+  } else {
     selectVideoForTimeline('视频 1', '视频轨道 V1');
-    schedulePlayerResize();
-  });
+  }
+  schedulePlayerResize();
+
+  return true;
 }
 
 function handleSidebarBack() {
@@ -293,25 +528,328 @@ function handleSidebarBack() {
     previewModalVisible.value = true;
   } else if (currentViewState.value === 'segments') {
     currentViewState.value = 'subtopics';
+    previewModalVisible.value = false;
+    resetModalPreviewVideo();
   }
 }
 
-function oneClickImportStyle(style) {
-  if (style.imported) return;
-  style.videos = [...sourcePool]
-    .sort(() => Math.random() - 0.5)
-    .slice(0, style.count);
-  style.imported = true;
-  if (style.videos[0]) {
-    selectVideoForTimeline(style.videos[0].name, style.name);
+function getSegmentImportState(segmentId) {
+  return segmentImportState[segmentId] || { imported: false, videos: [] };
+}
+
+function getFileNameFromPath(filePath) {
+  return String(filePath || '')
+    .replaceAll('\\', '/')
+    .split('/')
+    .filter(Boolean)
+    .pop() || '视频素材';
+}
+
+function joinLocalPath(basePath, relativePath) {
+  const separator = String(basePath || '').includes('\\') ? '\\' : '/';
+  const base = String(basePath || '').replace(/[\\/]+$/g, '');
+  let relative = String(relativePath || '')
+    .replaceAll('\\', '/')
+    .replace(/^[\\/]+|[\\/]+$/g, '');
+
+  if (separator === '\\') {
+    relative = relative.replaceAll('/', '\\');
+  }
+
+  return [base, relative].filter(Boolean).join(separator);
+}
+
+function resolveTemplateAssetPath(filePath) {
+  const localInfo = activeTemplateLocalInfo.value || {};
+  const normalizedPath = String(filePath || '')
+    .replaceAll('\\', '/')
+    .replace(/^\.\//, '');
+
+  if (!normalizedPath) return '';
+  if (/^[a-zA-Z]:\//.test(normalizedPath) || normalizedPath.startsWith('/')) {
+    return normalizedPath;
+  }
+  if (normalizedPath.startsWith('template/assets/')) {
+    return joinLocalPath(
+      localInfo.assetsDir,
+      normalizedPath.slice('template/assets/'.length),
+    );
+  }
+  if (normalizedPath.startsWith('assets/')) {
+    return joinLocalPath(
+      localInfo.assetsDir,
+      normalizedPath.slice('assets/'.length),
+    );
+  }
+  if (normalizedPath.startsWith('template/')) {
+    return joinLocalPath(
+      localInfo.templateDir,
+      normalizedPath.slice('template/'.length),
+    );
+  }
+
+  return joinLocalPath(localInfo.templateDir, normalizedPath);
+}
+
+function resolveTemplateVideoSource(filePath) {
+  const localPath = resolveTemplateAssetPath(filePath);
+  return localPath ? convertFileSrc(localPath) : '';
+}
+
+async function createTemplateAssetVideo(asset, index) {
+  const localPath = resolveTemplateAssetPath(asset.filepath);
+  const source = resolveTemplateVideoSource(asset.filepath);
+  const metadata = source
+    ? await getVideoMetadata(source)
+    : { durationSeconds: 0, duration: '--' };
+
+  return {
+    id: `template-${asset.id || index}-${asset.filepath || index}`,
+    name: getFileNameFromPath(asset.filepath) || `素材 ${index + 1}`,
+    duration: metadata.duration,
+    durationSeconds: metadata.durationSeconds,
+    source,
+    localPath,
+    assetId: asset.id || '',
+  };
+}
+
+async function initializeDefaultTemplateAssets() {
+  const segments = importSegments.value;
+
+  for (const segment of segments) {
+    const state = getSegmentImportState(segment.id);
+    if (state.videos.length > 0 || !segment.defaultAssets?.length) {
+      continue;
+    }
+
+    const videos = [];
+    for (const [index, asset] of segment.defaultAssets.entries()) {
+      videos.push(await createTemplateAssetVideo(asset, index));
+    }
+
+    segmentImportState[segment.id] = {
+      imported: videos.length >= (Number(segment.count) || 0),
+      videos,
+    };
   }
 }
 
-function selectVideoForTimeline(videoName, styleName = '') {
-  selectedVideoName.value = videoName;
+function getVideoMetadata(source) {
+  return new Promise((resolve) => {
+    const video = document.createElement('video');
+    video.preload = 'metadata';
+    video.onloadedmetadata = () => {
+      resolve({
+        durationSeconds: Number.isFinite(video.duration) ? video.duration : 0,
+        duration: formatPlayerTime(video.duration || 0),
+      });
+    };
+    video.onerror = () => {
+      resolve({
+        durationSeconds: 0,
+        duration: '--',
+      });
+    };
+    video.src = source;
+    video.load();
+  });
+}
+
+async function pickVideoPaths(multiple) {
+  const selected = await openDialog({
+    multiple,
+    filters: [
+      {
+        name: '视频文件',
+        extensions: ['mp4', 'mov', 'm4v', 'avi', 'mkv', 'webm'],
+      },
+    ],
+  });
+
+  if (!selected) return [];
+  return Array.isArray(selected) ? selected : [selected];
+}
+
+async function createImportedVideoFromPath(filePath, keySuffix = '', assetId = '') {
+  let localPath = filePath;
+  let projectFilepath = '';
+
+  if (activeProjectDir.value && assetId) {
+    const savedAsset = await invoke('save_project_asset', {
+      projectDir: activeProjectDir.value,
+      assetId,
+      sourcePath: filePath,
+    });
+
+    localPath = savedAsset.copiedPath || filePath;
+    projectFilepath = savedAsset.projectFilepath || '';
+  }
+
+  const source = convertFileSrc(localPath);
+  const metadata = await getVideoMetadata(source);
+  const suffix = keySuffix || Math.random().toString(36).slice(2);
+
+  return {
+    id: `imported-${Date.now()}-${suffix}`,
+    name: getFileNameFromPath(filePath),
+    duration: metadata.duration,
+    durationSeconds: metadata.durationSeconds,
+    source,
+    localPath,
+    assetId,
+    projectFilepath,
+  };
+}
+
+function revokeImportedVideo(video) {
+  if (video?.isObjectUrl && video.source && importedVideoObjectUrls.has(video.source)) {
+    URL.revokeObjectURL(video.source);
+    importedVideoObjectUrls.delete(video.source);
+  }
+}
+
+async function deleteProjectAssetFiles(assetPaths) {
+  if (!activeProjectDir.value || assetPaths.length === 0) return;
+
+  await invoke('delete_project_asset_files', {
+    projectDir: activeProjectDir.value,
+    assetPaths,
+  });
+}
+
+async function deleteReplacedProjectAssets(previousVideos, nextVideos = []) {
+  const nextPaths = new Set(
+    nextVideos.map((video) => video?.localPath).filter(Boolean),
+  );
+  const stalePaths = previousVideos
+    .map((video) => video?.localPath)
+    .filter((localPath) => localPath && !nextPaths.has(localPath));
+
+  await deleteProjectAssetFiles([...new Set(stalePaths)]);
+}
+
+function buildFilledImportPaths(filePaths, count) {
+  if (count <= 0 || filePaths.length === 0) return [];
+
+  if (filePaths.length >= count) {
+    return filePaths.slice(0, count);
+  }
+
+  return Array.from(
+    { length: count },
+    (_, index) => filePaths[index % filePaths.length],
+  );
+}
+
+async function openImportFilePicker(segment) {
+  const filePaths = await pickVideoPaths(true);
+  if (filePaths.length === 0) return;
+
+  const previousState = getSegmentImportState(segment.id);
+  const targetCount = Number(segment.count) || 0;
+  const selectedPaths = buildFilledImportPaths(filePaths, targetCount);
+  const importedVideos = [];
+
+  try {
+    for (const [index, filePath] of selectedPaths.entries()) {
+      const assetId = segment.defaultAssets?.[index]?.id || '';
+      importedVideos.push(
+        await createImportedVideoFromPath(
+          filePath,
+          `${segment.id}-${index}`,
+          assetId,
+        ),
+      );
+    }
+  } catch (error) {
+    systemMessage.error(error?.message || '素材导入失败');
+    return;
+  }
+
+  try {
+    await deleteReplacedProjectAssets(previousState.videos, importedVideos);
+  } catch (error) {
+    systemMessage.error(error?.message || '旧素材清理失败');
+  }
+
+  previousState.videos.forEach(revokeImportedVideo);
+  segmentImportState[segment.id] = {
+    imported: importedVideos.length >= targetCount,
+    videos: importedVideos,
+  };
+
+  if (importedVideos[0]) {
+    selectVideoForTimeline(importedVideos[0], segment.name);
+  }
+}
+
+async function openReplaceFilePicker(segment, videoIndex) {
+  const [filePath] = await pickVideoPaths(false);
+  const previousState = getSegmentImportState(segment.id);
+
+  if (!filePath || videoIndex < 0 || videoIndex >= previousState.videos.length) {
+    return;
+  }
+
+  const videos = [...previousState.videos];
+  const assetId =
+    videos[videoIndex]?.assetId || segment.defaultAssets?.[videoIndex]?.id || '';
+  let replacementVideo;
+
+  try {
+    replacementVideo = await createImportedVideoFromPath(
+      filePath,
+      `${segment.id}-replace-${videoIndex}`,
+      assetId,
+    );
+  } catch (error) {
+    systemMessage.error(error?.message || '素材替换失败');
+    return;
+  }
+
+  try {
+    await deleteReplacedProjectAssets([videos[videoIndex]], [replacementVideo]);
+  } catch (error) {
+    systemMessage.error(error?.message || '旧素材清理失败');
+  }
+
+  revokeImportedVideo(videos[videoIndex]);
+  videos[videoIndex] = replacementVideo;
+
+  segmentImportState[segment.id] = {
+    imported: previousState.imported,
+    videos,
+  };
+
+  selectVideoForTimeline(replacementVideo, segment.name);
+}
+
+function selectVideoForTimeline(video, styleName = '') {
+  const videoInfo =
+    typeof video === 'string'
+      ? { name: video, duration: selectedVideoDuration.value }
+      : video;
+
+  selectedVideoName.value = videoInfo.name;
+  selectedVideoKey.value = videoInfo.id || videoInfo.name;
+  selectedVideoDuration.value = videoInfo.duration || '00:00';
+  selectedVideoSource.value = videoInfo.source || videoSource;
+  if (
+    Number.isFinite(videoInfo.durationSeconds) &&
+    videoInfo.durationSeconds > 0
+  ) {
+    const duration = Math.max(1, Math.round(videoInfo.durationSeconds));
+    timeline.totalDuration = duration;
+    timeline.selectedDuration = duration;
+    timeline.startTime = clampTimelineStart(timeline.startTime);
+  }
   if (styleName) {
     selectedStyleName.value = styleName;
   }
+  nextTick(() => {
+    resetMainPlayer();
+  });
   timelinePulse.value = true;
   window.setTimeout(() => {
     timelinePulse.value = false;
@@ -480,6 +1018,17 @@ function formatPlayerTime(value) {
   return `${minutes}:${seconds}`;
 }
 
+function formatTimelineTick(value) {
+  if (!Number.isFinite(value)) return '0s';
+  const seconds = Math.max(0, Math.round(value));
+
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+
+  return formatPlayerTime(seconds);
+}
+
 function updatePlayerControls() {
   const video = mainVideoRef.value;
   if (!video) return;
@@ -623,6 +1172,122 @@ function getResponseList(response) {
   return Array.isArray(response) ? response : [];
 }
 
+function getResponsePayload(response) {
+  return response?.data && !Array.isArray(response.data)
+    ? response.data
+    : response;
+}
+
+function parseTemplateDemoPath(xmlContent) {
+  const xml = new DOMParser().parseFromString(xmlContent, 'text/xml');
+
+  if (!xml.querySelector('parsererror')) {
+    return xml.querySelector('demo-path')?.textContent?.trim() || '';
+  }
+
+  return getElementText(xmlContent, 'demo-path');
+}
+
+function parseTemplateSegments(xmlContent) {
+  const xml = new DOMParser().parseFromString(xmlContent, 'text/xml');
+
+  if (xml.querySelector('parsererror')) {
+    return parseTemplateSegmentsFromText(xmlContent);
+  }
+
+  return Array.from(xml.querySelectorAll('media-asset')).map(
+    (mediaAsset, index) => {
+      const directChildren = Array.from(mediaAsset.children);
+      const defaultAsset = directChildren.find(
+        (child) => child.tagName.toLowerCase() === 'default-asset',
+      );
+      const defaultAssets = defaultAsset
+        ? Array.from(defaultAsset.children).filter(
+            (child) => child.tagName.toLowerCase() === 'asset',
+          )
+        : [];
+      const defaultAssetItems = defaultAssets.map((asset) => ({
+        id: asset.getAttribute('id') || '',
+        filepath: asset.getAttribute('filepath') || '',
+      }));
+      const comment =
+        directChildren
+          .find((child) => child.tagName.toLowerCase() === 'comment')
+          ?.textContent?.trim() || '';
+      const name =
+        mediaAsset.getAttribute('name') ||
+        directChildren
+          .find((child) => child.tagName.toLowerCase() === 'name')
+          ?.textContent?.trim() ||
+        mediaAsset.getAttribute('id') ||
+        `素材 ${index + 1}`;
+
+      return {
+        name,
+        shot: comment,
+        count: defaultAssets.length,
+        defaultAssets: defaultAssetItems,
+      };
+    },
+  );
+}
+
+function getElementText(source, name) {
+  const match = source.match(
+    new RegExp(`<${name}\\b[^>]*>([\\s\\S]*?)<\\/${name}>`, 'i'),
+  );
+  return match?.[1]?.trim() || '';
+}
+
+function getAttributeValue(source, name) {
+  const quotedMatch = source.match(
+    new RegExp(`${name}\\s*=\\s*["']([^"']*)["']`, 'i'),
+  );
+  if (quotedMatch?.[1]) {
+    return quotedMatch[1].trim();
+  }
+
+  const unquotedMatch = source.match(
+    new RegExp(`${name}\\s*=\\s*([^\\s>]+)`, 'i'),
+  );
+  return unquotedMatch?.[1]?.trim() || '';
+}
+
+function parseAssetTags(source) {
+  return Array.from(source.matchAll(/<asset\b([^>]*)\/?>/gi)).map((match) => {
+    const attributes = match[1] || '';
+
+    return {
+      id: getAttributeValue(attributes, 'id'),
+      filepath: getAttributeValue(attributes, 'filepath'),
+    };
+  });
+}
+
+function parseTemplateSegmentsFromText(xmlContent) {
+  const mediaAssetMatches = Array.from(
+    xmlContent.matchAll(/<media-asset\b([^>]*)>([\s\S]*?)<\/media-asset>/gi),
+  );
+
+  return mediaAssetMatches.map((match, index) => {
+    const attributes = match[1] || '';
+    const body = match[2] || '';
+    const defaultAssetBody = getElementText(body, 'default-asset');
+    const name =
+      getAttributeValue(attributes, 'name') ||
+      getElementText(body, 'name') ||
+      getAttributeValue(attributes, 'id') ||
+      `素材 ${index + 1}`;
+
+    return {
+      name,
+      shot: getElementText(body, 'comment'),
+      count: (defaultAssetBody.match(/<asset\b/gi) || []).length,
+      defaultAssets: parseAssetTags(defaultAssetBody),
+    };
+  });
+}
+
 function mapTemplateTopic(template, index) {
   const clipCount = Number(template.clipCount) || 0;
   const title = template.templateName || template.title || `模板 ${index + 1}`;
@@ -699,16 +1364,8 @@ async function loadTemplateCategories() {
     const list = getResponseList(response);
 
     categories.value = list;
-
-    if (activeCategory.value >= list.length) {
-      activeCategory.value = 0;
-    }
-
-    if (list.length > 0) {
-      await loadTemplatesByCategory(list[activeCategory.value]);
-    } else {
-      subtopics.value = [];
-    }
+    activeCategory.value = -1;
+    subtopics.value = [];
   } catch (error) {
     systemMessage.error(error?.message || '模板分类加载失败');
   }
@@ -740,7 +1397,7 @@ async function loadMyProjects() {
 }
 
 onMounted(() => {
-  document.title = '艾咔 · icut - 视频快速剪辑软件';
+  document.title = '艾咔 · AICut - 视频快速剪辑软件';
   document.documentElement.classList.add('dark');
   window.addEventListener('resize', schedulePlayerResize);
   loadTemplateCategories();
@@ -763,6 +1420,10 @@ onBeforeUnmount(() => {
   if (timelineUpHandler) {
     window.removeEventListener('pointerup', timelineUpHandler);
   }
+  importedVideoObjectUrls.forEach((objectUrl) => {
+    URL.revokeObjectURL(objectUrl);
+  });
+  importedVideoObjectUrls.clear();
 });
 </script>
 
@@ -933,7 +1594,7 @@ onBeforeUnmount(() => {
               <h3
                 class="text-[13px] font-bold text-on-surface-variant uppercase tracking-widest whitespace-nowrap mb-2"
               >
-                模板
+                主题名称
               </h3>
               <div
                 v-if="templatesLoading"
@@ -947,23 +1608,27 @@ onBeforeUnmount(() => {
               >
                 暂无模板
               </div>
-              <div v-else class="grid grid-cols-1 gap-2">
+              <div
+                v-else
+                class="subtopic-selector-grid grid grid-cols-1 gap-2 templateWrapper"
+              >
                 <button
                   v-for="topic in subtopics"
                   :key="topic.id"
-                  class="px-2 py-2 rounded bg-surface-container border border-outline-variant text-on-surface-variant hover:border-electric-blue/40 hover:bg-surface-container-high transition-all flex flex-col gap-1 text-left group overflow-hidden"
-                  @click="openPreview(topic.title, topic.subtitle)"
+                  class="px-3 py-2.5 rounded bg-surface-container border border-outline-variant text-on-surface-variant hover:border-electric-blue/40 hover:bg-surface-container-high transition-all flex flex-col gap-1.5 text-left group overflow-hidden"
+                  :disabled="templateDetailLoading"
+                  @click="openTemplatePreview(topic)"
                 >
                   <div class="flex items-center gap-2">
-                    <div class="text-[10px] font-bold text-on-surface truncate">
+                    <div class="text-[13px] font-bold text-on-surface truncate">
                       {{ topic.title }} ({{ topic.count }})
                     </div>
                   </div>
                   <div class="flex gap-2">
-                    <span class="text-[9px] opacity-60"
+                    <span class="text-[11px] opacity-70"
                       >素材: {{ topic.material }}</span
                     >
-                    <span class="text-[9px] opacity-60"
+                    <span class="text-[11px] opacity-70"
                       >时长: {{ topic.duration }}</span
                     >
                   </div>
@@ -978,11 +1643,11 @@ onBeforeUnmount(() => {
                 <h3
                   class="text-[10px] font-bold text-on-surface-variant uppercase tracking-widest"
                 >
-                  模板片段详情
+                  模板素材详情
                 </h3>
               </div>
               <div
-                class="flex-1 overflow-y-auto custom-scrollbar space-y-3 pt-1"
+                class="flex-1 overflow-y-auto custom-scrollbar space-y-3 pt-1 templateDetailWrapper"
               >
                 <div
                   v-for="segment in visibleSegments"
@@ -994,16 +1659,14 @@ onBeforeUnmount(() => {
                   </div>
                   <div class="flex flex-col gap-1 mt-1.5">
                     <div class="flex justify-between text-[10px]">
-                      <span class="text-on-surface-variant">主题标签:</span>
-                      <span class="text-electric-blue font-bold">{{
-                        segment.shot
-                      }}</span>
-                    </div>
-                    <div class="flex justify-between text-[10px]">
                       <span class="text-on-surface-variant">所需素材:</span>
                       <span class="text-electric-blue font-bold"
                         >{{ segment.count }} 个视频</span
                       >
+                    </div>
+                    <div class="flex justify-between text-[10px]">
+                      <span class="text-on-surface-variant">素材时长:</span>
+                      <span class="text-electric-blue font-bold"></span>
                     </div>
                   </div>
                 </div>
@@ -1041,7 +1704,7 @@ onBeforeUnmount(() => {
                         :key="video.name"
                         class="flex items-center justify-between p-2 rounded bg-surface-container-lowest/50 border border-white/5 hover:border-electric-blue/40 transition-all cursor-pointer group"
                         :class="{
-                          'is-selected': selectedVideoName === video.name,
+                          'is-selected': selectedVideoKey === video.name,
                         }"
                         @click="selectVideoForTimeline(video.name, group.name)"
                       >
@@ -1080,42 +1743,39 @@ onBeforeUnmount(() => {
                 </template>
                 <template v-else>
                   <div
-                    v-for="style in stylePresets"
+                    v-for="style in importSegments"
                     :key="style.id"
                     class="videoList rounded-lg bg-surface-container-low border border-white/5 overflow-hidden mb-3 shadow-sm"
                   >
                     <div
-                      class="flex items-center justify-between p-3 bg-white/5"
+                      class="flex items-center justify-between gap-3 p-3 bg-white/5"
                     >
-                      <div class="flex items-center gap-2">
-                        <span class="text-[13px] font-bold text-white"
-                          >风格: {{ style.name }}</span
-                        >
+                      <div class="min-w-0 flex-1">
+                        <div class="text-[13px] font-bold text-white truncate">
+                          {{ style.name }}
+                        </div>
                       </div>
                       <button
-                        class="px-3 py-1.5 bg-electric-blue text-white text-[11px] font-bold rounded-md flex items-center gap-1 shadow-lg shadow-electric-blue/10 disabled:opacity-60 disabled:cursor-default"
-                        :disabled="style.imported"
-                        @click="oneClickImportStyle(style)"
+                        class="px-3 py-1.5 bg-electric-blue text-white text-[11px] font-bold rounded-md flex items-center gap-1 shadow-lg shadow-electric-blue/10 shrink-0"
+                        @click="openImportFilePicker(style)"
                       >
-                        {{
-                          style.imported
-                            ? `已导入 (${style.videos.length})`
-                            : `一键导入 (${style.count})`
-                        }}
+                        {{ `一键导入 (${style.count})` }}
                       </button>
                     </div>
                     <div
-                      v-if="style.imported"
+                      v-if="style.videos.length"
                       class="p-3 space-y-2 border-t border-outline-variant"
                     >
                       <div
-                        v-for="video in style.videos"
-                        :key="`${style.id}-${video.name}`"
+                        v-for="(video, videoIndex) in style.videos"
+                        :key="video.id || `${style.id}-${videoIndex}-${video.name}`"
                         class="flex items-center justify-between p-2 rounded bg-surface-container-lowest/50 border border-white/5 hover:border-electric-blue/40 transition-all cursor-pointer group"
                         :class="{
-                          'is-selected': selectedVideoName === video.name,
+                          'is-selected':
+                            selectedVideoKey ===
+                            (video.id || `${style.id}-${videoIndex}-${video.name}`),
                         }"
-                        @click="selectVideoForTimeline(video.name, style.name)"
+                        @click="selectVideoForTimeline(video, style.name)"
                       >
                         <div class="flex items-center gap-2 min-w-0">
                           <span
@@ -1127,15 +1787,17 @@ onBeforeUnmount(() => {
                               {{ video.name }}
                             </div>
                             <div class="text-[10px] text-on-surface-variant">
-                              {{ video.tag }} · {{ video.duration }}
+                              时长：{{ video.duration }}
                             </div>
                           </div>
                         </div>
-                        <div
+                        <button
+                          type="button"
                           class="px-2 py-1 bg-electric-blue/10 rounded text-[10px] text-electric-blue font-bold shrink-0"
+                          @click.stop="openReplaceFilePicker(style, videoIndex)"
                         >
                           替换
-                        </div>
+                        </button>
                       </div>
                     </div>
                   </div>
@@ -1149,6 +1811,7 @@ onBeforeUnmount(() => {
           class="flex-1 bg-surface-dim flex flex-col h-full overflow-hidden relative"
         >
           <button
+            v-if="sidebarToggleVisible"
             class="absolute top-1/2 left-0 -translate-y-1/2 z-[80] bg-surface-container-high border border-outline-variant text-white w-6 h-12 rounded-r-full flex items-center justify-center shadow-lg hover:bg-surface-container-highest transition-all duration-300 group"
             @click="toggleSidebar()"
           >
@@ -1225,7 +1888,7 @@ onBeforeUnmount(() => {
                   class="w-full h-full object-cover bg-black"
                   playsinline
                   preload="metadata"
-                  :src="videoSource"
+                  :src="selectedVideoSource"
                   @loadedmetadata="updatePlayerControls"
                   @timeupdate="updatePlayerControls"
                   @play="updatePlayerControls"
@@ -1233,7 +1896,6 @@ onBeforeUnmount(() => {
                   @volumechange="updatePlayerControls"
                   @ratechange="updatePlayerControls"
                 ></video>
-                <img alt="模板预览" class="hidden" :src="previewImage" />
                 <div
                   class="absolute inset-0 flex items-center justify-center bg-black/20 group"
                 >
@@ -1317,6 +1979,7 @@ onBeforeUnmount(() => {
             :class="{ 'timeline-collapsed': timelineCollapsed }"
           >
             <button
+              v-if="timelineToggleVisible"
               class="absolute left-1/2 -translate-x-1/2 z-[70] h-7 w-12 rounded-t-full bg-surface-container-high border border-outline-variant text-white shadow-lg flex items-center justify-center transition-all duration-200"
               :class="timelineCollapsed ? 'top-[-28px]' : 'top-0'"
               @click="toggleTimelineContainer"
@@ -1357,8 +2020,11 @@ onBeforeUnmount(() => {
                   <div class="timeline-ruler" aria-label="时间刻度">
                     <div class="timeline-ruler-major"></div>
                     <div class="timeline-ruler-labels">
-                      <span>0s</span><span>10s</span><span>20s</span
-                      ><span>30s</span><span>40s</span><span>50s</span>
+                      <span
+                        v-for="tick in timelineRulerTicks"
+                        :key="tick"
+                        >{{ formatTimelineTick(tick) }}</span
+                      >
                     </div>
                   </div>
                   <div class="clips-row relative h-16">
@@ -1388,7 +2054,7 @@ onBeforeUnmount(() => {
                           </div>
                           <div class="flex items-baseline gap-2">
                             <span class="text-[10px] font-bold text-primary"
-                              >{{ timeline.selectedDuration }}s</span
+                              >时长：{{ selectedVideoDuration }}</span
                             >
                             <div class="flex-1"></div>
                             <span
@@ -1460,12 +2126,11 @@ onBeforeUnmount(() => {
                   class="w-full h-full object-cover"
                   playsinline
                   preload="metadata"
-                  :src="videoSource"
+                  :src="activeTemplateDemoSource"
                   @play="modalPaused = false"
                   @pause="modalPaused = true"
                   @ended="modalPaused = true"
                 ></video>
-                <img alt="预览" class="hidden" :src="previewImage" />
                 <div
                   class="absolute inset-0 flex items-center justify-center bg-black/20"
                 >
@@ -1494,12 +2159,72 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="flex items-center gap-4">
                   <button
-                    class="px-10 py-3 bg-electric-blue text-white rounded-lg font-bold text-[16px] shadow-2xl shadow-electric-blue/30 hover:brightness-110 active:scale-95 transition-all uppercase"
+                    class="px-10 py-3 bg-electric-blue text-white rounded-lg font-bold text-[16px] shadow-2xl shadow-electric-blue/30 hover:brightness-110 active:scale-95 transition-all uppercase disabled:opacity-70 disabled:cursor-not-allowed disabled:active:scale-100 inline-flex items-center gap-2"
+                    :disabled="startEditingLoading"
                     @click="confirmSelection"
                   >
-                    开始编辑
+                    <span
+                      v-if="startEditingLoading"
+                      class="material-symbols-outlined text-[20px] start-editing-spinner"
+                      >progress_activity</span
+                    >
+                    {{ startEditingLoading ? '正在加载' : '开始编辑' }}
                   </button>
                 </div>
+              </div>
+            </div>
+          </div>
+
+          <div
+            class="fixed inset-0 z-[420] flex items-center justify-center"
+            :class="{ hidden: !templateDownloadVisible }"
+          >
+            <div class="absolute inset-0 bg-black/60 backdrop-blur-2xl"></div>
+            <div
+              class="relative w-full max-w-sm bg-surface-container-highest rounded-2xl p-8 border border-white/10 shadow-2xl modal-pop-in"
+            >
+              <div class="flex flex-col items-center text-center space-y-6">
+                <div
+                  class="w-16 h-16 bg-electric-blue/10 rounded-full flex items-center justify-center"
+                >
+                  <span
+                    class="material-symbols-outlined text-electric-blue text-3xl"
+                    >downloading</span
+                  >
+                </div>
+                <div
+                  class="circular-progress"
+                  :style="{ '--progress': `${templateDownloadProgress}%` }"
+                >
+                  <div
+                    class="absolute inset-0 flex items-center justify-center"
+                  >
+                    <span class="text-2xl font-black text-electric-blue"
+                      >{{ Math.round(templateDownloadProgress) }}%</span
+                    >
+                  </div>
+                </div>
+                <div>
+                  <h3 class="text-xl font-black text-white mb-2">
+                    正在下载模板资源
+                  </h3>
+                  <p
+                    class="text-on-surface-variant text-sm truncate max-w-[280px]"
+                  >
+                    {{ templateDownloadTitle }}
+                  </p>
+                  <p class="text-on-surface-variant/70 text-xs mt-3">
+                    {{ templateDownloadStatus }}
+                  </p>
+                </div>
+                <button
+                  class="w-full py-3 bg-white/5 text-on-surface-variant font-bold rounded-xl hover:bg-white/10 hover:text-white transition-all disabled:opacity-60 disabled:cursor-not-allowed"
+                  type="button"
+                  :disabled="templateDownloadCanceling"
+                  @click="cancelTemplateDownload"
+                >
+                  {{ templateDownloadCanceling ? '正在取消...' : '取消下载' }}
+                </button>
               </div>
             </div>
           </div>
@@ -2034,6 +2759,12 @@ aside.hidden-sidebar {
   }
 }
 
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .modal-fade-in {
   animation: fadeIn 0.2s ease-out forwards;
 }
@@ -2056,6 +2787,10 @@ aside.hidden-sidebar {
     radial-gradient(closest-side, #07122a 79%, transparent 80% 100%),
     conic-gradient(#4a8eff var(--progress), rgba(74, 142, 255, 0.1) 0);
   box-shadow: 0 0 20px rgba(74, 142, 255, 0.2);
+}
+
+.start-editing-spinner {
+  animation: spin 0.9s linear infinite;
 }
 
 .category-toolbar {
