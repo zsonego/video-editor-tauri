@@ -32,21 +32,7 @@ const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:9527';
 
 const categories = ref([]);
-const recommendationCards = [
-  {
-    title: '婚礼亮点',
-    subtitle: '18个片段 · 浪漫婚礼',
-    meta: '浪漫婚礼 · 18个片段',
-    image: weddingImage,
-    badge: '热门',
-  },
-  {
-    title: '旅行Vlog快剪',
-    subtitle: '12个片段 · 环球旅行',
-    meta: '环球旅行 · 12个片段',
-    image: travelImage,
-  },
-];
+const recommendationCards = ref([]);
 const fallbackSubtopics = [
   {
     title: '片头开启',
@@ -63,9 +49,11 @@ const fallbackSubtopics = [
     duration: '12s',
   },
 ];
-const subtopics = ref(fallbackSubtopics);
+const subtopics = ref([]);
 const templatesLoading = ref(false);
+const recommendationsLoading = ref(false);
 let templateRequestId = 0;
+let recommendationRequestId = 0;
 const templateSegments = {
   婚礼亮点: [
     { name: '片段 1: 浪漫片头', shot: '全景 (Wide)', count: 2 },
@@ -141,6 +129,7 @@ const activeTemplateId = ref('');
 const activeTemplateLocalInfo = ref(null);
 const activeTemplateDemoSource = ref(videoSource);
 const activeProjectDir = ref('');
+const favoriteTemplateIds = ref(new Set());
 const timelineCollapsed = ref(true);
 const showFinishedControls = ref(false);
 const selectedVideoName = ref('视频 1');
@@ -162,6 +151,9 @@ const exportStatus = ref('正在渲染视频文件...');
 let exportInterval = null;
 let timelineMoveHandler = null;
 let timelineUpHandler = null;
+let playerResizeFrame = null;
+let playerResizeTimer = null;
+let playerResizeObserver = null;
 
 const mainVideoRef = ref(null);
 const modalVideoRef = ref(null);
@@ -175,6 +167,8 @@ const playerSpeed = ref(1);
 const playerProgress = ref(0);
 const playerTimeLabel = ref('00:00 / 00:00');
 const modalPaused = ref(true);
+const modalProgress = ref(0);
+const modalPlaybackRate = ref(1);
 const selectedVideoDuration = ref('00:00');
 const selectedVideoSource = ref(videoSource);
 const importedVideoObjectUrls = new Set();
@@ -198,6 +192,16 @@ const sidebarToggleVisible = computed(
   () => activeCategory.value >= 0 || currentViewState.value !== 'subtopics',
 );
 const timelineToggleVisible = computed(() => mainMode.value === 'player');
+const selectedTemplateThemeName = computed(() => {
+  const category = categories.value[activeCategory.value] || {};
+  return category.categoryName || category.categoryId || '';
+});
+const activeFavoriteKey = computed(
+  () => activeTemplateId.value || previewTitle.value || '',
+);
+const previewFavorited = computed(() =>
+  favoriteTemplateIds.value.has(activeFavoriteKey.value),
+);
 const sidebarTitle = computed(() => {
   if (currentViewState.value === 'finished') return '已导入视频';
   if (currentViewState.value === 'segments') return activeTemplateName.value;
@@ -294,7 +298,7 @@ async function selectCategory(index) {
 function toggleSidebar(show) {
   sidebarHidden.value =
     typeof show === 'boolean' ? !show : !sidebarHidden.value;
-  schedulePlayerResize();
+  nextTick(schedulePlayerResize);
 }
 
 function openPreview(title, subtitle) {
@@ -331,7 +335,8 @@ function enterTemplatePreview(topic, templateId, localInfo) {
   openPreview(title, getTemplateMaterialSummary(segments));
   activeTemplateId.value = templateId;
   activeTemplateLocalInfo.value = localInfo;
-  activeTemplateDemoSource.value = resolveTemplateVideoSource(demoPath) || videoSource;
+  activeTemplateDemoSource.value =
+    resolveTemplateVideoSource(demoPath) || videoSource;
   activeProjectDir.value = '';
   nextTick(resetModalPreviewVideo);
 }
@@ -465,6 +470,19 @@ function hidePreviewModal() {
   }
 }
 
+function togglePreviewFavorite() {
+  const key = activeFavoriteKey.value;
+  if (!key) return;
+
+  const nextFavorites = new Set(favoriteTemplateIds.value);
+  if (nextFavorites.has(key)) {
+    nextFavorites.delete(key);
+  } else {
+    nextFavorites.add(key);
+  }
+  favoriteTemplateIds.value = nextFavorites;
+}
+
 async function confirmSelection() {
   if (startEditingLoading.value) {
     return;
@@ -538,11 +556,13 @@ function getSegmentImportState(segmentId) {
 }
 
 function getFileNameFromPath(filePath) {
-  return String(filePath || '')
-    .replaceAll('\\', '/')
-    .split('/')
-    .filter(Boolean)
-    .pop() || '视频素材';
+  return (
+    String(filePath || '')
+      .replaceAll('\\', '/')
+      .split('/')
+      .filter(Boolean)
+      .pop() || '视频素材'
+  );
 }
 
 function joinLocalPath(basePath, relativePath) {
@@ -671,7 +691,11 @@ async function pickVideoPaths(multiple) {
   return Array.isArray(selected) ? selected : [selected];
 }
 
-async function createImportedVideoFromPath(filePath, keySuffix = '', assetId = '') {
+async function createImportedVideoFromPath(
+  filePath,
+  keySuffix = '',
+  assetId = '',
+) {
   let localPath = filePath;
   let projectFilepath = '';
 
@@ -703,7 +727,11 @@ async function createImportedVideoFromPath(filePath, keySuffix = '', assetId = '
 }
 
 function revokeImportedVideo(video) {
-  if (video?.isObjectUrl && video.source && importedVideoObjectUrls.has(video.source)) {
+  if (
+    video?.isObjectUrl &&
+    video.source &&
+    importedVideoObjectUrls.has(video.source)
+  ) {
     URL.revokeObjectURL(video.source);
     importedVideoObjectUrls.delete(video.source);
   }
@@ -788,13 +816,19 @@ async function openReplaceFilePicker(segment, videoIndex) {
   const [filePath] = await pickVideoPaths(false);
   const previousState = getSegmentImportState(segment.id);
 
-  if (!filePath || videoIndex < 0 || videoIndex >= previousState.videos.length) {
+  if (
+    !filePath ||
+    videoIndex < 0 ||
+    videoIndex >= previousState.videos.length
+  ) {
     return;
   }
 
   const videos = [...previousState.videos];
   const assetId =
-    videos[videoIndex]?.assetId || segment.defaultAssets?.[videoIndex]?.id || '';
+    videos[videoIndex]?.assetId ||
+    segment.defaultAssets?.[videoIndex]?.id ||
+    '';
   let replacementVideo;
 
   try {
@@ -858,7 +892,7 @@ function selectVideoForTimeline(video, styleName = '') {
 
 function toggleTimelineContainer() {
   timelineCollapsed.value = !timelineCollapsed.value;
-  schedulePlayerResize();
+  nextTick(schedulePlayerResize);
 }
 
 function clampTimelineStart(startTime) {
@@ -1106,7 +1140,20 @@ function resetModalPreviewVideo() {
   if (!video) return;
   video.pause();
   video.currentTime = 0;
+  video.playbackRate = modalPlaybackRate.value;
   modalPaused.value = true;
+  modalProgress.value = 0;
+}
+
+function updateModalPreviewControls() {
+  const video = modalVideoRef.value;
+  if (!video) return;
+
+  const duration = video.duration || 0;
+  modalProgress.value = duration
+    ? Math.min(100, Math.max(0, (video.currentTime / duration) * 100))
+    : 0;
+  modalPaused.value = video.paused;
 }
 
 function toggleModalPreviewPlayback() {
@@ -1119,7 +1166,41 @@ function toggleModalPreviewPlayback() {
   } else {
     video.pause();
   }
-  modalPaused.value = video.paused;
+  updateModalPreviewControls();
+}
+
+function seekModalPreviewBy(seconds) {
+  const video = modalVideoRef.value;
+  if (!video) return;
+
+  const duration = Number.isFinite(video.duration) ? video.duration : 0;
+  const nextTime = video.currentTime + seconds;
+  video.currentTime = duration
+    ? Math.max(0, Math.min(duration, nextTime))
+    : Math.max(0, nextTime);
+  updateModalPreviewControls();
+}
+
+function seekModalPreviewTo(event) {
+  const video = modalVideoRef.value;
+  if (!video || !video.duration) return;
+
+  const rect = event.currentTarget.getBoundingClientRect();
+  const ratio = (event.clientX - rect.left) / rect.width;
+  video.currentTime = Math.max(0, Math.min(video.duration, ratio * video.duration));
+  updateModalPreviewControls();
+}
+
+function cycleModalPlaybackRate() {
+  const speeds = [1, 1.5, 2, 3];
+  const currentIndex = speeds.indexOf(modalPlaybackRate.value);
+  const rate = speeds[(currentIndex + 1) % speeds.length];
+  modalPlaybackRate.value = rate;
+
+  const video = modalVideoRef.value;
+  if (video) {
+    video.playbackRate = rate;
+  }
 }
 
 function resizePlayerToStage() {
@@ -1128,8 +1209,8 @@ function resizePlayerToStage() {
   if (!stage || !wrapper || mainMode.value !== 'player') return;
 
   const rect = stage.getBoundingClientRect();
-  const availableWidth = Math.max(320, rect.width - 64);
-  const availableHeight = Math.max(180, rect.height - 64);
+  const availableWidth = Math.max(160, rect.width - 64);
+  const availableHeight = Math.max(90, rect.height - 64);
   const widthFromHeight = availableHeight * (16 / 9);
   const targetWidth = Math.min(availableWidth, widthFromHeight);
   wrapper.style.width = `${targetWidth}px`;
@@ -1137,7 +1218,19 @@ function resizePlayerToStage() {
 }
 
 function schedulePlayerResize() {
-  requestAnimationFrame(resizePlayerToStage);
+  if (playerResizeFrame) {
+    cancelAnimationFrame(playerResizeFrame);
+  }
+
+  playerResizeFrame = requestAnimationFrame(() => {
+    resizePlayerToStage();
+    requestAnimationFrame(resizePlayerToStage);
+  });
+
+  if (playerResizeTimer) {
+    window.clearTimeout(playerResizeTimer);
+  }
+  playerResizeTimer = window.setTimeout(resizePlayerToStage, 340);
 }
 
 function getStoredLoginState() {
@@ -1291,6 +1384,7 @@ function parseTemplateSegmentsFromText(xmlContent) {
 function mapTemplateTopic(template, index) {
   const clipCount = Number(template.clipCount) || 0;
   const title = template.templateName || template.title || `模板 ${index + 1}`;
+  const duration = formatTemplateDuration(template.duration);
 
   return {
     ...template,
@@ -1298,8 +1392,10 @@ function mapTemplateTopic(template, index) {
     title,
     count: clipCount,
     subtitle: `${clipCount}个片段 · ${title}`,
+    materialTypeCount: 10,
     material: clipCount,
-    duration: formatTemplateDuration(template.duration),
+    duration,
+    meta: `10类 · ${clipCount}个素材 · ${duration}`,
     image:
       template.thumbnailUrl ||
       template.image ||
@@ -1330,29 +1426,67 @@ function mapProject(project, index) {
 
 async function loadTemplatesByCategory(category) {
   const requestId = ++templateRequestId;
+  const recommendationRequest = ++recommendationRequestId;
   templatesLoading.value = true;
+  recommendationsLoading.value = true;
 
   try {
-    const response = await getTemplates({
-      tenantId: getStoredTenantId(),
-      userId: getStoredUserId(),
-      categoryId: getCategoryId(category),
-      keyword: '',
-      favoriteOnly: false,
-      sortType: 1,
-    });
+    const topics = await fetchTemplateTopics(getCategoryId(category));
 
     if (requestId !== templateRequestId) return;
 
-    subtopics.value = getResponseList(response).map(mapTemplateTopic);
+    subtopics.value = topics;
+    if (recommendationRequest === recommendationRequestId) {
+      recommendationCards.value = topics;
+    }
   } catch (error) {
     if (requestId === templateRequestId) {
       subtopics.value = [];
+      if (recommendationRequest === recommendationRequestId) {
+        recommendationCards.value = [];
+      }
       systemMessage.error(error?.message || '模板加载失败');
     }
   } finally {
     if (requestId === templateRequestId) {
       templatesLoading.value = false;
+    }
+    if (recommendationRequest === recommendationRequestId) {
+      recommendationsLoading.value = false;
+    }
+  }
+}
+
+async function fetchTemplateTopics(categoryId = '') {
+  const response = await getTemplates({
+    tenantId: getStoredTenantId(),
+    userId: getStoredUserId(),
+    categoryId,
+    keyword: '',
+    favoriteOnly: false,
+    sortType: 1,
+  });
+
+  return getResponseList(response).map(mapTemplateTopic);
+}
+
+async function loadRecommendedTemplates() {
+  const requestId = ++recommendationRequestId;
+  recommendationsLoading.value = true;
+
+  try {
+    const topics = await fetchTemplateTopics('');
+    if (requestId === recommendationRequestId) {
+      recommendationCards.value = topics;
+    }
+  } catch (error) {
+    if (requestId === recommendationRequestId) {
+      recommendationCards.value = [];
+      systemMessage.error(error?.message || '推荐模板加载失败');
+    }
+  } finally {
+    if (requestId === recommendationRequestId) {
+      recommendationsLoading.value = false;
     }
   }
 }
@@ -1400,7 +1534,16 @@ onMounted(() => {
   document.title = '艾咔 · AICut - 视频快速剪辑软件';
   document.documentElement.classList.add('dark');
   window.addEventListener('resize', schedulePlayerResize);
+  if (window.ResizeObserver) {
+    playerResizeObserver = new ResizeObserver(schedulePlayerResize);
+    nextTick(() => {
+      if (playerStageRef.value) {
+        playerResizeObserver.observe(playerStageRef.value);
+      }
+    });
+  }
   loadTemplateCategories();
+  loadRecommendedTemplates();
   loadMyProjects();
   nextTick(() => {
     updatePlayerControls();
@@ -1420,6 +1563,13 @@ onBeforeUnmount(() => {
   if (timelineUpHandler) {
     window.removeEventListener('pointerup', timelineUpHandler);
   }
+  if (playerResizeFrame) {
+    cancelAnimationFrame(playerResizeFrame);
+  }
+  if (playerResizeTimer) {
+    window.clearTimeout(playerResizeTimer);
+  }
+  playerResizeObserver?.disconnect();
   importedVideoObjectUrls.forEach((objectUrl) => {
     URL.revokeObjectURL(objectUrl);
   });
@@ -1513,8 +1663,8 @@ onBeforeUnmount(() => {
         class="h-14 category-toolbar border-b border-primary/10 flex items-center px-6 gap-4 overflow-x-auto no-scrollbar"
       >
         <span
-          class="text-on-surface-variant font-label-caps text-[13px] uppercase shrink-0 whitespace-nowrap"
-          >当前模板主题</span
+          class="text-on-surface-variant font-label-caps text-[16px] uppercase shrink-0 whitespace-nowrap"
+          >模板主题</span
         >
         <div class="category-container flex items-center gap-2 shrink-0">
           <button
@@ -1566,12 +1716,24 @@ onBeforeUnmount(() => {
             >
               <div class="flex flex-col overflow-hidden">
                 <span
+                  v-if="currentViewState === 'import'"
+                  class="text-[17px] text-on-surface tracking-normal truncate"
+                  >{{ activeTemplateName }}</span
+                >
+                <span
+                  v-else
                   class="text-[12px] text-on-surface-variant/60 uppercase tracking-[0.18em]"
                   >{{ sidebarContextLabel }}</span
                 >
-                <span class="text-[17px] tracking-[0.18em] truncate">{{
-                  sidebarTitle
-                }}</span>
+                <span
+                  class="tracking-[0.18em] truncate"
+                  :class="
+                    currentViewState === 'import'
+                      ? 'text-[14px] text-on-surface-variant/80'
+                      : 'text-[17px]'
+                  "
+                  >{{ sidebarTitle }}</span
+                >
               </div>
               <div class="flex-1"></div>
               <button
@@ -1592,15 +1754,22 @@ onBeforeUnmount(() => {
           <div class="flex-1 overflow-y-auto custom-scrollbar flex flex-col">
             <div v-if="currentViewState === 'subtopics'" class="p-4 space-y-4">
               <h3
+                v-if="selectedTemplateThemeName"
                 class="text-[13px] font-bold text-on-surface-variant uppercase tracking-widest whitespace-nowrap mb-2"
               >
-                主题名称
+                {{ selectedTemplateThemeName }} > 模版名称
               </h3>
               <div
                 v-if="templatesLoading"
                 class="px-2 py-6 text-center text-[12px] text-on-surface-variant/70"
               >
                 模板加载中...
+              </div>
+              <div
+                v-else-if="!selectedTemplateThemeName"
+                class="px-2 py-6 text-center text-[12px] text-on-surface-variant/70"
+              >
+                请选择模板主题
               </div>
               <div
                 v-else-if="subtopics.length === 0"
@@ -1626,7 +1795,10 @@ onBeforeUnmount(() => {
                   </div>
                   <div class="flex gap-2">
                     <span class="text-[11px] opacity-70"
-                      >素材: {{ topic.material }}</span
+                      >类数: {{ topic.materialTypeCount }}</span
+                    >
+                    <span class="text-[11px] opacity-70"
+                      >素材数: {{ topic.material }}</span
                     >
                     <span class="text-[11px] opacity-70"
                       >时长: {{ topic.duration }}</span
@@ -1768,12 +1940,15 @@ onBeforeUnmount(() => {
                     >
                       <div
                         v-for="(video, videoIndex) in style.videos"
-                        :key="video.id || `${style.id}-${videoIndex}-${video.name}`"
+                        :key="
+                          video.id || `${style.id}-${videoIndex}-${video.name}`
+                        "
                         class="flex items-center justify-between p-2 rounded bg-surface-container-lowest/50 border border-white/5 hover:border-electric-blue/40 transition-all cursor-pointer group"
                         :class="{
                           'is-selected':
                             selectedVideoKey ===
-                            (video.id || `${style.id}-${videoIndex}-${video.name}`),
+                            (video.id ||
+                              `${style.id}-${videoIndex}-${video.name}`),
                         }"
                         @click="selectVideoForTimeline(video, style.name)"
                       >
@@ -1839,13 +2014,26 @@ onBeforeUnmount(() => {
             </div>
             <div class="flex-1 overflow-y-auto custom-scrollbar p-6 pt-0">
               <div
+                v-if="recommendationsLoading"
+                class="py-10 text-center text-[12px] text-on-surface-variant/70"
+              >
+                推荐模板加载中...
+              </div>
+              <div
+                v-else-if="recommendationCards.length === 0"
+                class="py-10 text-center text-[12px] text-on-surface-variant/70"
+              >
+                暂无推荐模板
+              </div>
+              <div
+                v-else
                 class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6"
               >
                 <div
                   v-for="card in recommendationCards"
-                  :key="card.title"
+                  :key="card.id"
                   class="group relative aspect-[16/9] bg-surface-container-high rounded-xl overflow-hidden border border-white/5 hover:border-electric-blue/60 transition-all cursor-pointer shadow-lg hover:shadow-electric-blue/10"
-                  @click="openPreview(card.title, card.subtitle)"
+                  @click="openTemplatePreview(card)"
                 >
                   <img
                     :alt="card.title"
@@ -2020,11 +2208,9 @@ onBeforeUnmount(() => {
                   <div class="timeline-ruler" aria-label="时间刻度">
                     <div class="timeline-ruler-major"></div>
                     <div class="timeline-ruler-labels">
-                      <span
-                        v-for="tick in timelineRulerTicks"
-                        :key="tick"
-                        >{{ formatTimelineTick(tick) }}</span
-                      >
+                      <span v-for="tick in timelineRulerTicks" :key="tick">{{
+                        formatTimelineTick(tick)
+                      }}</span>
                     </div>
                   </div>
                   <div class="clips-row relative h-16">
@@ -2101,10 +2287,22 @@ onBeforeUnmount(() => {
             >
               <div class="absolute top-4 right-4 z-10 flex items-center gap-3">
                 <button
-                  class="p-2 bg-black/40 backdrop-blur-md rounded-full text-white/80 hover:text-white transition-colors group"
+                  class="p-2 bg-black/40 backdrop-blur-md rounded-full transition-colors group"
+                  :class="
+                    previewFavorited
+                      ? 'text-yellow-400 hover:text-yellow-300'
+                      : 'text-white/80 hover:text-white'
+                  "
+                  type="button"
+                  @click="togglePreviewFavorite"
                 >
                   <span
                     class="material-symbols-outlined text-[24px] group-hover:scale-110"
+                    :style="
+                      previewFavorited
+                        ? { fontVariationSettings: `'FILL' 1` }
+                        : undefined
+                    "
                     >star</span
                   >
                 </button>
@@ -2127,9 +2325,11 @@ onBeforeUnmount(() => {
                   playsinline
                   preload="metadata"
                   :src="activeTemplateDemoSource"
-                  @play="modalPaused = false"
-                  @pause="modalPaused = true"
-                  @ended="modalPaused = true"
+                  @loadedmetadata="updateModalPreviewControls"
+                  @timeupdate="updateModalPreviewControls"
+                  @play="updateModalPreviewControls"
+                  @pause="updateModalPreviewControls"
+                  @ended="updateModalPreviewControls"
                 ></video>
                 <div
                   class="absolute inset-0 flex items-center justify-center bg-black/20"
@@ -2145,19 +2345,56 @@ onBeforeUnmount(() => {
                     >
                   </button>
                 </div>
+                <div
+                  class="modal-preview-progress absolute inset-x-4 bottom-4 cursor-pointer"
+                  @click="seekModalPreviewTo"
+                >
+                  <div
+                    class="finished-progress-fill"
+                    :style="{ width: `${modalProgress}%` }"
+                  ></div>
+                </div>
               </div>
               <div
                 class="p-6 flex items-center justify-between bg-surface-container-lowest/80 border-t border-white/5"
               >
-                <div>
+                <div class="min-w-0 flex-1">
                   <h3 class="text-lg font-black text-on-surface">
                     {{ previewTitle }}
                   </h3>
-                  <p class="text-sm text-on-surface-variant">
-                    {{ previewSubtitle }}
-                  </p>
                 </div>
-                <div class="flex items-center gap-4">
+                <div
+                  class="flex items-center justify-center gap-16 px-8 py-2 rounded-full bg-white/5 border border-white/10 min-w-[420px]"
+                >
+                  <button
+                    class="w-16 h-9 rounded-full bg-white/5 border border-white/10 text-[12px] font-bold text-white/80 hover:bg-white/10 hover:text-white transition-colors"
+                    type="button"
+                    @click="cycleModalPlaybackRate"
+                  >
+                    {{ modalPlaybackRate }}x
+                  </button>
+                  <button
+                    class="w-11 h-11 rounded-full bg-electric-blue text-white hover:brightness-110 active:scale-95 transition-all shadow-lg shadow-electric-blue/20 flex items-center justify-center"
+                    type="button"
+                    @click="toggleModalPreviewPlayback"
+                  >
+                    <span
+                      class="material-symbols-outlined text-[28px]"
+                      style="font-variation-settings: 'FILL' 1"
+                      >{{ modalPaused ? 'play_arrow' : 'pause' }}</span
+                    >
+                  </button>
+                  <button
+                    class="w-16 h-9 rounded-full bg-white/5 border border-white/10 text-white/80 hover:bg-white/10 hover:text-white transition-colors flex items-center justify-center"
+                    type="button"
+                    @click="seekModalPreviewBy(5)"
+                  >
+                    <span class="material-symbols-outlined text-[22px]"
+                      >fast_forward</span
+                    >
+                  </button>
+                </div>
+                <div class="flex items-center gap-4 flex-1 justify-end">
                   <button
                     class="px-10 py-3 bg-electric-blue text-white rounded-lg font-bold text-[16px] shadow-2xl shadow-electric-blue/30 hover:brightness-110 active:scale-95 transition-all uppercase disabled:opacity-70 disabled:cursor-not-allowed disabled:active:scale-100 inline-flex items-center gap-2"
                     :disabled="startEditingLoading"
@@ -2675,6 +2912,14 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
+.modal-preview-progress {
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(217, 226, 255, 0.18);
+  overflow: hidden;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.22);
+}
+
 .finished-progress-fill {
   height: 100%;
   border-radius: inherit;
@@ -2692,6 +2937,9 @@ onBeforeUnmount(() => {
   max-height: 100%;
   background: #000000;
   box-shadow: 0 0 40px rgba(74, 142, 255, 0.1);
+  transition:
+    width 0.25s ease,
+    height 0.25s ease;
 }
 
 .timeline-dock {

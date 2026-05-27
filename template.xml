@@ -126,7 +126,6 @@
                         <!-- 注：在目标视频中的播放时长 = source.duration * trasform.speed -->
                     </destination>
                 </area>
-                ......
 
                 <!-- 个性文本标题 -->
                 <subtitle id="m9n2b4v6c8x1z3a5s7d0f2" startTime="12000" duration="3000">
@@ -153,7 +152,7 @@
                 <!--片段备注说明 -->
 
                 <!-- 剪辑区域1， 对应的素材集：套裙 -->
-                <area id="h2k5p8s1d4f7g0j3q6w9e" mediaset="serhw8q52e9zp4s273w" index=2>
+                <area id="h2k5p8s1d4f7g0j3q6w9e" media-asset="serhw8q52e9zp4s273w" index="2">
                     <source>                        
                         <duration>5000</duration> <!-- 剪辑时长（毫秒） -->
                     </source>
@@ -170,9 +169,7 @@
                         <!-- 注：在目标视频中的播放时长 = source.duration * trasform.speed -->
                     </destination>
                 </area>
-                ......
             </clip>
-            ......
         </clips>
     </template>
 
