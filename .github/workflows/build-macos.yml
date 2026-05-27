@@ -13,6 +13,7 @@ jobs:
     runs-on: macos-latest
     env:
       HAS_APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.KEYCHAIN_PASSWORD != '' }}
+      HAS_APPLE_NOTARIZATION: ${{ secrets.APPLE_ID != '' && secrets.APPLE_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
 
     steps:
       - name: Checkout repository
@@ -64,7 +65,8 @@ jobs:
         if: ${{ env.HAS_APPLE_CERTIFICATE != 'true' }}
         run: echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
 
-      - name: Build macOS Apple Silicon dmg
+      - name: Build notarized macOS Apple Silicon dmg
+        if: ${{ env.HAS_APPLE_NOTARIZATION == 'true' }}
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -73,6 +75,15 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_PROVIDER_SHORT_NAME: ${{ secrets.APPLE_PROVIDER_SHORT_NAME }}
+        with:
+          args: --target aarch64-apple-darwin --bundles dmg
+
+      - name: Build macOS Apple Silicon dmg without notarization
+        if: ${{ env.HAS_APPLE_NOTARIZATION != 'true' }}
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
         with:
           args: --target aarch64-apple-darwin --bundles dmg
 
