@@ -29,7 +29,7 @@ const weddingImage =
 const travelImage =
   'https://lh3.googleusercontent.com/aida-public/AB6AXuDt5PYLfvUtvuJfd9ZXljOhgs6n3G7R0iINSiXx-ZoXEu-JOruIUsel9dwYttKDKMJnsKyDopxdF1OY733OuzNsL3fzYyTIDqFUACrdIIv2WryUoF4T3fSxwuP0j8mZObr1sEQwYVdgKlIoermFPZEBOVTTSBzlsJ8xe_pFnMkrTTANjkAS3J7tgsoYud_mRfeEeHnCF8uJ4VIt6O-cmoH_30lPeXfZjAqGD3k7VhyUN2QIdI-_YCtH7HLHbJyCB7-YCGLmEaCFw9BH';
 const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:9527';
+  import.meta.env.VITE_API_BASE_URL || 'http://192.168.0.207:9527';
 
 const categories = ref([]);
 const recommendationCards = ref([]);
@@ -1187,7 +1187,10 @@ function seekModalPreviewTo(event) {
 
   const rect = event.currentTarget.getBoundingClientRect();
   const ratio = (event.clientX - rect.left) / rect.width;
-  video.currentTime = Math.max(0, Math.min(video.duration, ratio * video.duration));
+  video.currentTime = Math.max(
+    0,
+    Math.min(video.duration, ratio * video.duration),
+  );
   updateModalPreviewControls();
 }
 
