@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue';
+import { invoke } from '@tauri-apps/api/core';
 import { getUserInfo, loginUser } from '../api/user';
 import { systemMessage } from '../utils/message';
 import bgImage from '../assets/bg.png';
@@ -75,6 +76,14 @@ function closeTenantDialog() {
   tenantDialogVisible.value = false;
 }
 
+async function getMachineCode() {
+  try {
+    return await invoke('get_machine_code');
+  } catch {
+    return '';
+  }
+}
+
 async function submitLogin(extra = {}) {
   const phone = account.value.trim();
   const loginPassword = password.value;
@@ -92,9 +101,11 @@ async function submitLogin(extra = {}) {
   submitting.value = true;
 
   try {
+    const machineCode = await getMachineCode();
     const payload = {
       phone,
       password: loginPassword,
+      machineCode,
       ...extra,
     };
 

@@ -7,6 +7,7 @@ use std::{
     io,
     io::Read,
     path::{Path, PathBuf},
+    process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, OnceLock,
@@ -1040,6 +1041,60 @@ fn delete_project_asset_files(project_dir: String, asset_paths: Vec<String>) -> 
     Ok(())
 }
 
+#[tauri::command]
+fn get_machine_code() -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let output = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "Get-WmiObject Win32_ComputerSystemProduct | Select-Object -ExpandProperty UUID",
+            ])
+            .output()
+            .map_err(|error| error.to_string())?;
+
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
+
+        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new("system_profiler")
+            .arg("SPHardwareDataType")
+            .output()
+            .map_err(|error| error.to_string())?;
+
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let machine_code = stdout
+            .lines()
+            .find_map(|line| {
+                let line = line.trim();
+                line.strip_prefix("Hardware UUID:")
+                    .map(|value| value.trim().to_string())
+            })
+            .unwrap_or_default();
+
+        if machine_code.is_empty() {
+            return Err("Hardware UUID not found".to_string());
+        }
+
+        return Ok(machine_code);
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        Err("Unsupported platform".to_string())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1057,7 +1112,8 @@ pub fn run() {
             cancel_template_download,
             create_project_workspace,
             save_project_asset,
-            delete_project_asset_files
+            delete_project_asset_files,
+            get_machine_code
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
