@@ -116,6 +116,7 @@ const activeTemplateName = ref('');
 const previewTitle = ref('新娘备婚');
 const previewSubtitle = ref('5个片段 · 记录点滴');
 const previewModalVisible = ref(false);
+const accountMenuVisible = ref(false);
 const templateDetailLoading = ref(false);
 const startEditingLoading = ref(false);
 const templateDownloadVisible = ref(false);
@@ -1533,6 +1534,18 @@ async function loadMyProjects() {
   }
 }
 
+function toggleAccountMenu() {
+  accountMenuVisible.value = !accountMenuVisible.value;
+}
+
+function closeAccountMenu() {
+  accountMenuVisible.value = false;
+}
+
+function handleWorkspaceClick() {
+  closeAccountMenu();
+}
+
 onMounted(() => {
   document.title = '艾咔 · AICut - 视频快速剪辑软件';
   document.documentElement.classList.add('dark');
@@ -1583,6 +1596,7 @@ onBeforeUnmount(() => {
 <template>
   <div
     class="workspace-page bg-background text-on-surface font-body-md text-body-md selection:bg-primary/30"
+    @click="handleWorkspaceClick"
   >
     <header
       class="fixed top-0 left-0 right-0 z-[300] flex flex-col bg-surface-container/80 backdrop-blur-2xl border-b border-primary/20"
@@ -1631,14 +1645,21 @@ onBeforeUnmount(() => {
             >导出</span
           >
         </button>
-        <div class="relative group z-[130]">
+        <div class="relative z-[130]" @click.stop>
           <button
             class="h-9 w-24 shrink-0 flex items-center justify-center gap-1.5 bg-surface-container-low/50 text-on-surface-variant shadow-sm hover:bg-surface-container-high hover:text-electric-blue focus:bg-electric-blue focus:text-white rounded-lg transition-all focus:outline-none active:scale-95 border border-outline-variant/20"
+            type="button"
+            @click="toggleAccountMenu"
           >
             <span class="text-[13px] font-bold">个人中心</span>
           </button>
           <div
-            class="absolute top-full right-0 mt-2 w-40 bg-surface-container-highest border border-outline-variant/30 rounded-lg shadow-2xl opacity-0 translate-y-2 pointer-events-none group-focus-within:opacity-100 group-focus-within:translate-y-0 group-focus-within:pointer-events-auto transition-all duration-200 ease-out z-[110] py-1"
+            class="absolute top-full right-0 mt-2 w-40 bg-surface-container-highest border border-outline-variant/30 rounded-lg shadow-2xl transition-all duration-200 ease-out z-[110] py-1"
+            :class="
+              accountMenuVisible
+                ? 'opacity-100 translate-y-0 pointer-events-auto'
+                : 'opacity-0 translate-y-2 pointer-events-none'
+            "
           >
             <a
               class="flex items-center gap-3 px-4 py-2.5 text-[12px] text-on-surface-variant hover:bg-primary-container/10 hover:text-white transition-colors"
@@ -1655,7 +1676,7 @@ onBeforeUnmount(() => {
             <a
               class="flex items-center gap-3 px-4 py-2.5 text-[12px] text-error hover:bg-error-container/20 transition-colors"
               href="#"
-              @click.prevent="emit('logout')"
+              @click.prevent="closeAccountMenu(); emit('logout')"
               ><span>退出登录</span></a
             >
           </div>
