@@ -3,9 +3,11 @@ use serde::Serialize;
 use std::{
     collections::{HashMap, HashSet},
     fs,
+    fs::OpenOptions,
     hash::{DefaultHasher, Hasher},
     io,
     io::Read,
+    io::Write,
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -142,7 +144,9 @@ fn emit_progress(app: &AppHandle, download_id: &str, progress: u8, status: &str)
 }
 
 fn emit_composer_progress(app: &AppHandle, export_id: &str, progress: u8, status: &str) {
-    println!("[composer] progress export_id={export_id} progress={progress} status={status}");
+    app_log_info(format!(
+        "[composer] progress export_id={export_id} progress={progress} status={status}"
+    ));
     let payload = ComposerExportProgress {
         export_id: export_id.to_string(),
         progress: progress.min(100),
@@ -169,7 +173,9 @@ impl ComposerRuntime {
         match Self::try_initialize() {
             Ok(runtime) => runtime,
             Err(error) => {
-                eprintln!("[composer] initialization failed but app will continue: {error}");
+                app_log_error(format!(
+                    "[composer] initialization failed but app will continue: {error}"
+                ));
                 Self::disabled(error)
             }
         }
@@ -192,40 +198,43 @@ impl ComposerRuntime {
     fn try_initialize() -> Result<Self, String> {
         #[cfg(target_os = "macos")]
         {
-            println!("[composer] initializing runtime");
+            app_log_info("[composer] initializing runtime");
             let library_path = composer_library_path()?;
-            println!("[composer] loading dylib: {}", library_path.display());
+            app_log_info(format!(
+                "[composer] loading dylib: {}",
+                library_path.display()
+            ));
             let library = unsafe { Library::new(&library_path) }
                 .map_err(|error| format!("加载 Composer 动态库失败: {error}"))?;
-            println!("[composer] resolving composer_init");
+            app_log_info("[composer] resolving composer_init");
             let init: ComposerInitFn = unsafe {
                 *library
                     .get(b"composer_init\0")
                     .map_err(|error| format!("读取 composer_init 失败: {error}"))?
             };
-            println!("[composer] resolving composer_compose");
+            app_log_info("[composer] resolving composer_compose");
             let compose: ComposerComposeFn = unsafe {
                 *library
                     .get(b"composer_compose\0")
                     .map_err(|error| format!("读取 composer_compose 失败: {error}"))?
             };
-            println!("[composer] resolving composer_cleanup");
+            app_log_info("[composer] resolving composer_cleanup");
             let cleanup: ComposerCleanupFn = unsafe {
                 *library
                     .get(b"composer_cleanup\0")
                     .map_err(|error| format!("读取 composer_cleanup 失败: {error}"))?
             };
-            println!("[composer] calling composer_init");
+            app_log_info("[composer] calling composer_init");
             let init_result = unsafe { init() };
 
             if init_result != 0 {
-                eprintln!(
+                app_log_error(format!(
                     "[composer] composer_init failed: {}",
                     composer_error_message(init_result)
-                );
+                ));
                 return Err(composer_error_message(init_result));
             }
-            println!("[composer] composer_init success");
+            app_log_info("[composer] composer_init success");
 
             Ok(Self {
                 init_error: None,
@@ -238,7 +247,7 @@ impl ComposerRuntime {
 
         #[cfg(not(target_os = "macos"))]
         {
-            println!("[composer] macOS composer runtime is disabled on this platform");
+            app_log_info("[composer] macOS composer runtime is disabled on this platform");
             Ok(Self {
                 init_error: Some("Composer 动态库当前只支持 macOS".to_string()),
             })
@@ -254,19 +263,21 @@ impl ComposerRuntime {
         export_id: String,
     ) -> Result<(), String> {
         if let Some(error) = &self.init_error {
-            eprintln!("[composer] compose skipped because runtime is unavailable: {error}");
+            app_log_error(format!(
+                "[composer] compose skipped because runtime is unavailable: {error}"
+            ));
             return Err(error.clone());
         }
 
         #[cfg(target_os = "macos")]
         {
-            println!("[composer] compose start export_id={export_id}");
-            println!("[composer] template_path={template_path}");
-            println!("[composer] project_path={project_path}");
-            println!("[composer] output_path={output_path}");
+            app_log_info(format!("[composer] compose start export_id={export_id}"));
+            app_log_info(format!("[composer] template_path={template_path}"));
+            app_log_info(format!("[composer] project_path={project_path}"));
+            app_log_info(format!("[composer] output_path={output_path}"));
             let Some(compose) = self.compose else {
                 let error = "composer_compose 函数未加载".to_string();
-                eprintln!("[composer] {error}");
+                app_log_error(format!("[composer] {error}"));
                 return Err(error);
             };
             let template_path =
@@ -287,13 +298,13 @@ impl ComposerRuntime {
             };
 
             if result == 0 {
-                println!("[composer] compose success");
+                app_log_info("[composer] compose success");
                 Ok(())
             } else {
-                eprintln!(
+                app_log_error(format!(
                     "[composer] compose failed: {}",
                     composer_error_message(result)
-                );
+                ));
                 Err(composer_error_message(result))
             }
         }
@@ -301,7 +312,7 @@ impl ComposerRuntime {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = (template_path, project_path, output_path, app, export_id);
-            eprintln!("[composer] compose requested on unsupported platform");
+            app_log_error("[composer] compose requested on unsupported platform");
             Err("Composer 动态库当前只支持 macOS".to_string())
         }
     }
@@ -311,18 +322,20 @@ impl ComposerRuntime {
         {
             if self.initialized {
                 let Some(cleanup) = self.cleanup else {
-                    eprintln!("[composer] composer_cleanup 函数未加载，跳过清理");
+                    app_log_error("[composer] composer_cleanup 函数未加载，跳过清理");
                     self.initialized = false;
                     return;
                 };
-                println!("[composer] calling composer_cleanup");
+                app_log_info("[composer] calling composer_cleanup");
                 unsafe {
                     cleanup();
                 }
                 self.initialized = false;
-                println!("[composer] composer_cleanup complete");
+                app_log_info("[composer] composer_cleanup complete");
             } else if let Some(error) = &self.init_error {
-                eprintln!("[composer] cleanup skipped because runtime is unavailable: {error}");
+                app_log_error(format!(
+                    "[composer] cleanup skipped because runtime is unavailable: {error}"
+                ));
             }
         }
     }
@@ -341,7 +354,7 @@ extern "C" fn composer_progress_callback(
     userdata: *mut c_void,
 ) {
     if userdata.is_null() {
-        eprintln!("[composer] progress callback skipped: userdata is null");
+        app_log_error("[composer] progress callback skipped: userdata is null");
         return;
     }
 
@@ -366,7 +379,7 @@ extern "C" fn composer_progress_callback(
 
 #[cfg(target_os = "macos")]
 fn composer_library_path() -> Result<PathBuf, String> {
-    println!("[composer] resolving libcomposer.dylib path");
+    app_log_info("[composer] resolving libcomposer.dylib path");
     let bundled_path = std::env::current_exe().ok().and_then(|exe| {
         exe.parent()
             .and_then(|macos_dir| macos_dir.parent())
@@ -374,7 +387,10 @@ fn composer_library_path() -> Result<PathBuf, String> {
     });
 
     if let Some(path) = bundled_path {
-        println!("[composer] checking bundled dylib: {}", path.display());
+        app_log_info(format!(
+            "[composer] checking bundled dylib: {}",
+            path.display()
+        ));
         if path.is_file() {
             return Ok(path);
         }
@@ -384,12 +400,15 @@ fn composer_library_path() -> Result<PathBuf, String> {
         .join("libs")
         .join("macos")
         .join("libcomposer.dylib");
-    println!("[composer] checking dev dylib: {}", dev_path.display());
+    app_log_info(format!(
+        "[composer] checking dev dylib: {}",
+        dev_path.display()
+    ));
     if dev_path.is_file() {
         return Ok(dev_path);
     }
 
-    eprintln!("[composer] libcomposer.dylib not found");
+    app_log_error("[composer] libcomposer.dylib not found");
     Err("未找到 libcomposer.dylib".to_string())
 }
 
@@ -419,12 +438,58 @@ fn ensure_aicut_dirs() -> Result<(PathBuf, PathBuf), String> {
     Ok((template_dir, project_dir))
 }
 
+fn aicut_log_file_path() -> Result<PathBuf, String> {
+    Ok(aicut_root_dir()?.join("logs").join("app.log"))
+}
+
+fn append_app_log(level: &str, message: &str) {
+    let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+    let line = format!("{timestamp} [{level}] {message}\n");
+
+    match aicut_log_file_path() {
+        Ok(path) => {
+            if let Some(parent) = path.parent() {
+                if let Err(error) = fs::create_dir_all(parent) {
+                    eprintln!("[log] failed to create log dir: {error}");
+                    return;
+                }
+            }
+
+            match OpenOptions::new().create(true).append(true).open(&path) {
+                Ok(mut file) => {
+                    if let Err(error) = file.write_all(line.as_bytes()) {
+                        eprintln!("[log] failed to write app log: {error}");
+                    }
+                }
+                Err(error) => {
+                    eprintln!("[log] failed to open app log {}: {error}", path.display());
+                }
+            }
+        }
+        Err(error) => {
+            eprintln!("[log] failed to resolve app log path: {error}");
+        }
+    }
+}
+
+fn app_log_info(message: impl AsRef<str>) {
+    let message = message.as_ref();
+    println!("{message}");
+    append_app_log("INFO", message);
+}
+
+fn app_log_error(message: impl AsRef<str>) {
+    let message = message.as_ref();
+    eprintln!("{message}");
+    append_app_log("ERROR", message);
+}
+
 fn ensure_aicut_output_dir() -> Result<PathBuf, String> {
     let output_dir = aicut_root_dir()?.join("output");
-    println!(
+    app_log_info(format!(
         "[composer] ensuring default output dir: {}",
         output_dir.display()
-    );
+    ));
     fs::create_dir_all(&output_dir).map_err(|error| error.to_string())?;
     Ok(output_dir)
 }
@@ -1647,12 +1712,14 @@ async fn compose_project_video(
     output_dir: String,
     export_id: String,
 ) -> Result<ComposerExportResult, String> {
-    println!("[composer] compose_project_video requested export_id={export_id}");
+    app_log_info(format!(
+        "[composer] compose_project_video requested export_id={export_id}"
+    ));
     let template_path = PathBuf::from(template_path);
-    println!(
+    app_log_info(format!(
         "[composer] validating template path: {}",
         template_path.display()
-    );
+    ));
     if !template_path.is_file() {
         return Err("模板 XML 文件不存在".to_string());
     }
@@ -1661,28 +1728,28 @@ async fn compose_project_video(
     let project_root = fs::canonicalize(project_root).map_err(|error| error.to_string())?;
     let project_dir =
         fs::canonicalize(PathBuf::from(project_dir)).map_err(|error| error.to_string())?;
-    println!(
+    app_log_info(format!(
         "[composer] validating project dir: {}",
         project_dir.display()
-    );
+    ));
     if !project_dir.starts_with(&project_root) {
         return Err("项目目录无效".to_string());
     }
 
     let project_path = project_dir.join("projectFile.xml");
-    println!(
+    app_log_info(format!(
         "[composer] validating project xml: {}",
         project_path.display()
-    );
+    ));
     if !project_path.is_file() {
         return Err("projectFile.xml 不存在".to_string());
     }
 
     let output_dir = PathBuf::from(output_dir);
-    println!(
+    app_log_info(format!(
         "[composer] ensuring selected output dir: {}",
         output_dir.display()
-    );
+    ));
     fs::create_dir_all(&output_dir).map_err(|error| error.to_string())?;
     if !output_dir.is_dir() {
         return Err("输出目录无效".to_string());
@@ -1693,7 +1760,7 @@ async fn compose_project_video(
         .map_err(|error| error.to_string())?
         .as_millis();
     let output_path = output_dir.join(format!("aicut-output-{timestamp}.mp4"));
-    println!("[composer] output file: {}", output_path.display());
+    app_log_info(format!("[composer] output file: {}", output_path.display()));
     let output_path_string = output_path.to_string_lossy().to_string();
     let template_path_string = template_path.to_string_lossy().to_string();
     let project_path_string = project_path.to_string_lossy().to_string();
@@ -1703,7 +1770,7 @@ async fn compose_project_video(
 
     emit_composer_progress(&app, &export_id, 0, "正在准备导出...");
 
-    println!("[composer] spawning blocking compose task");
+    app_log_info("[composer] spawning blocking compose task");
     tauri::async_runtime::spawn_blocking(move || {
         let composer = composer.lock().map_err(|error| error.to_string())?;
         composer.compose_video(
@@ -1717,7 +1784,9 @@ async fn compose_project_video(
     .await
     .map_err(|error| error.to_string())??;
 
-    println!("[composer] compose_project_video finished export_id={export_id}");
+    app_log_info(format!(
+        "[composer] compose_project_video finished export_id={export_id}"
+    ));
     emit_composer_progress(&app, &export_id, 100, "导出完成");
 
     Ok(ComposerExportResult {
@@ -1833,29 +1902,29 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            println!("[app] setup start");
+            app_log_info("[app] setup start");
             let composer = ComposerRuntime::initialize();
             app.manage(Arc::new(Mutex::new(composer)));
-            println!("[app] composer state managed");
+            app_log_info("[app] composer state managed");
 
             if let Some(window) = app.get_webview_window("main") {
-                println!("[app] configuring main window");
+                app_log_info("[app] configuring main window");
                 let _ = window.set_background_color(Some(Color(7, 18, 42, 255)));
             }
-            println!("[app] setup complete");
+            app_log_info("[app] setup complete");
             Ok(())
         })
         .on_window_event(|window, event| {
             if matches!(event, WindowEvent::CloseRequested { .. }) {
-                println!("[app] close requested, cleaning composer");
+                app_log_info("[app] close requested, cleaning composer");
                 if let Some(composer) = window.try_state::<ComposerState>() {
                     if let Ok(mut composer) = composer.lock() {
                         composer.cleanup();
                     } else {
-                        eprintln!("[app] failed to lock composer during close");
+                        app_log_error("[app] failed to lock composer during close");
                     }
                 } else {
-                    eprintln!("[app] composer state not found during close");
+                    app_log_error("[app] composer state not found during close");
                 }
             }
         })
