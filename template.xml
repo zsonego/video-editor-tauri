@@ -41,7 +41,7 @@
                 <asset id="y7u1i4o7p0a3s6d9f2g5j" filepath= "template/assets/2.mp4"/>      
                 <asset id="c4v7x0z3a6s9d2f5g8j1k" filepath= "template/assets/3.mp4"/>
                 <asset id="t8r1y4u7i0o3p6a9s2d5f" filepath= "template/assets/4.mp4"/>
-                <asset id="k2n5m8q1w4e7r0t3y6u9i" filepath= "template/assets/5.mp4"/>                                  
+                <asset id="k2n5m8q1w4e7r0t3y6u9i" filepath= "template/assets/5.mp4"/>                          
             </default-asset>            
         </media-asset>
 
@@ -59,7 +59,7 @@
             <default-asset>
                 <asset id="a7t2x9k4p6m8q1r3v5w0e2" filepath= "template/assets/6.mp4"/>
                 <asset id="j3f8s0d5g9h2k6l4z7x1c9" filepath= "template/assets/7.mp4"/>      
-                <asset id="b5n7m2q4w6e8r0t3y9u1i7" filepath= "template/assets/8.mp4"/>            
+                <asset id="b5n7m2q4w6e8r0t3y9u1i7" filepath= "template/assets/8.mp4"/>           
             </default-asset>           
         </media-asset>
 
@@ -75,23 +75,41 @@
             <comment>......</comment> <!--备注说明 -->
             <!-- 示例素材列表，全都在assets-demo路径下. 示例素材列表长度决定了该素材集包含素材数 -->
             <default-asset>
-                <asset id="a7t2x9k4p6m8q1r3v5w0e2" filepath= "template/assets/4.mp4"/>
-                <asset id="j3f8s0d5g9h2k6l4z7x1c9" filepath= "template/assets/5.mp4"/>      
-                <asset id="b5n7m2q4w6e8r0t3y9u1i7" filepath= "template/assets/6.mp4"/>            
+                <asset id="a7t2x9k246m8q1r3v5w0e2" filepath= "template/assets/4.mp4"/>
+                <asset id="j3f8s0d5g9h2yjl4z7x1c9" filepath= "template/assets/5.mp4"/>      
             </default-asset>           
         </media-asset>
 
         <!-- ========== 视频片段（对应中间剪辑层） ========== -->
         <clips id="z7x1c4v8b2n5m9q0w3e6r" target-track="clips">
             <clip id="u4p7a0d3f6g9j2k5p8s1t" name="舞蹈片段">
-                <duration>13000</duration> <!-- 片段时长（毫秒） -->
+                <duration>5000</duration> <!-- 片段时长（毫秒） -->
                 <comment>......</comment> <!--片段备注说明 -->               
 
                 <!-- 剪辑区域1， 对应的素材集：裙装 -->
-                <area id="e7r0t3y6u1i4o7p9a2s5d" media-asset="serhw8q52e9zp4s273w" index="1">
+                <area id="e7r0t3y6u1i4o7p9a2s5d" asset-id="i3o6p9a2s5d8f1g4j7q0w">
                     <!-- 源视频区域定义 -->
                     <source>                        
-                        <duration>5000</duration> <!-- 剪辑时长（毫秒） -->
+                        <duration>12000</duration> <!-- 剪辑时长（毫秒） -->
+                    </source>
+                    <!-- 变换规则 -->
+                    <transform>
+                        <mirror>none</mirror> <!--镜像效果 none | horizontal | vertical -->
+                        <speed>0.8</speed> <!-- 播放速度 1-原速  <1 慢放  >1快放 -->
+                    </transform>
+                    <!-- 目标区域定义 -->
+                    <destination> 
+                        <position x="500" y="350" /> <!-- 目标起点坐标 -->
+                        <width>100</width> <!-- 目标宽度 -->
+                        <height>180</height> <!-- 目标高度 -->
+                        <!-- 注：在目标视频中的播放时长 = source.duration * trasform.speed -->
+                    </destination>
+                </area>
+
+                 <area id="e7r0t3y6u1i4hyj9a2s5d" asset-id="i3o6p9a2s5d8f1g4j7q0w">
+                    <!-- 源视频区域定义 -->
+                    <source>                        
+                        <duration>9000</duration> <!-- 剪辑时长（毫秒） -->
                     </source>
                     <!-- 变换规则 -->
                     <transform>
@@ -108,10 +126,28 @@
                 </area>
 
                 <!-- 剪辑区域2， 对应的素材集：裤装 -->
-                <area id="b8n2m5q9w3e6r0t7y1u4i" media-asset="serhw8q52e9zp4s273w" index="1">
+                <area id="b8n2m5q9w3e6r0t7y1u4i" asset-id="y7u1i4o7p0a3s6d9f2g5j">
                     <!-- 源视频区域定义 -->
                     <source>                        
-                        <duration>5000</duration> <!-- 剪辑时长（毫秒） -->
+                        <duration>60000</duration> <!-- 剪辑时长（毫秒） -->
+                    </source>
+                    <!-- 变换规则 -->
+                    <transform>
+                        <mirror>none</mirror> <!--镜像效果 none | horizontal | vertical -->
+                        <speed>0.8</speed> <!-- 播放速度 1-原速  <1 慢放  >1快放 -->
+                    </transform>
+                    <!-- 目标区域定义 -->
+                    <destination> 
+                        <position x="500" y="350" /> <!-- 目标起点坐标 -->
+                        <width>100</width> <!-- 目标宽度 -->
+                        <height>180</height> <!-- 目标高度 -->                        
+                        <!-- 注：在目标视频中的播放时长 = source.duration * trasform.speed -->
+                    </destination>
+                </area>
+                 <area id="b8n2m5q9w3e6ryj2y1u4i" asset-id="c4v7x0z3a6s9d2f5g8j1k">
+                    <!-- 源视频区域定义 -->
+                    <source>                        
+                        <duration>8000</duration> <!-- 剪辑时长（毫秒） -->
                     </source>
                     <!-- 变换规则 -->
                     <transform>
@@ -147,12 +183,80 @@
             </clip>
 
             <clip id="v4c7x1z5a8s2d6f9g3j7k" name="户外活动">
-                <duration>5000</duration> <!-- 片段时长（毫秒） -->
+                <duration>60000</duration> <!-- 片段时长（毫秒） -->
                 <comment>......</comment>
                 <!--片段备注说明 -->
 
                 <!-- 剪辑区域1， 对应的素材集：套裙 -->
-                <area id="h2k5p8s1d4f7g0j3q6w9e" media-asset="serhw8q52e9zp4s273w" index="2">
+                 <area id="h2k5p8s1d426h0j3q6w9e" asset-id="t8r1y4u7i0o3p6a9s2d5f">
+                    <source>                        
+                        <duration>4000</duration> <!-- 剪辑时长（毫秒） -->
+                    </source>
+                    <!-- 变换规则 -->
+                    <transform>
+                        <mirror>none</mirror> <!--镜像效果 none | horizontal | vertical -->
+                        <speed>0.8</speed> <!-- 播放速度 1-原速  <1 慢放  >1快放 -->
+                    </transform>
+                    <!-- 目标区域定义 -->
+                    <destination> 
+                        <position x="500" y="350" /> <!-- 目标起点坐标 -->
+                        <width>100</width> <!-- 目标宽度 -->
+                        <height>180</height> <!-- 目标高度 -->                      
+                        <!-- 注：在目标视频中的播放时长 = source.duration * trasform.speed -->
+                    </destination>
+                </area>
+                <area id="h2k5p8s1d4f7g0j3q6w9e" asset-id="k2n5m8q1w4e7r0t3y6u9i">
+                    <source>                        
+                        <duration>2000</duration> <!-- 剪辑时长（毫秒） -->
+                    </source>
+                    <!-- 变换规则 -->
+                    <transform>
+                        <mirror>none</mirror> <!--镜像效果 none | horizontal | vertical -->
+                        <speed>0.8</speed> <!-- 播放速度 1-原速  <1 慢放  >1快放 -->
+                    </transform>
+                    <!-- 目标区域定义 -->
+                    <destination> 
+                        <position x="500" y="350" /> <!-- 目标起点坐标 -->
+                        <width>100</width> <!-- 目标宽度 -->
+                        <height>180</height> <!-- 目标高度 -->                      
+                        <!-- 注：在目标视频中的播放时长 = source.duration * trasform.speed -->
+                    </destination>
+                </area>
+                 <area id="h2k5p8s1d4fhn0j3q6w9e" asset-id="a7t2x9k4p6m8q1r3v5w0e2">
+                    <source>                        
+                        <duration>30000</duration> <!-- 剪辑时长（毫秒） -->
+                    </source>
+                    <!-- 变换规则 -->
+                    <transform>
+                        <mirror>none</mirror> <!--镜像效果 none | horizontal | vertical -->
+                        <speed>0.8</speed> <!-- 播放速度 1-原速  <1 慢放  >1快放 -->
+                    </transform>
+                    <!-- 目标区域定义 -->
+                    <destination> 
+                        <position x="500" y="350" /> <!-- 目标起点坐标 -->
+                        <width>100</width> <!-- 目标宽度 -->
+                        <height>180</height> <!-- 目标高度 -->                      
+                        <!-- 注：在目标视频中的播放时长 = source.duration * trasform.speed -->
+                    </destination>
+                </area>
+                 <area id="h2k5p8s1d4fh7ni8q6w9e" asset-id="j3f8s0d5g9h2k6l4z7x1c9">
+                    <source>                        
+                        <duration>35000</duration> <!-- 剪辑时长（毫秒） -->
+                    </source>
+                    <!-- 变换规则 -->
+                    <transform>
+                        <mirror>none</mirror> <!--镜像效果 none | horizontal | vertical -->
+                        <speed>0.8</speed> <!-- 播放速度 1-原速  <1 慢放  >1快放 -->
+                    </transform>
+                    <!-- 目标区域定义 -->
+                    <destination> 
+                        <position x="500" y="350" /> <!-- 目标起点坐标 -->
+                        <width>100</width> <!-- 目标宽度 -->
+                        <height>180</height> <!-- 目标高度 -->                      
+                        <!-- 注：在目标视频中的播放时长 = source.duration * trasform.speed -->
+                    </destination>
+                </area>
+                 <area id="h2k5p8s1d4fyh7j3q6w9e" asset-id="b5n7m2q4w6e8r0t3y9u1i7">
                     <source>                        
                         <duration>5000</duration> <!-- 剪辑时长（毫秒） -->
                     </source>
@@ -166,6 +270,91 @@
                         <position x="500" y="350" /> <!-- 目标起点坐标 -->
                         <width>100</width> <!-- 目标宽度 -->
                         <height>180</height> <!-- 目标高度 -->                      
+                        <!-- 注：在目标视频中的播放时长 = source.duration * trasform.speed -->
+                    </destination>
+                </area>
+                 <area id="h2k5p8s1g6hyh7j3q6w9e" asset-id="a7t2x9k246m8q1r3v5w0e2">
+                    <source>                        
+                        <duration>5000</duration> <!-- 剪辑时长（毫秒） -->
+                    </source>
+                    <!-- 变换规则 -->
+                    <transform>
+                        <mirror>none</mirror> <!--镜像效果 none | horizontal | vertical -->
+                        <speed>0.8</speed> <!-- 播放速度 1-原速  <1 慢放  >1快放 -->
+                    </transform>
+                    <!-- 目标区域定义 -->
+                    <destination> 
+                        <position x="500" y="350" /> <!-- 目标起点坐标 -->
+                        <width>100</width> <!-- 目标宽度 -->
+                        <height>180</height> <!-- 目标高度 -->                      
+                        <!-- 注：在目标视频中的播放时长 = source.duration * trasform.speed -->
+                    </destination>
+                </area>
+                 <area id="h2k5p8s1d4huk7j3q6w9e" asset-id="a7t2x9k246m8q1r3v5w0e2">
+                    <source>                        
+                        <duration>1000</duration> <!-- 剪辑时长（毫秒） -->
+                    </source>
+                    <!-- 变换规则 -->
+                    <transform>
+                        <mirror>none</mirror> <!--镜像效果 none | horizontal | vertical -->
+                        <speed>0.6</speed> <!-- 播放速度 1-原速  <1 慢放  >1快放 -->
+                    </transform>
+                    <!-- 目标区域定义 -->
+                    <destination> 
+                        <position x="300" y="370" /> <!-- 目标起点坐标 -->
+                        <width>10</width> <!-- 目标宽度 -->
+                        <height>170</height> <!-- 目标高度 -->                      
+                        <!-- 注：在目标视频中的播放时长 = source.duration * trasform.speed -->
+                    </destination>
+                </area>
+                <area id="h2k5p8s1d56hk7j3q6w9e" asset-id="j3f8s0d5g9h2yjl4z7x1c9">
+                    <source>                        
+                        <duration>6000</duration> <!-- 剪辑时长（毫秒） -->
+                    </source>
+                    <!-- 变换规则 -->
+                    <transform>
+                        <mirror>none</mirror> <!--镜像效果 none | horizontal | vertical -->
+                        <speed>0.6</speed> <!-- 播放速度 1-原速  <1 慢放  >1快放 -->
+                    </transform>
+                    <!-- 目标区域定义 -->
+                    <destination> 
+                        <position x="300" y="370" /> <!-- 目标起点坐标 -->
+                        <width>10</width> <!-- 目标宽度 -->
+                        <height>170</height> <!-- 目标高度 -->                      
+                        <!-- 注：在目标视频中的播放时长 = source.duration * trasform.speed -->
+                    </destination>
+                </area>
+                <area id="h2khn7s1d4huk7j3q6w9e" asset-id="j3f8s0d5g9h2yjl4z7x1c9">
+                    <source>                        
+                        <duration>5000</duration> <!-- 剪辑时长（毫秒） -->
+                    </source>
+                    <!-- 变换规则 -->
+                    <transform>
+                        <mirror>none</mirror> <!--镜像效果 none | horizontal | vertical -->
+                        <speed>0.6</speed> <!-- 播放速度 1-原速  <1 慢放  >1快放 -->
+                    </transform>
+                    <!-- 目标区域定义 -->
+                    <destination> 
+                        <position x="300" y="370" /> <!-- 目标起点坐标 -->
+                        <width>10</width> <!-- 目标宽度 -->
+                        <height>170</height> <!-- 目标高度 -->                      
+                        <!-- 注：在目标视频中的播放时长 = source.duration * trasform.speed -->
+                    </destination>
+                </area>
+                <area id="h2k5p8s1d4bb77j3q6w9e" asset-id="j3f8s0d5g9h2yjl4z7x1c9">
+                    <source>                        
+                        <duration>3000</duration> <!-- 剪辑时长（毫秒） -->
+                    </source>
+                    <!-- 变换规则 -->
+                    <transform>
+                        <mirror>none</mirror> <!--镜像效果 none | horizontal | vertical -->
+                        <speed>0.6</speed> <!-- 播放速度 1-原速  <1 慢放  >1快放 -->
+                    </transform>
+                    <!-- 目标区域定义 -->
+                    <destination> 
+                        <position x="300" y="370" /> <!-- 目标起点坐标 -->
+                        <width>10</width> <!-- 目标宽度 -->
+                        <height>170</height> <!-- 目标高度 -->                      
                         <!-- 注：在目标视频中的播放时长 = source.duration * trasform.speed -->
                     </destination>
                 </area>

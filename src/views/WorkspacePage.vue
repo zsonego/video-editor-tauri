@@ -6,6 +6,7 @@ import {
   onMounted,
   reactive,
   ref,
+  watch,
 } from 'vue';
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -18,6 +19,7 @@ import {
 } from '../api/template';
 import { systemMessage } from '../utils/message';
 import logoImage from '../assets/logo.png';
+import bundledTemplateXml from '../../template.xml?raw';
 
 const emit = defineEmits(['logout']);
 
@@ -135,8 +137,10 @@ const timelineCollapsed = ref(true);
 const showFinishedControls = ref(false);
 const selectedVideoName = ref('视频 1');
 const selectedVideoKey = ref('');
+const selectedVideoAssetId = ref('');
 const selectedStyleName = ref('视频轨道 V1');
-const subtitleText = ref('这是一段字幕内容');
+const defaultSubtitleText = '这是一段字幕内容';
+const subtitleText = ref(defaultSubtitleText);
 const timelinePulse = ref(false);
 
 const draftLibraryVisible = ref(false);
@@ -155,6 +159,9 @@ let timelineUpHandler = null;
 let playerResizeFrame = null;
 let playerResizeTimer = null;
 let playerResizeObserver = null;
+let timelineSeekFrame = null;
+let pendingTimelineSeekTime = null;
+let offsetPersistTimer = null;
 
 const mainVideoRef = ref(null);
 const modalVideoRef = ref(null);
@@ -182,6 +189,7 @@ const timeline = reactive({
 
 const draftProjects = ref([]);
 const segmentImportState = reactive({});
+const videoEditStateCache = reactive({});
 
 const sidebarContextLabel = computed(() => {
   if (currentViewState.value === 'finished') return '成片素材';
@@ -238,16 +246,36 @@ const visibleDraftProjects = computed(() =>
         (project) => project.status === draftFilter.value,
       ),
 );
-const timelineWidthPercent = computed(
-  () => `${(timeline.selectedDuration / timeline.totalDuration) * 100}%`,
-);
-const timelineLeftPercent = computed(
-  () => `${(timeline.startTime / timeline.totalDuration) * 100}%`,
-);
+const timelineWidthPercent = computed(() => {
+  const totalDuration = Math.max(1, Number(timeline.totalDuration) || 1);
+  const selectedDuration = Math.min(
+    totalDuration,
+    Math.max(0, Number(timeline.selectedDuration) || 0),
+  );
+
+  return `${(selectedDuration / totalDuration) * 100}%`;
+});
+const timelineLeftPercent = computed(() => {
+  const totalDuration = Math.max(1, Number(timeline.totalDuration) || 1);
+  const selectedDuration = Math.min(
+    totalDuration,
+    Math.max(0, Number(timeline.selectedDuration) || 0),
+  );
+  const maxStart = Math.max(0, totalDuration - selectedDuration);
+  const startTime = Math.min(
+    maxStart,
+    Math.max(0, Number(timeline.startTime) || 0),
+  );
+
+  return `${(startTime / totalDuration) * 100}%`;
+});
 const timelineRangeLabel = computed(() => {
   const endTime = timeline.startTime + timeline.selectedDuration;
   return `${formatTimelineTick(timeline.startTime)} - ${formatTimelineTick(endTime)}`;
 });
+const timelineSelectedDurationLabel = computed(() =>
+  formatPlayerTime(timeline.selectedDuration),
+);
 const timelineRulerTicks = computed(() => {
   const totalDuration = Math.max(1, Number(timeline.totalDuration) || 1);
   const targetTickCount = 5;
@@ -617,6 +645,164 @@ function resolveTemplateVideoSource(filePath) {
   return localPath ? convertFileSrc(localPath) : '';
 }
 
+function getActiveTemplateXmlContent() {
+  return activeTemplateLocalInfo.value?.xmlContent || bundledTemplateXml || '';
+}
+
+function getDirectChildElements(parent, tagName) {
+  const lowerTagName = tagName.toLowerCase();
+
+  return Array.from(parent.children).filter(
+    (child) => child.tagName.toLowerCase() === lowerTagName,
+  );
+}
+
+function normalizeTemplateDurationSeconds(durationValue) {
+  const duration = Number(String(durationValue || '').trim());
+  if (!Number.isFinite(duration) || duration <= 0) return 0;
+
+  return duration / 1000;
+}
+
+function getAreaSourceDurationInfoFromElement(area) {
+  const source = getDirectChildElements(area, 'source')[0];
+  const durationRaw = source
+    ? getDirectChildElements(source, 'duration')[0]?.textContent?.trim() || ''
+    : '';
+
+  return {
+    durationRaw,
+    durationSeconds: normalizeTemplateDurationSeconds(durationRaw),
+  };
+}
+
+function findTemplateAreaMatchFromDom(xmlContent, assetId) {
+  const xml = new DOMParser().parseFromString(xmlContent, 'text/xml');
+  if (xml.querySelector('parsererror')) return null;
+
+  const clips = Array.from(xml.querySelectorAll('clips'));
+  for (const clipsElement of clips) {
+    const clipElements = getDirectChildElements(clipsElement, 'clip');
+    for (const clip of clipElements) {
+      const areas = getDirectChildElements(clip, 'area');
+      for (const area of areas) {
+        if (area.getAttribute('asset-id') === assetId) {
+          return {
+            clipsId: clipsElement.getAttribute('id') || '',
+            clipId: clip.getAttribute('id') || '',
+            areaId: area.getAttribute('id') || '',
+            clipsAssetId: area.getAttribute('asset-id') || '',
+            ...getAreaSourceDurationInfoFromElement(area),
+          };
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+function findTemplateAreaMatchFromText(xmlContent, assetId) {
+  const clipsMatches = Array.from(
+    xmlContent.matchAll(/<clips\b([^>]*)>([\s\S]*?)<\/clips>/gi),
+  );
+
+  for (const clipsMatch of clipsMatches) {
+    const clipsAttributes = clipsMatch[1] || '';
+    const clipsBody = clipsMatch[2] || '';
+    const clipMatches = Array.from(
+      clipsBody.matchAll(/<clip\b([^>]*)>([\s\S]*?)<\/clip>/gi),
+    );
+
+    for (const clipMatch of clipMatches) {
+      const clipAttributes = clipMatch[1] || '';
+      const clipBody = clipMatch[2] || '';
+      const areaMatches = Array.from(
+        clipBody.matchAll(/<area\b([^>]*)>([\s\S]*?)<\/area>/gi),
+      );
+
+      for (const areaMatch of areaMatches) {
+        const areaAttributes = areaMatch[1] || '';
+        const areaBody = areaMatch[2] || '';
+        const clipsAssetId = getAttributeValue(areaAttributes, 'asset-id');
+        if (clipsAssetId !== assetId) {
+          continue;
+        }
+
+        const durationRaw = getElementText(
+          getElementText(areaBody, 'source'),
+          'duration',
+        );
+
+        return {
+          clipsId: getAttributeValue(clipsAttributes, 'id'),
+          clipId: getAttributeValue(clipAttributes, 'id'),
+          areaId: getAttributeValue(areaAttributes, 'id'),
+          clipsAssetId,
+          durationRaw,
+          durationSeconds: normalizeTemplateDurationSeconds(durationRaw),
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
+function findTemplateAreaMatch(assetId) {
+  const xmlContent = getActiveTemplateXmlContent();
+  const normalizedAssetId = String(assetId || '').trim();
+  if (!xmlContent || !normalizedAssetId) return null;
+
+  return (
+    findTemplateAreaMatchFromDom(xmlContent, normalizedAssetId) ??
+    findTemplateAreaMatchFromText(xmlContent, normalizedAssetId)
+  );
+}
+
+function findTemplateAreaDurationSeconds(assetId) {
+  return findTemplateAreaMatch(assetId)?.durationSeconds || null;
+}
+
+function getTimelineSelectionDuration(videoInfo, videoDuration) {
+  const templateDuration = findTemplateAreaDurationSeconds(videoInfo.assetId);
+
+  return Number.isFinite(templateDuration) && templateDuration > 0
+    ? templateDuration
+    : videoDuration;
+}
+
+function logTemplateAssetDurationMatch(videoInfo) {
+  const materialAssetId = videoInfo.assetId || '';
+  const areaMatch = findTemplateAreaMatch(materialAssetId);
+
+  console.log('[duration-track]', {
+    materialAssetId,
+    clipsAssetId: areaMatch?.clipsAssetId || '',
+    duration: areaMatch?.durationRaw || '',
+    durationSeconds: areaMatch?.durationSeconds || null,
+    matched: Boolean(areaMatch),
+    fallbackToVideoDuration: !areaMatch,
+    videoDurationSeconds: videoInfo.durationSeconds || null,
+    timelineTrackDuration: timeline.totalDuration,
+    timelineSelectionDuration: timeline.selectedDuration,
+  });
+}
+
+function cacheCurrentVideoEditState() {
+  const key = selectedVideoKey.value;
+  if (!key) return;
+
+  videoEditStateCache[key] = {
+    startTime: timeline.startTime,
+    subtitleText: subtitleText.value,
+  };
+}
+
+function getVideoEditState(key) {
+  return videoEditStateCache[key] || null;
+}
+
 async function createTemplateAssetVideo(asset, index) {
   const localPath = resolveTemplateAssetPath(asset.filepath);
   const source = resolveTemplateVideoSource(asset.filepath);
@@ -861,29 +1047,45 @@ async function openReplaceFilePicker(segment, videoIndex) {
 }
 
 function selectVideoForTimeline(video, styleName = '') {
+  cacheCurrentVideoEditState();
+
   const videoInfo =
     typeof video === 'string'
       ? { name: video, duration: selectedVideoDuration.value }
       : video;
+  const nextVideoKey = videoInfo.id || videoInfo.name;
+  const cachedState = getVideoEditState(nextVideoKey);
 
   selectedVideoName.value = videoInfo.name;
-  selectedVideoKey.value = videoInfo.id || videoInfo.name;
+  selectedVideoKey.value = nextVideoKey;
   selectedVideoDuration.value = videoInfo.duration || '00:00';
   selectedVideoSource.value = videoInfo.source || videoSource;
   if (
     Number.isFinite(videoInfo.durationSeconds) &&
     videoInfo.durationSeconds > 0
   ) {
-    const duration = Math.max(1, Math.round(videoInfo.durationSeconds));
+    const duration = Math.max(1, videoInfo.durationSeconds);
     timeline.totalDuration = duration;
-    timeline.selectedDuration = duration;
-    timeline.startTime = clampTimelineStart(timeline.startTime);
+    timeline.selectedDuration = Math.min(
+      timeline.totalDuration,
+      getTimelineSelectionDuration(videoInfo, duration),
+    );
+    timeline.startTime = clampTimelineStart(
+      Number.isFinite(cachedState?.startTime) ? cachedState.startTime : 0,
+    );
   }
+  subtitleText.value =
+    typeof cachedState?.subtitleText === 'string'
+      ? cachedState.subtitleText
+      : defaultSubtitleText;
+  selectedVideoAssetId.value = videoInfo.assetId || '';
+  logTemplateAssetDurationMatch(videoInfo);
   if (styleName) {
     selectedStyleName.value = styleName;
   }
   nextTick(() => {
     resetMainPlayer();
+    syncMainPlayerToTimelineStart();
   });
   timelinePulse.value = true;
   window.setTimeout(() => {
@@ -904,12 +1106,75 @@ function clampTimelineStart(startTime) {
   return Math.min(Math.max(startTime, 0), maxStart);
 }
 
+function syncMainPlayerToTimelineStart() {
+  pendingTimelineSeekTime = timeline.startTime;
+  if (timelineSeekFrame) return;
+
+  timelineSeekFrame = requestAnimationFrame(() => {
+    timelineSeekFrame = null;
+    const targetTime = pendingTimelineSeekTime;
+    pendingTimelineSeekTime = null;
+    seekMainPlayerToTimelineTime(targetTime);
+  });
+}
+
+function seekMainPlayerToTimelineTime(targetTime) {
+  const video = mainVideoRef.value;
+  if (!video) return;
+
+  const duration = Number.isFinite(video.duration) ? video.duration : 0;
+  const nextTime = duration
+    ? Math.min(duration, targetTime)
+    : targetTime;
+  const currentTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+  if (Math.abs(currentTime - nextTime) < 0.03) return;
+
+  video.currentTime = Math.max(0, nextTime);
+  updatePlayerControls();
+}
+
+async function persistSelectedVideoOffset(assetId, offsetMs) {
+  if (!activeProjectDir.value || !assetId) return;
+
+  try {
+    await invoke('update_project_asset_offset', {
+      projectDir: activeProjectDir.value,
+      assetId,
+      offsetMs,
+    });
+  } catch (error) {
+    systemMessage.error(error?.message || '时间偏移更新失败');
+  }
+}
+
+function scheduleSelectedVideoOffsetPersist() {
+  if (offsetPersistTimer) {
+    window.clearTimeout(offsetPersistTimer);
+  }
+
+  const assetId = selectedVideoAssetId.value;
+  const offsetMs = Math.max(0, Math.round(timeline.startTime * 1000));
+  if (!activeProjectDir.value || !assetId) return;
+
+  offsetPersistTimer = window.setTimeout(() => {
+    offsetPersistTimer = null;
+    persistSelectedVideoOffset(assetId, offsetMs);
+  }, 300);
+}
+
 function startTimelineDrag(event) {
   const track = timelineTrackRef.value;
   if (!track) return;
 
+  const trackRect = track.getBoundingClientRect();
+  if (!trackRect.width) return;
+
   const selectionRect = event.currentTarget.getBoundingClientRect();
   const offset = event.clientX - selectionRect.left;
+  const maxLeft =
+    trackRect.width *
+    ((timeline.totalDuration - timeline.selectedDuration) /
+      timeline.totalDuration);
   event.currentTarget.setPointerCapture?.(event.pointerId);
 
   if (timelineMoveHandler) {
@@ -920,16 +1185,13 @@ function startTimelineDrag(event) {
   }
 
   timelineMoveHandler = (moveEvent) => {
-    const rect = track.getBoundingClientRect();
-    const rawLeft = moveEvent.clientX - rect.left - offset;
-    const maxLeft =
-      rect.width *
-      ((timeline.totalDuration - timeline.selectedDuration) /
-        timeline.totalDuration);
+    const rawLeft = moveEvent.clientX - trackRect.left - offset;
     const clampedLeft = Math.min(Math.max(rawLeft, 0), Math.max(0, maxLeft));
     timeline.startTime = clampTimelineStart(
-      (clampedLeft / rect.width) * timeline.totalDuration,
+      (clampedLeft / trackRect.width) * timeline.totalDuration,
     );
+    cacheCurrentVideoEditState();
+    syncMainPlayerToTimelineStart();
   };
   timelineUpHandler = () => {
     timelineDragging.value = false;
@@ -937,12 +1199,18 @@ function startTimelineDrag(event) {
     window.removeEventListener('pointerup', timelineUpHandler);
     timelineMoveHandler = null;
     timelineUpHandler = null;
+    syncMainPlayerToTimelineStart();
+    scheduleSelectedVideoOffsetPersist();
   };
 
   timelineDragging.value = true;
   window.addEventListener('pointermove', timelineMoveHandler);
   window.addEventListener('pointerup', timelineUpHandler);
 }
+
+watch(subtitleText, () => {
+  cacheCurrentVideoEditState();
+});
 
 function toggleDraftLibrary() {
   finishedLibraryVisible.value = false;
@@ -1568,6 +1836,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  cacheCurrentVideoEditState();
   document.documentElement.classList.remove('dark');
   window.removeEventListener('resize', schedulePlayerResize);
   if (exportInterval) {
@@ -1582,8 +1851,14 @@ onBeforeUnmount(() => {
   if (playerResizeFrame) {
     cancelAnimationFrame(playerResizeFrame);
   }
+  if (timelineSeekFrame) {
+    cancelAnimationFrame(timelineSeekFrame);
+  }
   if (playerResizeTimer) {
     window.clearTimeout(playerResizeTimer);
+  }
+  if (offsetPersistTimer) {
+    window.clearTimeout(offsetPersistTimer);
   }
   playerResizeObserver?.disconnect();
   importedVideoObjectUrls.forEach((objectUrl) => {
@@ -2262,13 +2537,13 @@ onBeforeUnmount(() => {
                               >{{ selectedClipTitle }}</span
                             >
                           </div>
-                          <div class="flex items-baseline gap-2">
-                            <span class="text-[10px] font-bold text-primary"
-                              >时长：{{ selectedVideoDuration }}</span
-                            >
-                            <div class="flex-1"></div>
+                          <div class="duration-meta-row">
                             <span
-                              class="text-[10px] font-medium text-white/90 font-code-data tracking-tighter"
+                              class="duration-meta-duration text-[10px] font-bold text-primary"
+                              >时长：{{ timelineSelectedDurationLabel }}</span
+                            >
+                            <span
+                              class="duration-meta-range text-[10px] font-medium text-white/90 font-code-data tracking-tighter"
                               >{{ timelineRangeLabel }}</span
                             >
                           </div>
@@ -2866,6 +3141,30 @@ onBeforeUnmount(() => {
 .duration-selection.is-dragging {
   cursor: grabbing;
   transition: none !important;
+}
+
+.duration-meta-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  width: 100%;
+}
+
+.duration-meta-row > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.duration-meta-duration {
+  flex: 1 1 45%;
+}
+
+.duration-meta-range {
+  flex: 1 1 55%;
+  text-align: right;
 }
 
 .timeline-ruler {

@@ -233,6 +233,25 @@ struct TemplateMediaAsset {
     assets: Vec<TemplateAsset>,
 }
 
+#[derive(Clone)]
+struct TemplateClipArea {
+    id: String,
+    asset_id: String,
+}
+
+#[derive(Clone)]
+struct TemplateClip {
+    id: String,
+    areas: Vec<TemplateClipArea>,
+}
+
+#[derive(Clone)]
+struct TemplateClips {
+    id: String,
+    target_track: String,
+    clips: Vec<TemplateClip>,
+}
+
 fn is_xml_name_boundary(ch: Option<char>) -> bool {
     ch.map(|value| value.is_whitespace() || value == '>' || value == '/')
         .unwrap_or(false)
@@ -495,6 +514,56 @@ fn update_project_asset_filepath(
     }
 }
 
+fn update_project_clip_offsets(
+    project_file_xml: &str,
+    asset_id: &str,
+    offset_ms: u64,
+) -> Result<String, String> {
+    let mut output = String::new();
+    let mut search_start = 0;
+    let mut updated = false;
+    let offset = offset_ms.to_string();
+
+    while let Some(relative_start) = project_file_xml[search_start..].find("<area") {
+        let tag_start = search_start + relative_start;
+        let after_name = project_file_xml[tag_start + "<area".len()..].chars().next();
+
+        if !is_xml_name_boundary(after_name) {
+            output.push_str(&project_file_xml[search_start..tag_start + "<area".len()]);
+            search_start = tag_start + "<area".len();
+            continue;
+        }
+
+        let Some(relative_tag_end) = project_file_xml[tag_start..].find('>') else {
+            break;
+        };
+        let tag_end = tag_start + relative_tag_end + 1;
+        let tag = &project_file_xml[tag_start..tag_end];
+
+        output.push_str(&project_file_xml[search_start..tag_start]);
+
+        if xml_attribute_value(tag, "asset-id")
+            .map(|value| value == asset_id)
+            .unwrap_or(false)
+        {
+            output.push_str(&replace_or_insert_xml_attribute(tag, "offset", &offset));
+            updated = true;
+        } else {
+            output.push_str(tag);
+        }
+
+        search_start = tag_end;
+    }
+
+    output.push_str(&project_file_xml[search_start..]);
+
+    if updated {
+        Ok(output)
+    } else {
+        Err("projectFile.xml 中未找到对应的 area".to_string())
+    }
+}
+
 fn parse_template_media_assets(xml_content: &str) -> Vec<TemplateMediaAsset> {
     find_xml_element_blocks(xml_content, "media-asset")
         .into_iter()
@@ -516,6 +585,39 @@ fn parse_template_media_assets(xml_content: &str) -> Vec<TemplateMediaAsset> {
                 .collect::<Vec<_>>();
 
             Some(TemplateMediaAsset { id, assets })
+        })
+        .collect()
+}
+
+fn parse_template_clips(xml_content: &str) -> Vec<TemplateClips> {
+    find_xml_element_blocks(xml_content, "clips")
+        .into_iter()
+        .filter_map(|(clips_tag, clips_inner)| {
+            let id = xml_attribute_value(&clips_tag, "id")?;
+            let target_track = xml_attribute_value(&clips_tag, "target-track").unwrap_or_default();
+            let clips = find_xml_element_blocks(&clips_inner, "clip")
+                .into_iter()
+                .filter_map(|(clip_tag, clip_inner)| {
+                    let id = xml_attribute_value(&clip_tag, "id")?;
+                    let areas = find_xml_element_blocks(&clip_inner, "area")
+                        .into_iter()
+                        .filter_map(|(area_tag, _)| {
+                            Some(TemplateClipArea {
+                                id: xml_attribute_value(&area_tag, "id")?,
+                                asset_id: xml_attribute_value(&area_tag, "asset-id")?,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+
+                    Some(TemplateClip { id, areas })
+                })
+                .collect::<Vec<_>>();
+
+            Some(TemplateClips {
+                id,
+                target_track,
+                clips,
+            })
         })
         .collect()
 }
@@ -550,6 +652,7 @@ fn generate_project_file_xml(
     let timeunit =
         xml_attribute_value(&template_tag, "timeunit").unwrap_or_else(|| "millisecond".to_string());
     let media_assets = parse_template_media_assets(template_xml);
+    let template_clips = parse_template_clips(template_xml);
     let last_update_time = format_timestamp(last_update_time);
     let mut output = String::new();
 
@@ -589,6 +692,33 @@ fn generate_project_file_xml(
         }
 
         output.push_str("        </media-asset>\n\n");
+    }
+
+    for clips in &template_clips {
+        output.push_str(&format!(
+            "        <clips id=\"{}\" target-track=\"{}\">\n",
+            escape_xml_attribute(&clips.id),
+            escape_xml_attribute(&clips.target_track)
+        ));
+
+        for clip in &clips.clips {
+            output.push_str(&format!(
+                "            <clip id=\"{}\">\n",
+                escape_xml_attribute(&clip.id)
+            ));
+
+            for area in &clip.areas {
+                output.push_str(&format!(
+                    "                <area id=\"{}\" asset-id=\"{}\" offset=\"0\" />\n",
+                    escape_xml_attribute(&area.id),
+                    escape_xml_attribute(&area.asset_id)
+                ));
+            }
+
+            output.push_str("            </clip>\n\n");
+        }
+
+        output.push_str("        </clips>\n\n");
     }
 
     output.push_str("    </project>\n\n");
@@ -994,6 +1124,36 @@ fn save_project_asset(
 }
 
 #[tauri::command]
+fn update_project_asset_offset(
+    project_dir: String,
+    asset_id: String,
+    offset_ms: u64,
+) -> Result<(), String> {
+    if asset_id.trim().is_empty() {
+        return Err("assetId 不能为空".to_string());
+    }
+
+    let (_, project_root) = ensure_aicut_dirs()?;
+    let project_root = fs::canonicalize(project_root).map_err(|error| error.to_string())?;
+    let project_dir =
+        fs::canonicalize(PathBuf::from(project_dir)).map_err(|error| error.to_string())?;
+
+    if !project_dir.starts_with(&project_root) {
+        return Err("项目目录无效".to_string());
+    }
+
+    let project_file_path = project_dir.join("projectFile.xml");
+    let project_file_xml =
+        fs::read_to_string(&project_file_path).map_err(|error| error.to_string())?;
+    let updated_project_file_xml =
+        update_project_clip_offsets(&project_file_xml, &asset_id, offset_ms)?;
+
+    fs::write(&project_file_path, updated_project_file_xml).map_err(|error| error.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
 fn delete_project_asset_files(project_dir: String, asset_paths: Vec<String>) -> Result<(), String> {
     let (_, project_root) = ensure_aicut_dirs()?;
     let project_root = fs::canonicalize(project_root).map_err(|error| error.to_string())?;
@@ -1112,6 +1272,7 @@ pub fn run() {
             cancel_template_download,
             create_project_workspace,
             save_project_asset,
+            update_project_asset_offset,
             delete_project_asset_files,
             get_machine_code
         ])
@@ -1125,7 +1286,24 @@ mod tests {
 
     #[test]
     fn generates_project_file_xml_from_template() {
-        let template_xml = include_str!("../../template.xml");
+        let template_xml = r#"<xmeml version="5">
+    <template id="seqvvgcrrjs0yizf4tn" name="测试模板" version="1.0" timeunit="millisecond">
+        <media-asset id="serhw8q52e9zp4s273w" name="素材集">
+            <default-asset>
+                <asset id="i3o6p9a2s5d8f1g4j7q0w" filepath="template/assets/1.mp4"/>
+            </default-asset>
+        </media-asset>
+        <clips id="z7x1c4v8b2n5m9q0w3e6r" target-track="clips">
+            <clip id="u4p7a0d3f6g9j2k5p8s1t" name="片段">
+                <area id="e7r0t3y6u1i4o7p9a2s5d" asset-id="i3o6p9a2s5d8f1g4j7q0w">
+                    <source>
+                        <duration>5000</duration>
+                    </source>
+                </area>
+            </clip>
+        </clips>
+    </template>
+</xmeml>"#;
         let project_xml =
             generate_project_file_xml(template_xml, "tpl-test-1000", 1000).expect("project xml");
 
@@ -1147,7 +1325,11 @@ mod tests {
         assert!(project_xml.contains("<media-asset id=\"serhw8q52e9zp4s273w\">"));
         assert!(project_xml.contains("filepath=\"template/assets/1.mp4\""));
         assert!(!project_xml.contains("<media-assets>"));
-        assert!(!project_xml.contains("<clips"));
+        assert!(project_xml.contains("<clips id=\"z7x1c4v8b2n5m9q0w3e6r\" target-track=\"clips\">"));
+        assert!(project_xml.contains(
+            "<area id=\"e7r0t3y6u1i4o7p9a2s5d\" asset-id=\"i3o6p9a2s5d8f1g4j7q0w\" offset=\"0\" />"
+        ));
+        assert!(!project_xml.contains("<source>"));
     }
 
     #[test]
@@ -1178,5 +1360,26 @@ mod tests {
 
         assert_eq!(filepaths.len(), 1);
         assert!(filepaths.contains("project/assets/shared.mp4"));
+    }
+
+    #[test]
+    fn updates_all_project_clip_offsets_by_asset_id() {
+        let project_xml = r#"<project>
+        <clips id="clips" target-track="clips">
+            <clip id="clip-a">
+                <area id="area-a" asset-id="asset-a" offset="0" />
+                <area id="area-b" asset-id="asset-b" offset="0" />
+            </clip>
+            <clip id="clip-b">
+                <area id="area-c" asset-id="asset-a" offset="1200" />
+            </clip>
+        </clips>
+    </project>"#;
+        let updated_xml =
+            update_project_clip_offsets(project_xml, "asset-a", 2500).expect("updated xml");
+
+        assert!(updated_xml.contains(r#"id="area-a" asset-id="asset-a" offset="2500""#));
+        assert!(updated_xml.contains(r#"id="area-b" asset-id="asset-b" offset="0""#));
+        assert!(updated_xml.contains(r#"id="area-c" asset-id="asset-a" offset="2500""#));
     }
 }

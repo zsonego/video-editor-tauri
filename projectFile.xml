@@ -5,9 +5,9 @@
     <!-- 模板定义 -->
     <project id="o5p8a1s4d7f0g3j6q9w2e" name="顾小童周岁纪念" version="1.0" timeunit="millisecond">
         <meta>
-            <template id="seqvvgcrrjs0yizf4tn" version="1.0"></template> <!--使用的模板信息 -->        
+            <template id="seqvvgcrrjs0yizf4tn" version="1.0"</template> <!--使用的模板信息 -->        
             <status>0</status> <!--状态：0-编辑中 1-已导出 -->
-            <last-updtime>2026-05-19 16:35:20</last-updtime> <!--最近更新时间 -->            
+            <last-updtime>2026-05-19 16:35:20 /> <!--最近更新时间 -->            
         </meta>
         <!-- ========== 素材集 ========== -->
         <!-- assets目录下为已替换为用户实际的，assets-demo下为未替换的示例 -->
@@ -24,6 +24,7 @@
             <asset id="j3f8s0d5g9h2k6l4z7x1c9" filepath= "assets/b02.mp4"/>      
             <asset id="b5n7m2q4w6e8r0t3y9u1i7" filepath= "assets/b03.mp4"/>          
         </media-asset>
+        ......
 
         <!-- ========== 视频片段（对应中间剪辑层） ========== -->
         <clips id="z7x1c4v8b2n5m9q0w3e6r" target-track="clips">
@@ -38,7 +39,9 @@
 
             <clip id="v4c7x1z5a8s2d6f9g3j7k">
                 <area id="h2k5p8s1d4f7g0j3q6w9e" asset-id="y7u1i4o7p0a3s6d9f2g5j" offset="2000" />
+                ......
             </clip>
+            ......
         </clips>
     </project>
 
