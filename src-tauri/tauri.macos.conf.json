@@ -2,7 +2,9 @@
   "bundle": {
     "targets": ["dmg"],
     "macOS": {
-      "frameworks": ["libs/macos/libcomposer.dylib"]
+      "frameworks": ["libs/macos/libcomposer.dylib"],
+      "signingIdentity": "-",
+      "hardenedRuntime": false
     }
   }
 }
