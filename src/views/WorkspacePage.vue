@@ -6,7 +6,6 @@ import {
   onMounted,
   reactive,
   ref,
-  watch,
 } from 'vue';
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -139,8 +138,9 @@ const selectedVideoName = ref('视频 1');
 const selectedVideoKey = ref('');
 const selectedVideoAssetId = ref('');
 const selectedStyleName = ref('视频轨道 V1');
-const defaultSubtitleText = '这是一段字幕内容';
+const defaultSubtitleText = '';
 const subtitleText = ref(defaultSubtitleText);
+const subtitleApplying = ref(false);
 const timelinePulse = ref(false);
 
 const draftLibraryVisible = ref(false);
@@ -153,6 +153,9 @@ const exportModalVisible = ref(false);
 const exportState = ref('confirm');
 const exportProgress = ref(0);
 const exportStatus = ref('正在渲染视频文件...');
+const exportRunning = ref(false);
+const exportSelectedDir = ref('');
+const exportOutputPath = ref('');
 let exportInterval = null;
 let timelineMoveHandler = null;
 let timelineUpHandler = null;
@@ -189,7 +192,7 @@ const timeline = reactive({
 
 const draftProjects = ref([]);
 const segmentImportState = reactive({});
-const videoEditStateCache = reactive({});
+const videoTimelineStateCache = reactive({});
 
 const sidebarContextLabel = computed(() => {
   if (currentViewState.value === 'finished') return '成片素材';
@@ -789,18 +792,17 @@ function logTemplateAssetDurationMatch(videoInfo) {
   });
 }
 
-function cacheCurrentVideoEditState() {
+function cacheCurrentVideoTimelineState() {
   const key = selectedVideoKey.value;
   if (!key) return;
 
-  videoEditStateCache[key] = {
+  videoTimelineStateCache[key] = {
     startTime: timeline.startTime,
-    subtitleText: subtitleText.value,
   };
 }
 
-function getVideoEditState(key) {
-  return videoEditStateCache[key] || null;
+function getVideoTimelineState(key) {
+  return videoTimelineStateCache[key] || null;
 }
 
 async function createTemplateAssetVideo(asset, index) {
@@ -1047,14 +1049,14 @@ async function openReplaceFilePicker(segment, videoIndex) {
 }
 
 function selectVideoForTimeline(video, styleName = '') {
-  cacheCurrentVideoEditState();
+  cacheCurrentVideoTimelineState();
 
   const videoInfo =
     typeof video === 'string'
       ? { name: video, duration: selectedVideoDuration.value }
       : video;
   const nextVideoKey = videoInfo.id || videoInfo.name;
-  const cachedState = getVideoEditState(nextVideoKey);
+  const cachedState = getVideoTimelineState(nextVideoKey);
 
   selectedVideoName.value = videoInfo.name;
   selectedVideoKey.value = nextVideoKey;
@@ -1074,10 +1076,6 @@ function selectVideoForTimeline(video, styleName = '') {
       Number.isFinite(cachedState?.startTime) ? cachedState.startTime : 0,
     );
   }
-  subtitleText.value =
-    typeof cachedState?.subtitleText === 'string'
-      ? cachedState.subtitleText
-      : defaultSubtitleText;
   selectedVideoAssetId.value = videoInfo.assetId || '';
   logTemplateAssetDurationMatch(videoInfo);
   if (styleName) {
@@ -1123,10 +1121,10 @@ function seekMainPlayerToTimelineTime(targetTime) {
   if (!video) return;
 
   const duration = Number.isFinite(video.duration) ? video.duration : 0;
-  const nextTime = duration
-    ? Math.min(duration, targetTime)
-    : targetTime;
-  const currentTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+  const nextTime = duration ? Math.min(duration, targetTime) : targetTime;
+  const currentTime = Number.isFinite(video.currentTime)
+    ? video.currentTime
+    : 0;
   if (Math.abs(currentTime - nextTime) < 0.03) return;
 
   video.currentTime = Math.max(0, nextTime);
@@ -1162,6 +1160,46 @@ function scheduleSelectedVideoOffsetPersist() {
   }, 300);
 }
 
+async function flushSelectedVideoOffsetPersist() {
+  if (offsetPersistTimer) {
+    window.clearTimeout(offsetPersistTimer);
+    offsetPersistTimer = null;
+  }
+
+  const assetId = selectedVideoAssetId.value;
+  const offsetMs = Math.max(0, Math.round(timeline.startTime * 1000));
+  if (!activeProjectDir.value || !assetId) return;
+
+  await persistSelectedVideoOffset(assetId, offsetMs);
+}
+
+async function applySubtitleChange() {
+  const text = subtitleText.value.trim();
+  if (!text) {
+    systemMessage.error('请输入内容');
+    return;
+  }
+  if (!activeProjectDir.value) {
+    systemMessage.error('请先开始编辑');
+    return;
+  }
+
+  subtitleApplying.value = true;
+  try {
+    await invoke('apply_project_subtitle', {
+      projectDir: activeProjectDir.value,
+      templateXml: getActiveTemplateXmlContent(),
+      text,
+    });
+    subtitleText.value = text;
+    systemMessage.success('标题已更新');
+  } catch (error) {
+    systemMessage.error(error?.message || '标题更新失败');
+  } finally {
+    subtitleApplying.value = false;
+  }
+}
+
 function startTimelineDrag(event) {
   const track = timelineTrackRef.value;
   if (!track) return;
@@ -1190,7 +1228,7 @@ function startTimelineDrag(event) {
     timeline.startTime = clampTimelineStart(
       (clampedLeft / trackRect.width) * timeline.totalDuration,
     );
-    cacheCurrentVideoEditState();
+    cacheCurrentVideoTimelineState();
     syncMainPlayerToTimelineStart();
   };
   timelineUpHandler = () => {
@@ -1207,10 +1245,6 @@ function startTimelineDrag(event) {
   window.addEventListener('pointermove', timelineMoveHandler);
   window.addEventListener('pointerup', timelineUpHandler);
 }
-
-watch(subtitleText, () => {
-  cacheCurrentVideoEditState();
-});
 
 function toggleDraftLibrary() {
   finishedLibraryVisible.value = false;
@@ -1271,17 +1305,59 @@ function openPlayerFromLibrary(displayName) {
 
 function resetExportProgress() {
   exportProgress.value = 0;
-  exportStatus.value = '正在渲染视频文件...';
+  exportStatus.value = '正在准备导出...';
+  exportOutputPath.value = '';
 }
 
-function showExportConfirmation() {
+async function showExportConfirmation() {
+  console.log('[export] export button clicked');
+  if (exportRunning.value) return;
+  if (!activeProjectDir.value) {
+    console.warn('[export] missing activeProjectDir');
+    systemMessage.error('请先开始编辑');
+    return;
+  }
+  if (!activeTemplateLocalInfo.value?.templateFilePath) {
+    console.warn('[export] missing templateFilePath');
+    systemMessage.error('模板文件不存在');
+    return;
+  }
+
   if (exportInterval) clearInterval(exportInterval);
   resetExportProgress();
-  exportState.value = 'confirm';
-  exportModalVisible.value = true;
+
+  try {
+    console.log('[export] ensuring default output directory');
+    const defaultPath = await invoke('ensure_default_output_dir');
+    console.log('[export] default output directory:', defaultPath);
+    console.log('[export] opening output directory picker');
+    const selected = await openDialog({
+      directory: true,
+      multiple: false,
+      defaultPath,
+    });
+
+    if (!selected) {
+      console.log('[export] output directory selection cancelled');
+      return;
+    }
+
+    exportSelectedDir.value = Array.isArray(selected) ? selected[0] : selected;
+    console.log('[export] selected output directory:', exportSelectedDir.value);
+    exportState.value = 'confirm';
+    exportModalVisible.value = true;
+  } catch (error) {
+    console.error('[export] failed to select output directory:', error);
+    systemMessage.error(error?.message || '选择导出目录失败');
+  }
 }
 
 function closeExportModal() {
+  if (exportRunning.value) {
+    systemMessage.info('导出进行中，请稍候');
+    return;
+  }
+
   exportModalVisible.value = false;
   if (exportInterval) {
     clearInterval(exportInterval);
@@ -1290,24 +1366,63 @@ function closeExportModal() {
   resetExportProgress();
 }
 
-function startExportProgress() {
+async function startExportProgress() {
+  console.log('[export] confirm export clicked');
+  if (exportRunning.value) return;
+
   exportState.value = 'progress';
   resetExportProgress();
-  exportInterval = window.setInterval(() => {
-    exportProgress.value = Math.min(
-      100,
-      exportProgress.value + Math.floor(Math.random() * 8) + 2,
-    );
-    if (exportProgress.value >= 100) {
-      exportStatus.value = '导出完成！';
-      clearInterval(exportInterval);
-      exportInterval = null;
-    } else if (exportProgress.value > 80) {
-      exportStatus.value = '正在封装容器...';
-    } else if (exportProgress.value > 40) {
-      exportStatus.value = '正在合成音频轨道...';
+  exportRunning.value = true;
+
+  const exportId = `composer-export-${Date.now()}`;
+  let unlistenProgress = null;
+
+  try {
+    console.log('[export] flushing timeline offset before compose');
+    await flushSelectedVideoOffsetPersist();
+
+    console.log('[export] listening composer progress:', exportId);
+    unlistenProgress = await listen('composer-export-progress', (event) => {
+      const payload = event.payload || {};
+      if (payload.exportId !== exportId) return;
+
+      console.log('[export] progress event:', payload);
+      exportProgress.value = Math.max(
+        0,
+        Math.min(100, Number(payload.progress) || 0),
+      );
+      exportStatus.value = payload.status || exportStatus.value;
+    });
+
+    console.log('[export] invoking compose_project_video', {
+      exportId,
+      templatePath: activeTemplateLocalInfo.value.templateFilePath,
+      projectDir: activeProjectDir.value,
+      outputDir: exportSelectedDir.value,
+    });
+    const result = await invoke('compose_project_video', {
+      templatePath: activeTemplateLocalInfo.value.templateFilePath,
+      projectDir: activeProjectDir.value,
+      outputDir: exportSelectedDir.value,
+      exportId,
+    });
+
+    exportProgress.value = 100;
+    exportStatus.value = '导出完成！';
+    exportOutputPath.value = result?.outputPath || '';
+    console.log('[export] compose success:', result);
+    systemMessage.success('视频导出完成');
+  } catch (error) {
+    exportStatus.value = '导出失败';
+    console.error('[export] compose failed:', error);
+    systemMessage.error(error?.message || '视频导出失败');
+  } finally {
+    exportRunning.value = false;
+    if (unlistenProgress) {
+      console.log('[export] removing progress listener:', exportId);
+      unlistenProgress();
     }
-  }, 200);
+  }
 }
 
 function formatPlayerTime(value) {
@@ -1836,7 +1951,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
-  cacheCurrentVideoEditState();
+  cacheCurrentVideoTimelineState();
   document.documentElement.classList.remove('dark');
   window.removeEventListener('resize', schedulePlayerResize);
   if (exportInterval) {
@@ -1951,7 +2066,10 @@ onBeforeUnmount(() => {
             <a
               class="flex items-center gap-3 px-4 py-2.5 text-[12px] text-error hover:bg-error-container/20 transition-colors"
               href="#"
-              @click.prevent="closeAccountMenu(); emit('logout')"
+              @click.prevent="
+                closeAccountMenu();
+                emit('logout');
+              "
               ><span>退出登录</span></a
             >
           </div>
@@ -2564,13 +2682,15 @@ onBeforeUnmount(() => {
                     id="subtitle-edit-input"
                     v-model="subtitleText"
                     class="w-[360px] max-w-[42vw] h-9 bg-surface-container-lowest/50 border border-outline-variant/30 rounded px-3 text-[12px] text-on-surface placeholder:text-on-surface-variant/50 focus:border-electric-blue outline-none transition-colors"
-                    placeholder="输入当前片段字幕内容"
+                    placeholder="输入标题内容"
                     type="text"
                   />
                   <button
                     class="h-9 px-4 bg-electric-blue text-white rounded text-[12px] font-bold shadow-lg shadow-electric-blue/20 hover:brightness-110 active:scale-95 transition-all shrink-0"
+                    :disabled="subtitleApplying"
+                    @click="applySubtitleChange"
                   >
-                    应用更改
+                    {{ subtitleApplying ? '应用中...' : '应用更改' }}
                   </button>
                 </div>
               </div>
@@ -2791,6 +2911,11 @@ onBeforeUnmount(() => {
                     本次导出将扣除
                     <span class="text-electric-blue font-bold">10 积分</span>
                   </p>
+                  <p
+                    class="mt-2 text-[11px] text-on-surface-variant/70 break-all"
+                  >
+                    {{ exportSelectedDir }}
+                  </p>
                 </div>
                 <div class="flex flex-col w-full gap-3">
                   <button
@@ -2832,6 +2957,12 @@ onBeforeUnmount(() => {
                   <p class="text-xs text-on-surface-variant">
                     请勿关闭当前窗口
                   </p>
+                  <p
+                    v-if="exportOutputPath"
+                    class="mt-2 max-w-[320px] break-all text-[11px] text-on-surface-variant/70"
+                  >
+                    {{ exportOutputPath }}
+                  </p>
                 </div>
                 <div class="w-full space-y-4">
                   <div
@@ -2845,9 +2976,10 @@ onBeforeUnmount(() => {
                   <button
                     v-if="exportProgress < 100"
                     class="w-full py-2.5 bg-white/5 text-on-surface-variant text-sm font-bold rounded-lg hover:bg-white/10 hover:text-white transition-all"
+                    :disabled="exportRunning"
                     @click="closeExportModal"
                   >
-                    取消导出
+                    {{ exportRunning ? '导出中...' : '关闭' }}
                   </button>
                   <button
                     v-else

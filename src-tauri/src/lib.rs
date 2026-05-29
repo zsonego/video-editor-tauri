@@ -14,7 +14,16 @@ use std::{
     },
     time::{SystemTime, UNIX_EPOCH},
 };
-use tauri::{utils::config::Color, AppHandle, Emitter, Manager};
+use tauri::{utils::config::Color, AppHandle, Emitter, Manager, WindowEvent};
+
+#[cfg(target_os = "macos")]
+use std::{
+    ffi::{CStr, CString},
+    os::raw::{c_char, c_int, c_void},
+};
+
+#[cfg(target_os = "macos")]
+use libloading::Library;
 
 static DOWNLOAD_CANCEL_FLAGS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
 
@@ -47,6 +56,54 @@ struct TemplateDownloadProgress {
     download_id: String,
     progress: u8,
     status: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ComposerExportProgress {
+    export_id: String,
+    progress: u8,
+    status: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ComposerExportResult {
+    output_path: String,
+}
+
+type ComposerState = Arc<Mutex<ComposerRuntime>>;
+
+struct ComposerRuntime {
+    #[cfg(target_os = "macos")]
+    _library: Library,
+    #[cfg(target_os = "macos")]
+    compose: ComposerComposeFn,
+    #[cfg(target_os = "macos")]
+    cleanup: ComposerCleanupFn,
+    #[cfg(target_os = "macos")]
+    initialized: bool,
+}
+
+#[cfg(target_os = "macos")]
+type ComposerInitFn = unsafe extern "C" fn() -> c_int;
+#[cfg(target_os = "macos")]
+type ComposerCleanupFn = unsafe extern "C" fn();
+#[cfg(target_os = "macos")]
+type ComposerProgressCallback = extern "C" fn(c_int, *const c_char, *mut c_void);
+#[cfg(target_os = "macos")]
+type ComposerComposeFn = unsafe extern "C" fn(
+    *const c_char,
+    *const c_char,
+    *const c_char,
+    Option<ComposerProgressCallback>,
+    *mut c_void,
+) -> c_int;
+
+#[cfg(target_os = "macos")]
+struct ComposerCallbackContext {
+    app: AppHandle,
+    export_id: String,
 }
 
 fn download_tasks() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
@@ -83,6 +140,214 @@ fn emit_progress(app: &AppHandle, download_id: &str, progress: u8, status: &str)
     let _ = app.emit("template-download-progress", payload);
 }
 
+fn emit_composer_progress(app: &AppHandle, export_id: &str, progress: u8, status: &str) {
+    println!("[composer] progress export_id={export_id} progress={progress} status={status}");
+    let payload = ComposerExportProgress {
+        export_id: export_id.to_string(),
+        progress: progress.min(100),
+        status: status.to_string(),
+    };
+    let _ = app.emit("composer-export-progress", payload);
+}
+
+#[cfg(target_os = "macos")]
+fn composer_error_message(code: i32) -> String {
+    match code {
+        0 => "合成成功".to_string(),
+        -1 => "XML 文件无效".to_string(),
+        -2 => "文件未找到".to_string(),
+        -3 => "MLT 初始化失败".to_string(),
+        -4 => "视频合成失败".to_string(),
+        -5 => "合成已取消".to_string(),
+        value => format!("Composer 调用失败，错误码 {value}"),
+    }
+}
+
+impl ComposerRuntime {
+    fn initialize() -> Result<Self, String> {
+        #[cfg(target_os = "macos")]
+        {
+            println!("[composer] initializing runtime");
+            let library_path = composer_library_path()?;
+            println!("[composer] loading dylib: {}", library_path.display());
+            let library = unsafe { Library::new(&library_path) }
+                .map_err(|error| format!("加载 Composer 动态库失败: {error}"))?;
+            println!("[composer] resolving composer_init");
+            let init: ComposerInitFn = unsafe {
+                *library
+                    .get(b"composer_init\0")
+                    .map_err(|error| format!("读取 composer_init 失败: {error}"))?
+            };
+            println!("[composer] resolving composer_compose");
+            let compose: ComposerComposeFn = unsafe {
+                *library
+                    .get(b"composer_compose\0")
+                    .map_err(|error| format!("读取 composer_compose 失败: {error}"))?
+            };
+            println!("[composer] resolving composer_cleanup");
+            let cleanup: ComposerCleanupFn = unsafe {
+                *library
+                    .get(b"composer_cleanup\0")
+                    .map_err(|error| format!("读取 composer_cleanup 失败: {error}"))?
+            };
+            println!("[composer] calling composer_init");
+            let init_result = unsafe { init() };
+
+            if init_result != 0 {
+                eprintln!(
+                    "[composer] composer_init failed: {}",
+                    composer_error_message(init_result)
+                );
+                return Err(composer_error_message(init_result));
+            }
+            println!("[composer] composer_init success");
+
+            Ok(Self {
+                _library: library,
+                compose,
+                cleanup,
+                initialized: true,
+            })
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            println!("[composer] macOS composer runtime is disabled on this platform");
+            Ok(Self {})
+        }
+    }
+
+    fn compose_video(
+        &self,
+        template_path: &str,
+        project_path: &str,
+        output_path: &str,
+        app: AppHandle,
+        export_id: String,
+    ) -> Result<(), String> {
+        #[cfg(target_os = "macos")]
+        {
+            println!("[composer] compose start export_id={export_id}");
+            println!("[composer] template_path={template_path}");
+            println!("[composer] project_path={project_path}");
+            println!("[composer] output_path={output_path}");
+            let template_path =
+                CString::new(template_path).map_err(|_| "模板路径包含非法字符".to_string())?;
+            let project_path =
+                CString::new(project_path).map_err(|_| "工程路径包含非法字符".to_string())?;
+            let output_path =
+                CString::new(output_path).map_err(|_| "输出路径包含非法字符".to_string())?;
+            let mut context = ComposerCallbackContext { app, export_id };
+            let result = unsafe {
+                (self.compose)(
+                    template_path.as_ptr(),
+                    project_path.as_ptr(),
+                    output_path.as_ptr(),
+                    Some(composer_progress_callback),
+                    (&mut context as *mut ComposerCallbackContext).cast::<c_void>(),
+                )
+            };
+
+            if result == 0 {
+                println!("[composer] compose success");
+                Ok(())
+            } else {
+                eprintln!(
+                    "[composer] compose failed: {}",
+                    composer_error_message(result)
+                );
+                Err(composer_error_message(result))
+            }
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (template_path, project_path, output_path, app, export_id);
+            eprintln!("[composer] compose requested on unsupported platform");
+            Err("Composer 动态库当前只支持 macOS".to_string())
+        }
+    }
+
+    fn cleanup(&mut self) {
+        #[cfg(target_os = "macos")]
+        {
+            if self.initialized {
+                println!("[composer] calling composer_cleanup");
+                unsafe {
+                    (self.cleanup)();
+                }
+                self.initialized = false;
+                println!("[composer] composer_cleanup complete");
+            }
+        }
+    }
+}
+
+impl Drop for ComposerRuntime {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
+#[cfg(target_os = "macos")]
+extern "C" fn composer_progress_callback(
+    percent: c_int,
+    message: *const c_char,
+    userdata: *mut c_void,
+) {
+    if userdata.is_null() {
+        eprintln!("[composer] progress callback skipped: userdata is null");
+        return;
+    }
+
+    let context = unsafe { &*(userdata.cast::<ComposerCallbackContext>()) };
+    let status = if message.is_null() {
+        "正在合成视频...".to_string()
+    } else {
+        unsafe { CStr::from_ptr(message) }
+            .to_string_lossy()
+            .trim()
+            .to_string()
+    };
+    let status = if status.is_empty() {
+        "正在合成视频...".to_string()
+    } else {
+        status
+    };
+    let progress = percent.clamp(0, 100) as u8;
+
+    emit_composer_progress(&context.app, &context.export_id, progress, &status);
+}
+
+#[cfg(target_os = "macos")]
+fn composer_library_path() -> Result<PathBuf, String> {
+    println!("[composer] resolving libcomposer.dylib path");
+    let bundled_path = std::env::current_exe().ok().and_then(|exe| {
+        exe.parent()
+            .and_then(|macos_dir| macos_dir.parent())
+            .map(|contents_dir| contents_dir.join("Frameworks").join("libcomposer.dylib"))
+    });
+
+    if let Some(path) = bundled_path {
+        println!("[composer] checking bundled dylib: {}", path.display());
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+
+    let dev_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("libs")
+        .join("macos")
+        .join("libcomposer.dylib");
+    println!("[composer] checking dev dylib: {}", dev_path.display());
+    if dev_path.is_file() {
+        return Ok(dev_path);
+    }
+
+    eprintln!("[composer] libcomposer.dylib not found");
+    Err("未找到 libcomposer.dylib".to_string())
+}
+
 fn aicut_root_dir() -> Result<PathBuf, String> {
     #[cfg(target_os = "windows")]
     let base_dir = dirs::data_local_dir();
@@ -107,6 +372,16 @@ fn ensure_aicut_dirs() -> Result<(PathBuf, PathBuf), String> {
     fs::create_dir_all(&project_dir).map_err(|error| error.to_string())?;
 
     Ok((template_dir, project_dir))
+}
+
+fn ensure_aicut_output_dir() -> Result<PathBuf, String> {
+    let output_dir = aicut_root_dir()?.join("output");
+    println!(
+        "[composer] ensuring default output dir: {}",
+        output_dir.display()
+    );
+    fs::create_dir_all(&output_dir).map_err(|error| error.to_string())?;
+    Ok(output_dir)
 }
 
 fn sanitize_name(value: &str) -> String {
@@ -250,6 +525,11 @@ struct TemplateClips {
     id: String,
     target_track: String,
     clips: Vec<TemplateClip>,
+}
+
+struct TemplateSubtitle {
+    clip_id: String,
+    id: String,
 }
 
 fn is_xml_name_boundary(ch: Option<char>) -> bool {
@@ -561,6 +841,129 @@ fn update_project_clip_offsets(
         Ok(output)
     } else {
         Err("projectFile.xml 中未找到对应的 area".to_string())
+    }
+}
+
+fn remove_subtitle_tags(xml_content: &str) -> String {
+    let mut output = String::new();
+    let mut search_start = 0;
+
+    while let Some(relative_start) = xml_content[search_start..].find("<subtitle") {
+        let tag_start = search_start + relative_start;
+        let after_name = xml_content[tag_start + "<subtitle".len()..].chars().next();
+
+        if !is_xml_name_boundary(after_name) {
+            output.push_str(&xml_content[search_start..tag_start + "<subtitle".len()]);
+            search_start = tag_start + "<subtitle".len();
+            continue;
+        }
+
+        let Some(relative_tag_end) = xml_content[tag_start..].find('>') else {
+            break;
+        };
+        let tag_end = tag_start + relative_tag_end + 1;
+        let tag = &xml_content[tag_start..tag_end];
+        output.push_str(&xml_content[search_start..tag_start]);
+
+        if tag.trim_end().ends_with("/>") {
+            search_start = tag_end;
+            continue;
+        }
+
+        if let Some(relative_close_start) = xml_content[tag_end..].find("</subtitle>") {
+            search_start = tag_end + relative_close_start + "</subtitle>".len();
+        } else {
+            search_start = tag_end;
+        }
+    }
+
+    output.push_str(&xml_content[search_start..]);
+    output
+}
+
+fn find_first_template_subtitle(xml_content: &str) -> Option<TemplateSubtitle> {
+    find_xml_element_blocks(xml_content, "clips")
+        .into_iter()
+        .find_map(|(_, clips_inner)| {
+            find_xml_element_blocks(&clips_inner, "clip")
+                .into_iter()
+                .find_map(|(clip_tag, clip_inner)| {
+                    let clip_id = xml_attribute_value(&clip_tag, "id")?;
+                    let subtitle_tag = find_xml_start_tags(&clip_inner, "subtitle")
+                        .into_iter()
+                        .next()?;
+                    let id = xml_attribute_value(&subtitle_tag, "id")?;
+
+                    Some(TemplateSubtitle { clip_id, id })
+                })
+        })
+}
+
+fn update_project_subtitle(
+    project_file_xml: &str,
+    subtitle: &TemplateSubtitle,
+    text: &str,
+) -> Result<String, String> {
+    let mut output = String::new();
+    let mut search_start = 0;
+    let mut updated = false;
+
+    while let Some(relative_start) = project_file_xml[search_start..].find("<clip") {
+        let tag_start = search_start + relative_start;
+        let after_name = project_file_xml[tag_start + "<clip".len()..].chars().next();
+
+        if !is_xml_name_boundary(after_name) {
+            output.push_str(&project_file_xml[search_start..tag_start + "<clip".len()]);
+            search_start = tag_start + "<clip".len();
+            continue;
+        }
+
+        let Some(relative_tag_end) = project_file_xml[tag_start..].find('>') else {
+            break;
+        };
+        let tag_end = tag_start + relative_tag_end + 1;
+        let tag = &project_file_xml[tag_start..tag_end];
+
+        if tag.trim_end().ends_with("/>") {
+            output.push_str(&project_file_xml[search_start..tag_end]);
+            search_start = tag_end;
+            continue;
+        }
+
+        let Some(relative_close_start) = project_file_xml[tag_end..].find("</clip>") else {
+            break;
+        };
+        let close_start = tag_end + relative_close_start;
+        let close_end = close_start + "</clip>".len();
+        let inner = &project_file_xml[tag_end..close_start];
+        let cleaned_inner = remove_subtitle_tags(inner);
+
+        output.push_str(&project_file_xml[search_start..tag_start]);
+        output.push_str(tag);
+        output.push_str(&cleaned_inner);
+
+        if xml_attribute_value(tag, "id")
+            .map(|value| value == subtitle.clip_id)
+            .unwrap_or(false)
+        {
+            output.push_str(&format!(
+                "                <subtitle id=\"{}\" text=\"{}\" />\n",
+                escape_xml_attribute(&subtitle.id),
+                escape_xml_attribute(text)
+            ));
+            updated = true;
+        }
+
+        output.push_str("</clip>");
+        search_start = close_end;
+    }
+
+    output.push_str(&project_file_xml[search_start..]);
+
+    if updated {
+        Ok(output)
+    } else {
+        Err("projectFile.xml 中未找到对应的 clip".to_string())
     }
 }
 
@@ -1048,6 +1451,11 @@ fn cancel_template_download(download_id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn ensure_default_output_dir() -> Result<String, String> {
+    ensure_aicut_output_dir().map(|path| path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
 fn create_project_workspace(template_id: String) -> Result<ProjectWorkspace, String> {
     let (_, project_root) = ensure_aicut_dirs()?;
     let timestamp = SystemTime::now()
@@ -1151,6 +1559,125 @@ fn update_project_asset_offset(
     fs::write(&project_file_path, updated_project_file_xml).map_err(|error| error.to_string())?;
 
     Ok(())
+}
+
+#[tauri::command]
+fn apply_project_subtitle(
+    project_dir: String,
+    template_xml: String,
+    text: String,
+) -> Result<(), String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("请输入内容".to_string());
+    }
+
+    let subtitle = find_first_template_subtitle(&template_xml)
+        .ok_or_else(|| "模板 XML 中未找到 subtitle".to_string())?;
+    let (_, project_root) = ensure_aicut_dirs()?;
+    let project_root = fs::canonicalize(project_root).map_err(|error| error.to_string())?;
+    let project_dir =
+        fs::canonicalize(PathBuf::from(project_dir)).map_err(|error| error.to_string())?;
+
+    if !project_dir.starts_with(&project_root) {
+        return Err("项目目录无效".to_string());
+    }
+
+    let project_file_path = project_dir.join("projectFile.xml");
+    let project_file_xml =
+        fs::read_to_string(&project_file_path).map_err(|error| error.to_string())?;
+    let updated_project_file_xml = update_project_subtitle(&project_file_xml, &subtitle, text)?;
+
+    fs::write(&project_file_path, updated_project_file_xml).map_err(|error| error.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn compose_project_video(
+    app: AppHandle,
+    composer: tauri::State<'_, ComposerState>,
+    template_path: String,
+    project_dir: String,
+    output_dir: String,
+    export_id: String,
+) -> Result<ComposerExportResult, String> {
+    println!("[composer] compose_project_video requested export_id={export_id}");
+    let template_path = PathBuf::from(template_path);
+    println!(
+        "[composer] validating template path: {}",
+        template_path.display()
+    );
+    if !template_path.is_file() {
+        return Err("模板 XML 文件不存在".to_string());
+    }
+
+    let (_, project_root) = ensure_aicut_dirs()?;
+    let project_root = fs::canonicalize(project_root).map_err(|error| error.to_string())?;
+    let project_dir =
+        fs::canonicalize(PathBuf::from(project_dir)).map_err(|error| error.to_string())?;
+    println!(
+        "[composer] validating project dir: {}",
+        project_dir.display()
+    );
+    if !project_dir.starts_with(&project_root) {
+        return Err("项目目录无效".to_string());
+    }
+
+    let project_path = project_dir.join("projectFile.xml");
+    println!(
+        "[composer] validating project xml: {}",
+        project_path.display()
+    );
+    if !project_path.is_file() {
+        return Err("projectFile.xml 不存在".to_string());
+    }
+
+    let output_dir = PathBuf::from(output_dir);
+    println!(
+        "[composer] ensuring selected output dir: {}",
+        output_dir.display()
+    );
+    fs::create_dir_all(&output_dir).map_err(|error| error.to_string())?;
+    if !output_dir.is_dir() {
+        return Err("输出目录无效".to_string());
+    }
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_millis();
+    let output_path = output_dir.join(format!("aicut-output-{timestamp}.mp4"));
+    println!("[composer] output file: {}", output_path.display());
+    let output_path_string = output_path.to_string_lossy().to_string();
+    let template_path_string = template_path.to_string_lossy().to_string();
+    let project_path_string = project_path.to_string_lossy().to_string();
+    let composer = composer.inner().clone();
+    let export_id_for_progress = export_id.clone();
+    let app_for_progress = app.clone();
+
+    emit_composer_progress(&app, &export_id, 0, "正在准备导出...");
+
+    println!("[composer] spawning blocking compose task");
+    tauri::async_runtime::spawn_blocking(move || {
+        let composer = composer.lock().map_err(|error| error.to_string())?;
+        composer.compose_video(
+            &template_path_string,
+            &project_path_string,
+            &output_path_string,
+            app_for_progress,
+            export_id_for_progress,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+
+    println!("[composer] compose_project_video finished export_id={export_id}");
+    emit_composer_progress(&app, &export_id, 100, "导出完成");
+
+    Ok(ComposerExportResult {
+        output_path: output_path.to_string_lossy().to_string(),
+    })
 }
 
 #[tauri::command]
@@ -1261,18 +1788,43 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            println!("[app] setup start");
+            let composer = ComposerRuntime::initialize()
+                .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
+            app.manage(Arc::new(Mutex::new(composer)));
+            println!("[app] composer state managed");
+
             if let Some(window) = app.get_webview_window("main") {
+                println!("[app] configuring main window");
                 let _ = window.set_background_color(Some(Color(7, 18, 42, 255)));
             }
+            println!("[app] setup complete");
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if matches!(event, WindowEvent::CloseRequested { .. }) {
+                println!("[app] close requested, cleaning composer");
+                if let Some(composer) = window.try_state::<ComposerState>() {
+                    if let Ok(mut composer) = composer.lock() {
+                        composer.cleanup();
+                    } else {
+                        eprintln!("[app] failed to lock composer during close");
+                    }
+                } else {
+                    eprintln!("[app] composer state not found during close");
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             get_cached_template_assets,
             prepare_template_assets,
             cancel_template_download,
+            ensure_default_output_dir,
             create_project_workspace,
             save_project_asset,
             update_project_asset_offset,
+            apply_project_subtitle,
+            compose_project_video,
             delete_project_asset_files,
             get_machine_code
         ])
@@ -1381,5 +1933,40 @@ mod tests {
         assert!(updated_xml.contains(r#"id="area-a" asset-id="asset-a" offset="2500""#));
         assert!(updated_xml.contains(r#"id="area-b" asset-id="asset-b" offset="0""#));
         assert!(updated_xml.contains(r#"id="area-c" asset-id="asset-a" offset="2500""#));
+    }
+
+    #[test]
+    fn applies_first_template_subtitle_to_project_clip() {
+        let template_xml = r#"<template>
+        <clips id="clips" target-track="clips">
+            <clip id="clip-a">
+                <subtitle id="subtitle-a" startTime="0" duration="3000">
+                    <default>默认标题</default>
+                </subtitle>
+            </clip>
+            <clip id="clip-b">
+                <subtitle id="subtitle-b"></subtitle>
+            </clip>
+        </clips>
+    </template>"#;
+        let project_xml = r#"<project>
+        <clips id="clips" target-track="clips">
+            <clip id="clip-a">
+                <area id="area-a" asset-id="asset-a" offset="0" />
+                <subtitle id="old-a" text="旧标题" />
+            </clip>
+            <clip id="clip-b">
+                <subtitle id="old-b" text="旧标题 2" />
+            </clip>
+        </clips>
+    </project>"#;
+        let subtitle = find_first_template_subtitle(template_xml).expect("subtitle");
+        let updated_xml =
+            update_project_subtitle(project_xml, &subtitle, "新标题").expect("updated xml");
+
+        assert!(updated_xml.contains(r#"<subtitle id="subtitle-a" text="新标题" />"#));
+        assert!(!updated_xml.contains("old-a"));
+        assert!(!updated_xml.contains("old-b"));
+        assert!(!updated_xml.contains("subtitle-b"));
     }
 }
