@@ -75,12 +75,13 @@ struct ComposerExportResult {
 type ComposerState = Arc<Mutex<ComposerRuntime>>;
 
 struct ComposerRuntime {
+    init_error: Option<String>,
     #[cfg(target_os = "macos")]
-    _library: Library,
+    _library: Option<Library>,
     #[cfg(target_os = "macos")]
-    compose: ComposerComposeFn,
+    compose: Option<ComposerComposeFn>,
     #[cfg(target_os = "macos")]
-    cleanup: ComposerCleanupFn,
+    cleanup: Option<ComposerCleanupFn>,
     #[cfg(target_os = "macos")]
     initialized: bool,
 }
@@ -164,7 +165,31 @@ fn composer_error_message(code: i32) -> String {
 }
 
 impl ComposerRuntime {
-    fn initialize() -> Result<Self, String> {
+    fn initialize() -> Self {
+        match Self::try_initialize() {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                eprintln!("[composer] initialization failed but app will continue: {error}");
+                Self::disabled(error)
+            }
+        }
+    }
+
+    fn disabled(error: String) -> Self {
+        Self {
+            init_error: Some(error),
+            #[cfg(target_os = "macos")]
+            _library: None,
+            #[cfg(target_os = "macos")]
+            compose: None,
+            #[cfg(target_os = "macos")]
+            cleanup: None,
+            #[cfg(target_os = "macos")]
+            initialized: false,
+        }
+    }
+
+    fn try_initialize() -> Result<Self, String> {
         #[cfg(target_os = "macos")]
         {
             println!("[composer] initializing runtime");
@@ -203,9 +228,10 @@ impl ComposerRuntime {
             println!("[composer] composer_init success");
 
             Ok(Self {
-                _library: library,
-                compose,
-                cleanup,
+                init_error: None,
+                _library: Some(library),
+                compose: Some(compose),
+                cleanup: Some(cleanup),
                 initialized: true,
             })
         }
@@ -213,7 +239,9 @@ impl ComposerRuntime {
         #[cfg(not(target_os = "macos"))]
         {
             println!("[composer] macOS composer runtime is disabled on this platform");
-            Ok(Self {})
+            Ok(Self {
+                init_error: Some("Composer 动态库当前只支持 macOS".to_string()),
+            })
         }
     }
 
@@ -225,12 +253,22 @@ impl ComposerRuntime {
         app: AppHandle,
         export_id: String,
     ) -> Result<(), String> {
+        if let Some(error) = &self.init_error {
+            eprintln!("[composer] compose skipped because runtime is unavailable: {error}");
+            return Err(error.clone());
+        }
+
         #[cfg(target_os = "macos")]
         {
             println!("[composer] compose start export_id={export_id}");
             println!("[composer] template_path={template_path}");
             println!("[composer] project_path={project_path}");
             println!("[composer] output_path={output_path}");
+            let Some(compose) = self.compose else {
+                let error = "composer_compose 函数未加载".to_string();
+                eprintln!("[composer] {error}");
+                return Err(error);
+            };
             let template_path =
                 CString::new(template_path).map_err(|_| "模板路径包含非法字符".to_string())?;
             let project_path =
@@ -239,7 +277,7 @@ impl ComposerRuntime {
                 CString::new(output_path).map_err(|_| "输出路径包含非法字符".to_string())?;
             let mut context = ComposerCallbackContext { app, export_id };
             let result = unsafe {
-                (self.compose)(
+                compose(
                     template_path.as_ptr(),
                     project_path.as_ptr(),
                     output_path.as_ptr(),
@@ -272,12 +310,19 @@ impl ComposerRuntime {
         #[cfg(target_os = "macos")]
         {
             if self.initialized {
+                let Some(cleanup) = self.cleanup else {
+                    eprintln!("[composer] composer_cleanup 函数未加载，跳过清理");
+                    self.initialized = false;
+                    return;
+                };
                 println!("[composer] calling composer_cleanup");
                 unsafe {
-                    (self.cleanup)();
+                    cleanup();
                 }
                 self.initialized = false;
                 println!("[composer] composer_cleanup complete");
+            } else if let Some(error) = &self.init_error {
+                eprintln!("[composer] cleanup skipped because runtime is unavailable: {error}");
             }
         }
     }
@@ -1789,8 +1834,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             println!("[app] setup start");
-            let composer = ComposerRuntime::initialize()
-                .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
+            let composer = ComposerRuntime::initialize();
             app.manage(Arc::new(Mutex::new(composer)));
             println!("[app] composer state managed");
 
