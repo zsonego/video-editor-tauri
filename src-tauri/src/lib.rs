@@ -543,6 +543,73 @@ fn cached_template_paths(template_id: &str) -> Result<(PathBuf, PathBuf, PathBuf
     Ok((template_dir, template_file_path, assets_dir))
 }
 
+fn is_url_resource_path(value: &str) -> bool {
+    value.starts_with("http://") || value.starts_with("https://") || value.starts_with("file://")
+}
+
+fn is_absolute_resource_path(value: &str) -> bool {
+    let normalized = value.replace('\\', "/");
+
+    Path::new(value).is_absolute()
+        || normalized.starts_with('/')
+        || normalized.starts_with("//")
+        || (normalized.len() > 2
+            && normalized.as_bytes().get(1) == Some(&b':')
+            && normalized.as_bytes().get(2) == Some(&b'/'))
+}
+
+fn path_to_xml_filepath(path: PathBuf) -> String {
+    let filepath = path.to_string_lossy().to_string();
+
+    if cfg!(windows) {
+        filepath.replace('/', "\\")
+    } else {
+        filepath.replace('\\', "/")
+    }
+}
+
+fn join_resource_relative(base: &Path, relative: &str) -> PathBuf {
+    let mut path = base.to_path_buf();
+
+    for segment in relative.replace('\\', "/").split('/') {
+        if segment.is_empty() || segment == "." {
+            continue;
+        }
+
+        path.push(segment);
+    }
+
+    path
+}
+
+fn resolve_template_resource_filepath(
+    template_dir: &Path,
+    assets_dir: &Path,
+    filepath: &str,
+) -> String {
+    let trimmed = filepath.trim();
+    if trimmed.is_empty() || is_url_resource_path(trimmed) || is_absolute_resource_path(trimmed) {
+        return trimmed.to_string();
+    }
+
+    let normalized = trimmed
+        .replace('\\', "/")
+        .trim_start_matches("./")
+        .to_string();
+
+    if let Some(relative) = normalized.strip_prefix("template/assets/") {
+        return path_to_xml_filepath(join_resource_relative(assets_dir, relative));
+    }
+    if let Some(relative) = normalized.strip_prefix("assets/") {
+        return path_to_xml_filepath(join_resource_relative(assets_dir, relative));
+    }
+    if let Some(relative) = normalized.strip_prefix("template/") {
+        return path_to_xml_filepath(join_resource_relative(template_dir, relative));
+    }
+
+    path_to_xml_filepath(join_resource_relative(assets_dir, &normalized))
+}
+
 fn xml_attribute_value(tag: &str, attribute: &str) -> Option<String> {
     let mut search_start = 0;
 
@@ -575,12 +642,12 @@ fn parse_xml_attribute_value(value_start: &str) -> Option<String> {
     if quote == '"' || quote == '\'' {
         let value = &value_start[quote.len_utf8()..];
         let value_end = value.find(quote)?;
-        Some(value[..value_end].to_string())
+        Some(unescape_xml_value(&value[..value_end]))
     } else {
         let value_end = value_start
             .find(|ch: char| ch.is_whitespace() || ch == '>' || ch == '/')
             .unwrap_or(value_start.len());
-        Some(value_start[..value_end].to_string())
+        Some(unescape_xml_value(&value_start[..value_end]))
     }
 }
 
@@ -720,6 +787,154 @@ fn escape_xml_attribute(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
+fn escape_xml_text(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn unescape_xml_value(value: &str) -> String {
+    value
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
+fn normalize_template_asset_filepaths(
+    xml_content: &str,
+    template_dir: &Path,
+    assets_dir: &Path,
+) -> String {
+    let mut output = String::new();
+    let mut search_start = 0;
+
+    while let Some(relative_start) = xml_content[search_start..].find("<asset") {
+        let tag_start = search_start + relative_start;
+        let after_name = xml_content[tag_start + "<asset".len()..].chars().next();
+
+        if !is_xml_name_boundary(after_name) {
+            output.push_str(&xml_content[search_start..tag_start + "<asset".len()]);
+            search_start = tag_start + "<asset".len();
+            continue;
+        }
+
+        let Some(relative_tag_end) = xml_content[tag_start..].find('>') else {
+            break;
+        };
+        let tag_end = tag_start + relative_tag_end + 1;
+        let tag = &xml_content[tag_start..tag_end];
+
+        output.push_str(&xml_content[search_start..tag_start]);
+
+        if let Some(filepath) = xml_attribute_value(tag, "filepath") {
+            let absolute_filepath =
+                resolve_template_resource_filepath(template_dir, assets_dir, &filepath);
+            output.push_str(&replace_or_insert_xml_attribute(
+                tag,
+                "filepath",
+                &absolute_filepath,
+            ));
+        } else {
+            output.push_str(tag);
+        }
+
+        search_start = tag_end;
+    }
+
+    output.push_str(&xml_content[search_start..]);
+    output
+}
+
+fn normalize_template_resource_element(
+    xml_content: &str,
+    tag_name: &str,
+    template_dir: &Path,
+    assets_dir: &Path,
+) -> String {
+    let open_pattern = format!("<{tag_name}");
+    let close_pattern = format!("</{tag_name}>");
+    let mut output = String::new();
+    let mut search_start = 0;
+
+    while let Some(relative_start) = xml_content[search_start..].find(&open_pattern) {
+        let tag_start = search_start + relative_start;
+        let after_name = xml_content[tag_start + open_pattern.len()..].chars().next();
+
+        if !is_xml_name_boundary(after_name) {
+            output.push_str(&xml_content[search_start..tag_start + open_pattern.len()]);
+            search_start = tag_start + open_pattern.len();
+            continue;
+        }
+
+        let Some(relative_tag_end) = xml_content[tag_start..].find('>') else {
+            break;
+        };
+        let tag_end = tag_start + relative_tag_end + 1;
+        let tag = &xml_content[tag_start..tag_end];
+
+        if tag.trim_end().ends_with("/>") {
+            output.push_str(&xml_content[search_start..tag_end]);
+            search_start = tag_end;
+            continue;
+        }
+
+        let Some(relative_close_start) = xml_content[tag_end..].find(&close_pattern) else {
+            break;
+        };
+        let close_start = tag_end + relative_close_start;
+        let close_end = close_start + close_pattern.len();
+        let value = &xml_content[tag_end..close_start];
+
+        output.push_str(&xml_content[search_start..tag_end]);
+
+        if value.contains('<') {
+            output.push_str(value);
+        } else {
+            let value = unescape_xml_value(value);
+            let absolute_filepath =
+                resolve_template_resource_filepath(template_dir, assets_dir, &value);
+            output.push_str(&escape_xml_text(&absolute_filepath));
+        }
+
+        output.push_str(&xml_content[close_start..close_end]);
+        search_start = close_end;
+    }
+
+    output.push_str(&xml_content[search_start..]);
+    output
+}
+
+fn normalize_template_resource_paths(
+    xml_content: &str,
+    template_dir: &Path,
+    assets_dir: &Path,
+) -> String {
+    let xml_content = normalize_template_asset_filepaths(xml_content, template_dir, assets_dir);
+    let xml_content =
+        normalize_template_resource_element(&xml_content, "demo-path", template_dir, assets_dir);
+
+    normalize_template_resource_element(&xml_content, "filepath", template_dir, assets_dir)
+}
+
+fn normalize_template_file_resource_paths(
+    template_file_path: &Path,
+    template_dir: &Path,
+    assets_dir: &Path,
+    xml_content: String,
+) -> Result<String, String> {
+    let normalized_xml = normalize_template_resource_paths(&xml_content, template_dir, assets_dir);
+
+    if normalized_xml != xml_content {
+        fs::write(template_file_path, normalized_xml.as_bytes())
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(normalized_xml)
+}
+
 fn sanitize_file_name(value: &str) -> String {
     let sanitized: String = value
         .chars()
@@ -759,11 +974,18 @@ fn file_content_hash(path: &Path) -> Result<String, String> {
     Ok(format!("{:016x}", hasher.finish()))
 }
 
-fn project_filepath_from_asset_path(project_dir: &Path, asset_path: &Path) -> Option<String> {
-    let relative_path = asset_path.strip_prefix(project_dir).ok()?;
-    let normalized_path = relative_path.to_string_lossy().replace('\\', "/");
+fn project_filepath_candidates_from_asset_path(
+    project_dir: &Path,
+    asset_path: &Path,
+) -> Vec<String> {
+    let mut candidates = vec![path_to_xml_filepath(asset_path.to_path_buf())];
 
-    Some(format!("project/{normalized_path}"))
+    if let Ok(relative_path) = asset_path.strip_prefix(project_dir) {
+        let normalized_path = relative_path.to_string_lossy().replace('\\', "/");
+        candidates.push(format!("project/{normalized_path}"));
+    }
+
+    candidates
 }
 
 fn collect_project_asset_filepaths(project_file_xml: &str) -> HashSet<String> {
@@ -1265,6 +1487,12 @@ fn read_cached_template_assets(
     if !xml_matches_template_version(&xml_content, template_version) {
         return Ok(None);
     }
+    let xml_content = normalize_template_file_resource_paths(
+        &template_file_path,
+        &template_dir,
+        &assets_dir,
+        xml_content,
+    )?;
 
     Ok(Some(PreparedTemplate {
         template_dir: template_dir.to_string_lossy().to_string(),
@@ -1441,7 +1669,7 @@ fn prepare_template_assets_blocking(
             fs::remove_file(&template_file_path).map_err(|error| error.to_string())?;
         }
 
-        let xml_content = if local_xml_version_matches {
+        let mut xml_content = if local_xml_version_matches {
             emit_progress(&app, &download_id, 15, "已找到本地模板文件...");
             cached_xml_content.unwrap_or_default()
         } else {
@@ -1492,6 +1720,13 @@ fn prepare_template_assets_blocking(
             fs::remove_file(&material_package_path).map_err(|error| error.to_string())?;
             emit_progress(&app, &download_id, 100, "模板资源已准备完成");
         }
+
+        xml_content = normalize_template_file_resource_paths(
+            &template_file_path,
+            &template_dir,
+            &assets_dir,
+            xml_content,
+        )?;
 
         Ok(PreparedTemplate {
             template_dir: template_dir.to_string_lossy().to_string(),
@@ -1576,9 +1811,15 @@ fn create_project_workspace(template_id: String) -> Result<ProjectWorkspace, Str
     let project_dir = project_root.join(&project_id);
 
     fs::create_dir_all(&project_dir).map_err(|error| error.to_string())?;
-    let (_, template_file_path, _) = cached_template_paths(&template_id)?;
+    let (template_dir, template_file_path, assets_dir) = cached_template_paths(&template_id)?;
     let template_xml =
         fs::read_to_string(&template_file_path).map_err(|error| error.to_string())?;
+    let template_xml = normalize_template_file_resource_paths(
+        &template_file_path,
+        &template_dir,
+        &assets_dir,
+        template_xml,
+    )?;
     let project_file_xml = generate_project_file_xml(&template_xml, &project_id, timestamp)?;
     fs::write(project_dir.join("projectFile.xml"), project_file_xml)
         .map_err(|error| error.to_string())?;
@@ -1622,7 +1863,7 @@ fn save_project_asset(
     let target_file_name = format!("{source_hash}_{source_file_name}");
     let assets_dir = project_dir.join("assets");
     let target_path = assets_dir.join(&target_file_name);
-    let project_filepath = format!("project/assets/{target_file_name}");
+    let project_filepath = path_to_xml_filepath(target_path.clone());
     let project_file_path = project_dir.join("projectFile.xml");
     let project_file_xml =
         fs::read_to_string(&project_file_path).map_err(|error| error.to_string())?;
@@ -1828,10 +2069,11 @@ fn delete_project_asset_files(project_dir: String, asset_paths: Vec<String>) -> 
 
         let path = fs::canonicalize(path).map_err(|error| error.to_string())?;
         if path.starts_with(&assets_dir) && path.is_file() {
-            if project_filepath_from_asset_path(&project_dir, &path)
-                .map(|project_filepath| referenced_filepaths.contains(&project_filepath))
-                .unwrap_or(false)
-            {
+            let still_referenced = project_filepath_candidates_from_asset_path(&project_dir, &path)
+                .iter()
+                .any(|project_filepath| referenced_filepaths.contains(project_filepath));
+
+            if still_referenced {
                 continue;
             }
 
@@ -1995,6 +2237,56 @@ mod tests {
             "<area id=\"e7r0t3y6u1i4o7p9a2s5d\" asset-id=\"i3o6p9a2s5d8f1g4j7q0w\" offset=\"0\" />"
         ));
         assert!(!project_xml.contains("<source>"));
+    }
+
+    #[test]
+    fn normalizes_template_resource_paths_to_absolute_paths() {
+        let template_dir = PathBuf::from(if cfg!(windows) {
+            r"C:\aicut\templates\tpl"
+        } else {
+            "/Users/aicut/templates/tpl"
+        });
+        let assets_dir = template_dir.join("assets");
+        let xml = r#"<template>
+            <video>
+                <demo-path>template/assets/template.mp4</demo-path>
+            </video>
+            <tracks>
+                <track id="bg">
+                    <filepath>common/background.mp4</filepath>
+                </track>
+            </tracks>
+            <media-asset id="group-a">
+                <default-asset>
+                    <asset id="asset-a" filepath="template/assets/1.mp4" />
+                </default-asset>
+            </media-asset>
+        </template>"#;
+
+        let normalized = normalize_template_resource_paths(xml, &template_dir, &assets_dir);
+
+        assert!(normalized.contains(&format!(
+            r#"filepath="{}""#,
+            path_to_xml_filepath(assets_dir.join("1.mp4"))
+        )));
+        assert!(normalized.contains(&format!(
+            "<demo-path>{}</demo-path>",
+            escape_xml_text(&path_to_xml_filepath(assets_dir.join("template.mp4")))
+        )));
+        assert!(normalized.contains(&format!(
+            "<filepath>{}</filepath>",
+            escape_xml_text(&path_to_xml_filepath(
+                assets_dir.join("common/background.mp4")
+            ))
+        )));
+
+        if cfg!(windows) {
+            assert!(!normalized.contains(r"\assets\common/background.mp4"));
+            assert!(normalized.contains(r"\assets\common\background.mp4"));
+        } else {
+            assert!(!normalized.contains(r"/assets/common\background.mp4"));
+            assert!(normalized.contains("/assets/common/background.mp4"));
+        }
     }
 
     #[test]
