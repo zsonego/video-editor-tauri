@@ -12,6 +12,7 @@ import { listen } from '@tauri-apps/api/event';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { getMyProjects } from '../api/project';
 import {
+  favoriteTemplate,
   getTemplateCategories,
   getTemplateDetail,
   getTemplates,
@@ -30,6 +31,8 @@ const weddingImage =
 const travelImage =
   'https://lh3.googleusercontent.com/aida-public/AB6AXuDt5PYLfvUtvuJfd9ZXljOhgs6n3G7R0iINSiXx-ZoXEu-JOruIUsel9dwYttKDKMJnsKyDopxdF1OY733OuzNsL3fzYyTIDqFUACrdIIv2WryUoF4T3fSxwuP0j8mZObr1sEQwYVdgKlIoermFPZEBOVTTSBzlsJ8xe_pFnMkrTTANjkAS3J7tgsoYud_mRfeEeHnCF8uJ4VIt6O-cmoH_30lPeXfZjAqGD3k7VhyUN2QIdI-_YCtH7HLHbJyCB7-YCGLmEaCFw9BH';
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
+const TEMPLATE_DOWNLOAD_BASE_URL =
+  import.meta.env.VITE_TEMPLATE_DOWNLOAD_BASE_URL || API_BASE_URL;
 
 const categories = ref([]);
 const recommendationCards = ref([]);
@@ -131,6 +134,7 @@ const activeTemplateLocalInfo = ref(null);
 const activeTemplateDemoSource = ref(videoSource);
 const activeProjectDir = ref('');
 const favoriteTemplateIds = ref(new Set());
+const favoriteUpdatingIds = ref(new Set());
 const timelineCollapsed = ref(true);
 const showFinishedControls = ref(false);
 const selectedVideoName = ref('视频 1');
@@ -207,11 +211,11 @@ const selectedTemplateThemeName = computed(() => {
   const category = categories.value[activeCategory.value] || {};
   return category.categoryName || category.categoryId || '';
 });
-const activeFavoriteKey = computed(
-  () => activeTemplateId.value || previewTitle.value || '',
-);
-const previewFavorited = computed(() =>
-  favoriteTemplateIds.value.has(activeFavoriteKey.value),
+const activeFavoriteKey = computed(() => String(activeTemplateId.value || ''));
+const previewFavorited = computed(
+  () =>
+    Boolean(activeFavoriteKey.value) &&
+    favoriteTemplateIds.value.has(activeFavoriteKey.value),
 );
 const sidebarTitle = computed(() => {
   if (currentViewState.value === 'finished') return '已导入视频';
@@ -378,6 +382,7 @@ async function openTemplatePreview(topic) {
   }
 
   const templateId = topic.templateId || topic.id;
+  const localTemplateId = String(templateId || '');
 
   if (!templateId) {
     systemMessage.error('模板 ID 不存在');
@@ -396,8 +401,8 @@ async function openTemplatePreview(topic) {
   try {
     const detailResponse = await getTemplateDetail({ templateId });
     const detail = getResponsePayload(detailResponse) || {};
-    const templateFileUrl = detail.templateFileUrl;
-    const materialPackageUrl = detail.materialPackageUrl;
+    const templateFileUrl = detail.xmlPath || detail.templateFileUrl;
+    const materialPackageUrl = detail.assetsPath || detail.materialPackageUrl;
     const templateVersion = String(detail.version ?? '');
 
     if (!templateFileUrl || !materialPackageUrl) {
@@ -405,15 +410,15 @@ async function openTemplatePreview(topic) {
     }
 
     const cachedInfo = await invoke('get_cached_template_assets', {
-      templateId,
+      templateId: localTemplateId,
       templateVersion,
     });
     if (cachedInfo) {
-      enterTemplatePreview(topic, templateId, cachedInfo);
+      enterTemplatePreview(topic, localTemplateId, cachedInfo);
       return;
     }
 
-    const downloadId = `${templateId}-${Date.now()}`;
+    const downloadId = `${localTemplateId}-${Date.now()}`;
     activeDownloadId.value = downloadId;
     templateDownloadVisible.value = true;
     templateDownloadStatus.value = '正在获取模板详情...';
@@ -437,11 +442,11 @@ async function openTemplatePreview(topic) {
       3,
     );
     const localInfo = await invoke('prepare_template_assets', {
-      templateId,
+      templateId: localTemplateId,
       templateVersion,
       templateFileUrl,
       materialPackageUrl,
-      apiBaseUrl: API_BASE_URL,
+      apiBaseUrl: TEMPLATE_DOWNLOAD_BASE_URL,
       downloadId,
     });
     templateDownloadStatus.value = '正在解析模板片段...';
@@ -449,7 +454,7 @@ async function openTemplatePreview(topic) {
       templateDownloadProgress.value,
       98,
     );
-    enterTemplatePreview(topic, templateId, localInfo);
+    enterTemplatePreview(topic, localTemplateId, localInfo);
   } catch (error) {
     const message = error?.message || String(error || '');
     const isCanceled =
@@ -501,17 +506,104 @@ function hidePreviewModal() {
   }
 }
 
-function togglePreviewFavorite() {
-  const key = activeFavoriteKey.value;
+function getTemplateFavoriteKey(template) {
+  const id = template?.templateId || template?.id || '';
+  return id ? String(id) : '';
+}
+
+function isTemplateFavorited(template) {
+  const key = getTemplateFavoriteKey(template);
+  return Boolean(key) && favoriteTemplateIds.value.has(key);
+}
+
+function isTemplateFavoriteUpdating(template) {
+  const key = getTemplateFavoriteKey(template);
+  return Boolean(key) && favoriteUpdatingIds.value.has(key);
+}
+
+function setTemplateFavoriteState(templateId, favorited) {
+  const key = String(templateId || '');
   if (!key) return;
 
   const nextFavorites = new Set(favoriteTemplateIds.value);
-  if (nextFavorites.has(key)) {
-    nextFavorites.delete(key);
-  } else {
+  if (favorited) {
     nextFavorites.add(key);
+  } else {
+    nextFavorites.delete(key);
   }
   favoriteTemplateIds.value = nextFavorites;
+
+  const patchTemplate = (template) =>
+    getTemplateFavoriteKey(template) === key
+      ? { ...template, favorite: favorited ? 1 : 0, favorited }
+      : template;
+
+  subtopics.value = subtopics.value.map(patchTemplate);
+  recommendationCards.value = recommendationCards.value.map(patchTemplate);
+}
+
+function syncTemplateFavoriteStates(templates) {
+  const nextFavorites = new Set(favoriteTemplateIds.value);
+
+  for (const template of templates) {
+    const key = getTemplateFavoriteKey(template);
+    if (!key) continue;
+
+    if (Number(template.favorite) === 1 || template.favorited === true) {
+      nextFavorites.add(key);
+    } else {
+      nextFavorites.delete(key);
+    }
+  }
+
+  favoriteTemplateIds.value = nextFavorites;
+}
+
+async function toggleTemplateFavorite(template) {
+  const key = getTemplateFavoriteKey(template);
+  if (!key || isTemplateFavoriteUpdating(template)) return;
+
+  const currentlyFavorited = isTemplateFavorited(template);
+  const numericTemplateId = Number(template.templateId || template.id);
+  const requestTemplateId = Number.isFinite(numericTemplateId)
+    ? numericTemplateId
+    : template.templateId || template.id;
+  const nextUpdating = new Set(favoriteUpdatingIds.value);
+  nextUpdating.add(key);
+  favoriteUpdatingIds.value = nextUpdating;
+
+  try {
+    const response = await favoriteTemplate({
+      action: currentlyFavorited ? 1 : 0,
+      renter_id: getStoredTenantId(),
+      templateId: requestTemplateId,
+      userId: getStoredUserId(),
+    });
+
+    if (response?.code !== undefined && Number(response.code) !== 0) {
+      throw new Error(response?.msg || '收藏操作失败');
+    }
+
+    setTemplateFavoriteState(key, !currentlyFavorited);
+    systemMessage.success(
+      response?.msg || (currentlyFavorited ? '已取消收藏' : '收藏成功'),
+    );
+  } catch (error) {
+    systemMessage.error(error?.message || '收藏操作失败');
+  } finally {
+    const latestUpdating = new Set(favoriteUpdatingIds.value);
+    latestUpdating.delete(key);
+    favoriteUpdatingIds.value = latestUpdating;
+  }
+}
+
+function togglePreviewFavorite() {
+  if (!activeTemplateId.value) return;
+
+  toggleTemplateFavorite({
+    id: activeTemplateId.value,
+    templateId: activeTemplateId.value,
+  });
 }
 
 async function confirmSelection() {
@@ -1646,7 +1738,9 @@ function formatTemplateDuration(duration) {
 }
 
 function getResponseList(response) {
+  if (Array.isArray(response?.rows)) return response.rows;
   if (Array.isArray(response?.data)) return response.data;
+  if (Array.isArray(response?.data?.rows)) return response.data.rows;
   if (Array.isArray(response?.data?.list)) return response.data.list;
   if (Array.isArray(response?.list)) return response.list;
   return Array.isArray(response) ? response : [];
@@ -1769,21 +1863,32 @@ function parseTemplateSegmentsFromText(xmlContent) {
 }
 
 function mapTemplateTopic(template, index) {
-  const clipCount = Number(template.clipCount) || 0;
+  const clipCount =
+    Number(template.mediaCount) ||
+    Number(template.clipCount) ||
+    Number(template.assetsCount) ||
+    0;
   const title = template.templateName || template.title || `模板 ${index + 1}`;
-  const duration = formatTemplateDuration(template.duration);
+  const duration = formatTemplateDuration(
+    template.videoDuration ?? template.duration,
+  );
+  const materialTypeCount = Number(template.assetsCount) || 0;
+  const favorited = Number(template.favorite) === 1;
 
   return {
     ...template,
     id: template.templateId || template.id || `template-${index}`,
+    favorite: favorited ? 1 : 0,
+    favorited,
     title,
     count: clipCount,
     subtitle: `${clipCount}个片段 · ${title}`,
-    materialTypeCount: 10,
+    materialTypeCount,
     material: clipCount,
     duration,
-    meta: `10类 · ${clipCount}个素材 · ${duration}`,
+    meta: `${materialTypeCount}类 · ${clipCount}个素材 · ${duration}`,
     image:
+      template.coverPic ||
       template.thumbnailUrl ||
       template.image ||
       (index % 2 === 0 ? weddingImage : travelImage),
@@ -1845,16 +1950,22 @@ async function loadTemplatesByCategory(category) {
 }
 
 async function fetchTemplateTopics(categoryId = '') {
-  const response = await getTemplates({
-    tenantId: getStoredTenantId(),
-    userId: getStoredUserId(),
-    categoryId,
+  const payload = {
+    favorite: '',
     keyword: '',
-    favoriteOnly: false,
-    sortType: 1,
-  });
+    pageNum: 1,
+    pageSize: 9999,
+    renter_id: getStoredTenantId(),
+    sortType: '',
+    templateCategoryId: categoryId || '',
+    userId: getStoredUserId(),
+  };
 
-  return getResponseList(response).map(mapTemplateTopic);
+  const response = await getTemplates(payload);
+  const topics = getResponseList(response).map(mapTemplateTopic);
+  syncTemplateFavoriteStates(topics);
+
+  return topics;
 }
 
 async function loadRecommendedTemplates() {
@@ -1880,8 +1991,10 @@ async function loadRecommendedTemplates() {
 
 async function loadTemplateCategories() {
   try {
-    const tenantId = getStoredTenantId();
-    const response = await getTemplateCategories(tenantId ? { tenantId } : {});
+    const renterId = getStoredTenantId();
+    const response = await getTemplateCategories(
+      renterId ? { renter_id: renterId } : {},
+    );
     const list = getResponseList(response);
 
     categories.value = list;
@@ -2452,6 +2565,29 @@ onBeforeUnmount(() => {
                   class="group relative aspect-[16/9] bg-surface-container-high rounded-xl overflow-hidden border border-white/5 hover:border-electric-blue/60 transition-all cursor-pointer shadow-lg hover:shadow-electric-blue/10"
                   @click="openTemplatePreview(card)"
                 >
+                  <button
+                    class="absolute top-2 right-2 z-20 flex h-8 w-8 items-center justify-center rounded-full bg-black/40 backdrop-blur-md transition-colors"
+                    :class="
+                      isTemplateFavorited(card)
+                        ? 'text-yellow-400 hover:text-yellow-300'
+                        : 'text-white hover:text-white'
+                    "
+                    type="button"
+                    @click.stop="toggleTemplateFavorite(card)"
+                  >
+                    <span
+                      class="material-symbols-outlined text-[21px]"
+                      :class="{
+                        'start-editing-spinner': isTemplateFavoriteUpdating(card),
+                      }"
+                      :style="
+                        isTemplateFavorited(card)
+                          ? { fontVariationSettings: `'FILL' 1` }
+                          : undefined
+                      "
+                      >{{ isTemplateFavoriteUpdating(card) ? 'progress_activity' : 'star' }}</span
+                    >
+                  </button>
                   <img
                     :alt="card.title"
                     class="w-full h-full object-cover opacity-70 group-hover:scale-105 transition-transform duration-500"
@@ -2467,7 +2603,7 @@ onBeforeUnmount(() => {
                   </div>
                   <div
                     v-if="card.badge"
-                    class="absolute top-2 right-2 bg-electric-blue text-white text-[9px] font-black px-2 py-0.5 rounded"
+                    class="absolute top-2 right-11 bg-electric-blue text-white text-[9px] font-black px-2 py-0.5 rounded"
                   >
                     {{ card.badge }}
                   </div>
@@ -2706,26 +2842,6 @@ onBeforeUnmount(() => {
             >
               <div class="absolute top-4 right-4 z-10 flex items-center gap-3">
                 <button
-                  class="p-2 bg-black/40 backdrop-blur-md rounded-full transition-colors group"
-                  :class="
-                    previewFavorited
-                      ? 'text-yellow-400 hover:text-yellow-300'
-                      : 'text-white/80 hover:text-white'
-                  "
-                  type="button"
-                  @click="togglePreviewFavorite"
-                >
-                  <span
-                    class="material-symbols-outlined text-[24px] group-hover:scale-110"
-                    :style="
-                      previewFavorited
-                        ? { fontVariationSettings: `'FILL' 1` }
-                        : undefined
-                    "
-                    >star</span
-                  >
-                </button>
-                <button
                   class="p-2 bg-black/40 backdrop-blur-md rounded-full text-white/80 hover:text-white transition-colors group"
                   @click="hidePreviewModal"
                 >
@@ -2738,6 +2854,36 @@ onBeforeUnmount(() => {
               <div
                 class="aspect-video bg-black flex items-center justify-center relative group cursor-pointer"
               >
+                <button
+                  class="absolute right-4 top-4 z-20 p-2 bg-black/40 backdrop-blur-md rounded-full transition-colors group"
+                  :class="
+                    previewFavorited
+                      ? 'text-yellow-400 hover:text-yellow-300'
+                      : 'text-white/80 hover:text-white'
+                  "
+                  type="button"
+                  :disabled="isTemplateFavoriteUpdating({ id: activeTemplateId })"
+                  @click.stop="togglePreviewFavorite"
+                >
+                  <span
+                    class="material-symbols-outlined text-[24px] group-hover:scale-110"
+                    :class="{
+                      'start-editing-spinner': isTemplateFavoriteUpdating({
+                        id: activeTemplateId,
+                      }),
+                    }"
+                    :style="
+                      previewFavorited
+                        ? { fontVariationSettings: `'FILL' 1` }
+                        : undefined
+                    "
+                    >{{
+                      isTemplateFavoriteUpdating({ id: activeTemplateId })
+                        ? 'progress_activity'
+                        : 'star'
+                    }}</span
+                  >
+                </button>
                 <video
                   ref="modalVideoRef"
                   class="w-full h-full object-cover"

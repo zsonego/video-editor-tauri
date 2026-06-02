@@ -5,5 +5,5 @@ export function loginUser(data) {
 }
 
 export function getUserInfo(data) {
-  return request("/api/user/info", { data });
+  return request("/getInfo", { method: "GET", data });
 }

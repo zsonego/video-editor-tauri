@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
-import { loginUser } from '../api/user';
+import { getUserInfo, loginUser } from '../api/user';
 import { systemMessage } from '../utils/message';
 import bgImage from '../assets/bg.png';
 import logoImage from '../assets/logo1.png';
@@ -16,6 +16,7 @@ const submitting = ref(false);
 const tenantDialogVisible = ref(false);
 const tenantList = ref([]);
 const selectedTenantId = ref('');
+const terminalUuid = ref('');
 
 const hasTenants = computed(() => tenantList.value.length > 0);
 
@@ -71,27 +72,6 @@ function getLoginIdentity(loginData, payload) {
   };
 }
 
-function getLoginUserInfo(loginData, identity) {
-  const selectedTenant =
-    getLoginRenters(loginData).find(
-      (tenant) => tenant.renterId === identity.renterId,
-    ) || {};
-
-  return {
-    ...selectedTenant,
-    userId: selectedTenant.userId || identity.userId,
-    tenantId: identity.tenantId,
-    renterId: identity.renterId,
-    tenantName: identity.tenantName,
-    renterName: identity.tenantName,
-    phone:
-      selectedTenant.loginAccount ||
-      selectedTenant.phone ||
-      account.value.trim(),
-    token: identity.token,
-  };
-}
-
 function getLoginData(response) {
   return response?.data && typeof response.data === 'object'
     ? response.data
@@ -115,15 +95,35 @@ function buildLoginPayload(phone, loginPassword, terminalUuid, renterId = '') {
   };
 }
 
-function saveUserInfo(identity, userInfo) {
+function getUserInfoPayload(response) {
+  const responseData = response?.data && typeof response.data === 'object'
+    ? response.data
+    : {};
+  const user = response?.user || responseData.user || responseData || {};
+
+  return {
+    ...user,
+    userId: user.userId || responseData.userId || '',
+    tenantId: user.tenantId || user.renterId || responseData.tenantId || responseData.renterId || '',
+    renterId: user.renterId || user.tenantId || responseData.renterId || responseData.tenantId || '',
+    phone: user.phone || user.phonenumber || responseData.phone || '',
+    roles: response?.roles || responseData.roles || [],
+    permissions: response?.permissions || responseData.permissions || [],
+  };
+}
+
+function saveLoginToken(token) {
+  localStorage.setItem('token', token);
+}
+
+function saveUserInfo(userInfo, identity) {
   const storedUserInfo = {
     ...userInfo,
-    userId: userInfo?.userId || identity.userId,
-    tenantId: userInfo?.tenantId || identity.tenantId,
-    renterId: userInfo?.renterId || identity.renterId,
-    tenantName: userInfo?.tenantName || identity.tenantName,
-    renterName: userInfo?.renterName || identity.tenantName,
-    token: userInfo?.token || identity.token,
+    userId: userInfo?.userId || identity?.userId || '',
+    tenantId: userInfo?.tenantId || identity?.tenantId || '',
+    renterId: userInfo?.renterId || identity?.renterId || '',
+    tenantName: userInfo?.tenantName || identity?.tenantName || '',
+    renterName: userInfo?.renterName || identity?.tenantName || '',
   };
   localStorage.setItem('userInfo', JSON.stringify(storedUserInfo));
 }
@@ -156,6 +156,23 @@ async function getMachineCode() {
   }
 }
 
+async function ensureTerminalUuid() {
+  const cachedTerminalUuid = localStorage.getItem('terminalUuid') || '';
+
+  if (cachedTerminalUuid) {
+    terminalUuid.value = cachedTerminalUuid;
+    return cachedTerminalUuid;
+  }
+
+  const machineCode = await getMachineCode();
+  if (machineCode) {
+    localStorage.setItem('terminalUuid', machineCode);
+    terminalUuid.value = machineCode;
+  }
+
+  return machineCode;
+}
+
 async function submitLogin(extra = {}) {
   const phone = account.value.trim();
   const loginPassword = password.value;
@@ -173,11 +190,11 @@ async function submitLogin(extra = {}) {
   submitting.value = true;
 
   try {
-    const terminalUuid = await getMachineCode();
+    const currentTerminalUuid = terminalUuid.value || (await ensureTerminalUuid());
     const payload = buildLoginPayload(
       phone,
       loginPassword,
-      terminalUuid,
+      currentTerminalUuid,
       extra.renterId || extra.tenantId || '',
     );
 
@@ -193,15 +210,24 @@ async function submitLogin(extra = {}) {
 
     if (result === 0) {
       const identity = getLoginIdentity(loginData, payload);
+      const token = loginData?.token || '';
 
-      if (!identity.tenantId || !identity.userId) {
-        systemMessage.error('登录成功，但未获取到用户身份信息');
+      if (!token) {
+        systemMessage.error('登录成功，但未获取到 token');
         return;
       }
 
-      const userInfo = getLoginUserInfo(loginData, identity);
+      saveLoginToken(token);
+      const userInfoResponse = await getUserInfo();
+      const userInfo = getUserInfoPayload(userInfoResponse);
 
-      saveUserInfo(identity, userInfo);
+      if (!userInfo.userId || !(userInfo.tenantId || userInfo.renterId)) {
+        localStorage.removeItem('token');
+        systemMessage.error('登录成功，但未获取到用户信息');
+        return;
+      }
+
+      saveUserInfo(userInfo, identity);
       systemMessage.success(backendMessage || '登录成功');
       tenantDialogVisible.value = false;
       emit('login', {
@@ -231,6 +257,7 @@ async function submitLogin(extra = {}) {
 
     systemMessage.error(backendMessage || '登录失败');
   } catch (error) {
+    localStorage.removeItem('token');
     systemMessage.error(error?.message || '登录请求失败');
   } finally {
     submitting.value = false;
@@ -257,6 +284,7 @@ function confirmTenantSelection() {
 
 onMounted(() => {
   document.title = '登录 - 鉴音';
+  ensureTerminalUuid();
 });
 </script>
 

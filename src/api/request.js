@@ -10,17 +10,8 @@ const service = axios.create({
   },
 });
 
-function readStorageJson(key) {
-  try {
-    return JSON.parse(localStorage.getItem(key) || 'null') || {};
-  } catch {
-    return {};
-  }
-}
-
 function getStoredToken() {
-  const userInfo = readStorageJson('userInfo');
-  return userInfo?.token || '';
+  return localStorage.getItem('token') || '';
 }
 
 function hasAuthorizationHeader(headers) {

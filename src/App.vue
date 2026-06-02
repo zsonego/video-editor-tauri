@@ -21,6 +21,7 @@ function handleLoginSuccess() {
 }
 
 function handleLogout() {
+  localStorage.removeItem("token");
   localStorage.removeItem("userInfo");
   router.replace("/login");
 }
