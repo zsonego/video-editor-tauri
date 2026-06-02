@@ -28,8 +28,6 @@ use std::{
 use libloading::Library;
 
 static DOWNLOAD_CANCEL_FLAGS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
-#[cfg(target_os = "macos")]
-const MACOS_MLT_REPOSITORY: &str = "/opt/homebrew/Cellar/mlt/7.38.0/lib/mlt";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -574,22 +572,6 @@ fn app_log_error(message: impl AsRef<str>) {
     let message = message.as_ref();
     eprintln!("{message}");
     append_app_log("ERROR", message);
-}
-
-fn configure_mlt_environment() {
-    #[cfg(target_os = "macos")]
-    {
-        std::env::set_var("MLT_REPOSITORY", MACOS_MLT_REPOSITORY);
-        app_log_info(format!(
-            "[app] MLT_REPOSITORY={}",
-            std::env::var("MLT_REPOSITORY").unwrap_or_default()
-        ));
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        app_log_info("[app] MLT_REPOSITORY skipped on non-macOS platform");
-    }
 }
 
 fn ensure_aicut_output_dir() -> Result<PathBuf, String> {
@@ -2256,7 +2238,6 @@ pub fn run() {
                 eprintln!("[app] failed to ensure aicut dirs: {error}");
             }
             app_log_info("[app] setup start");
-            configure_mlt_environment();
             let composer = ComposerRuntime::initialize();
             app.manage(Arc::new(Mutex::new(composer)));
             app_log_info("[app] composer state managed");
