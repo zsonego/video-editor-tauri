@@ -85,6 +85,8 @@ struct ComposerRuntime {
     #[cfg(target_os = "macos")]
     cleanup: Option<ComposerCleanupFn>,
     #[cfg(target_os = "macos")]
+    get_last_error: Option<ComposerGetLastErrorFn>,
+    #[cfg(target_os = "macos")]
     initialized: bool,
 }
 
@@ -102,6 +104,8 @@ type ComposerComposeFn = unsafe extern "C" fn(
     Option<ComposerProgressCallback>,
     *mut c_void,
 ) -> c_int;
+#[cfg(target_os = "macos")]
+type ComposerGetLastErrorFn = unsafe extern "C" fn(*mut c_void) -> *const c_char;
 
 #[cfg(target_os = "macos")]
 struct ComposerCallbackContext {
@@ -191,6 +195,8 @@ impl ComposerRuntime {
             #[cfg(target_os = "macos")]
             cleanup: None,
             #[cfg(target_os = "macos")]
+            get_last_error: None,
+            #[cfg(target_os = "macos")]
             initialized: false,
         }
     }
@@ -224,6 +230,21 @@ impl ComposerRuntime {
                     .get(b"composer_cleanup\0")
                     .map_err(|error| format!("读取 composer_cleanup 失败: {error}"))?
             };
+            app_log_info("[composer] resolving composer_get_last_error");
+            let get_last_error: Option<ComposerGetLastErrorFn> = unsafe {
+                match library.get(b"composer_get_last_error\0") {
+                    Ok(symbol) => {
+                        app_log_info("[composer] composer_get_last_error resolved");
+                        Some(*symbol)
+                    }
+                    Err(error) => {
+                        app_log_error(format!(
+                            "[composer] composer_get_last_error unavailable: {error}"
+                        ));
+                        None
+                    }
+                }
+            };
             app_log_info("[composer] calling composer_init");
             let init_result = unsafe { init() };
 
@@ -241,6 +262,7 @@ impl ComposerRuntime {
                 _library: Some(library),
                 compose: Some(compose),
                 cleanup: Some(cleanup),
+                get_last_error,
                 initialized: true,
             })
         }
@@ -275,6 +297,10 @@ impl ComposerRuntime {
             app_log_info(format!("[composer] template_path={template_path}"));
             app_log_info(format!("[composer] project_path={project_path}"));
             app_log_info(format!("[composer] output_path={output_path}"));
+            let template_path_text = template_path.to_string();
+            let project_path_text = project_path.to_string();
+            let output_path_text = output_path.to_string();
+            let export_id_text = export_id.clone();
             let Some(compose) = self.compose else {
                 let error = "composer_compose 函数未加载".to_string();
                 app_log_error(format!("[composer] {error}"));
@@ -301,11 +327,30 @@ impl ComposerRuntime {
                 app_log_info("[composer] compose success");
                 Ok(())
             } else {
+                let error_message = composer_error_message(result);
+                let composer_last_error = self.composer_last_error_text();
+                app_log_error(format!("[composer] compose failed: {error_message}"));
                 app_log_error(format!(
-                    "[composer] compose failed: {}",
-                    composer_error_message(result)
+                    "[composer] composer_get_last_error(NULL): {composer_last_error}"
                 ));
-                Err(composer_error_message(result))
+                append_composer_error_log(&format!(
+                    "export_id: {export_id_text}\n\
+                     template_path: {template_path_text}\n\
+                     project_path: {project_path_text}\n\
+                     output_path: {output_path_text}\n\
+                     error_code: {result}\n\
+                     error_message: {error_message}\n\
+                     composer_get_last_error(NULL): {composer_last_error}"
+                ));
+
+                if composer_last_error.trim().is_empty()
+                    || composer_last_error == "composer_get_last_error 函数未加载"
+                    || composer_last_error == "composer_get_last_error 返回空指针"
+                {
+                    Err(error_message)
+                } else {
+                    Err(format!("{error_message}: {composer_last_error}"))
+                }
             }
         }
 
@@ -315,6 +360,23 @@ impl ComposerRuntime {
             app_log_error("[composer] compose requested on unsupported platform");
             Err("Composer 动态库当前只支持 macOS".to_string())
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn composer_last_error_text(&self) -> String {
+        let Some(get_last_error) = self.get_last_error else {
+            return "composer_get_last_error 函数未加载".to_string();
+        };
+
+        let error = unsafe { get_last_error(std::ptr::null_mut()) };
+        if error.is_null() {
+            return "composer_get_last_error 返回空指针".to_string();
+        }
+
+        unsafe { CStr::from_ptr(error) }
+            .to_string_lossy()
+            .trim()
+            .to_string()
     }
 
     fn cleanup(&mut self) {
@@ -414,10 +476,10 @@ fn composer_library_path() -> Result<PathBuf, String> {
 
 fn aicut_root_dir() -> Result<PathBuf, String> {
     #[cfg(target_os = "windows")]
-    let base_dir = dirs::data_local_dir();
+    let base_dir = dirs::data_local_dir().or_else(dirs::data_dir);
 
     #[cfg(target_os = "macos")]
-    let base_dir = dirs::data_dir();
+    let base_dir = dirs::data_dir().or_else(dirs::data_local_dir);
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     let base_dir = dirs::data_local_dir().or_else(dirs::data_dir);
@@ -431,15 +493,48 @@ fn ensure_aicut_dirs() -> Result<(PathBuf, PathBuf), String> {
     let root = aicut_root_dir()?;
     let template_dir = root.join("template");
     let project_dir = root.join("project");
+    let logs_dir = root.join("logs");
 
     fs::create_dir_all(&template_dir).map_err(|error| error.to_string())?;
     fs::create_dir_all(&project_dir).map_err(|error| error.to_string())?;
+    fs::create_dir_all(&logs_dir).map_err(|error| error.to_string())?;
 
     Ok((template_dir, project_dir))
 }
 
+fn ensure_aicut_logs_dir() -> Result<PathBuf, String> {
+    let logs_dir = aicut_root_dir()?.join("logs");
+    fs::create_dir_all(&logs_dir).map_err(|error| error.to_string())?;
+    Ok(logs_dir)
+}
+
 fn aicut_log_file_path() -> Result<PathBuf, String> {
-    Ok(aicut_root_dir()?.join("logs").join("app.log"))
+    Ok(ensure_aicut_logs_dir()?.join("app.log"))
+}
+
+#[cfg(target_os = "macos")]
+fn aicut_composer_error_log_file_path() -> Result<PathBuf, String> {
+    Ok(ensure_aicut_logs_dir()?.join("composer-error.log"))
+}
+
+fn append_log_line(path: &Path, line: &str) {
+    if let Some(parent) = path.parent() {
+        if let Err(error) = fs::create_dir_all(parent) {
+            eprintln!("[log] failed to create log dir: {error}");
+            return;
+        }
+    }
+
+    match OpenOptions::new().create(true).append(true).open(path) {
+        Ok(mut file) => {
+            if let Err(error) = file.write_all(line.as_bytes()) {
+                eprintln!("[log] failed to write log: {error}");
+            }
+        }
+        Err(error) => {
+            eprintln!("[log] failed to open log {}: {error}", path.display());
+        }
+    }
 }
 
 fn append_app_log(level: &str, message: &str) {
@@ -447,27 +542,22 @@ fn append_app_log(level: &str, message: &str) {
     let line = format!("{timestamp} [{level}] {message}\n");
 
     match aicut_log_file_path() {
-        Ok(path) => {
-            if let Some(parent) = path.parent() {
-                if let Err(error) = fs::create_dir_all(parent) {
-                    eprintln!("[log] failed to create log dir: {error}");
-                    return;
-                }
-            }
-
-            match OpenOptions::new().create(true).append(true).open(&path) {
-                Ok(mut file) => {
-                    if let Err(error) = file.write_all(line.as_bytes()) {
-                        eprintln!("[log] failed to write app log: {error}");
-                    }
-                }
-                Err(error) => {
-                    eprintln!("[log] failed to open app log {}: {error}", path.display());
-                }
-            }
-        }
+        Ok(path) => append_log_line(&path, &line),
         Err(error) => {
             eprintln!("[log] failed to resolve app log path: {error}");
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn append_composer_error_log(message: &str) {
+    let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+    let line = format!("{timestamp} [COMPOSER_ERROR]\n{message}\n\n");
+
+    match aicut_composer_error_log_file_path() {
+        Ok(path) => append_log_line(&path, &line),
+        Err(error) => {
+            eprintln!("[log] failed to resolve composer error log path: {error}");
         }
     }
 }
@@ -2144,6 +2234,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            if let Err(error) = ensure_aicut_dirs() {
+                eprintln!("[app] failed to ensure aicut dirs: {error}");
+            }
             app_log_info("[app] setup start");
             let composer = ComposerRuntime::initialize();
             app.manage(Arc::new(Mutex::new(composer)));
