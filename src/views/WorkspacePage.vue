@@ -29,8 +29,7 @@ const weddingImage =
   'https://lh3.googleusercontent.com/aida-public/AB6AXuAKUjxUCNitv9tXTzfgFJpJ4Ej2XBvFvC1QMHEvkCguRpbLnSBT-kk_vXIIoyD7N1vu54LtsFl8I-qrAPoQ5ugSt1UZmfUCbNYNGVgsNUoAepuaVksq5X2i4VxN6p5yZNN7-98lafAPrgTXJlKD7WRNAb90zS7OTDMthSpKGyVhyjdK3iFjr4wWg4esqt0UjogKVo_E-UDa7AgxhHefXqneVydxtp_jQThpAjL49uUw3p6I71h6jgJM4UVFvJNhRD7JEsqJepC6_ZD5';
 const travelImage =
   'https://lh3.googleusercontent.com/aida-public/AB6AXuDt5PYLfvUtvuJfd9ZXljOhgs6n3G7R0iINSiXx-ZoXEu-JOruIUsel9dwYttKDKMJnsKyDopxdF1OY733OuzNsL3fzYyTIDqFUACrdIIv2WryUoF4T3fSxwuP0j8mZObr1sEQwYVdgKlIoermFPZEBOVTTSBzlsJ8xe_pFnMkrTTANjkAS3J7tgsoYud_mRfeEeHnCF8uJ4VIt6O-cmoH_30lPeXfZjAqGD3k7VhyUN2QIdI-_YCtH7HLHbJyCB7-YCGLmEaCFw9BH';
-const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL || 'http://192.168.0.207:9527';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
 const categories = ref([]);
 const recommendationCards = ref([]);
@@ -1620,20 +1619,21 @@ function schedulePlayerResize() {
   playerResizeTimer = window.setTimeout(resizePlayerToStage, 340);
 }
 
-function getStoredLoginState() {
+function getStoredUserInfo() {
   try {
-    return JSON.parse(localStorage.getItem('loginState') || 'null') || {};
+    return JSON.parse(localStorage.getItem('userInfo') || 'null') || {};
   } catch {
     return {};
   }
 }
 
 function getStoredTenantId() {
-  return getStoredLoginState().tenantId || '';
+  const userInfo = getStoredUserInfo();
+  return userInfo.tenantId || userInfo.renterId || '';
 }
 
 function getStoredUserId() {
-  return getStoredLoginState().userId || '';
+  return getStoredUserInfo().userId || '';
 }
 
 function getCategoryId(category) {
@@ -1894,16 +1894,16 @@ async function loadTemplateCategories() {
 
 async function loadMyProjects() {
   try {
-    const loginState = getStoredLoginState();
+    const userInfo = getStoredUserInfo();
 
-    if (!loginState.tenantId || !loginState.userId) {
+    if (!(userInfo.tenantId || userInfo.renterId) || !userInfo.userId) {
       draftProjects.value = [];
       return;
     }
 
     const response = await getMyProjects({
-      tenantId: loginState.tenantId,
-      userId: loginState.userId,
+      tenantId: userInfo.tenantId || userInfo.renterId,
+      userId: userInfo.userId,
     });
     const list = Array.isArray(response?.data)
       ? response.data

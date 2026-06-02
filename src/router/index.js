@@ -4,8 +4,8 @@ import WorkspacePage from "../views/WorkspacePage.vue";
 
 function hasLoginState() {
   try {
-    const loginState = JSON.parse(localStorage.getItem("loginState") || "null");
-    return Boolean(loginState?.tenantId && loginState?.userId);
+    const userInfo = JSON.parse(localStorage.getItem("userInfo") || "null");
+    return Boolean((userInfo?.tenantId || userInfo?.renterId) && userInfo?.userId);
   } catch {
     return false;
   }

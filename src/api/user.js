@@ -1,7 +1,7 @@
 import { request } from "./request";
 
 export function loginUser(data) {
-  return request("/api/user/login", { data });
+  return request("/login", { data });
 }
 
 export function getUserInfo(data) {
