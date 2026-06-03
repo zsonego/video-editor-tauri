@@ -160,6 +160,8 @@ const exportStatus = ref('正在渲染视频文件...');
 const exportRunning = ref(false);
 const exportSelectedDir = ref('');
 const exportOutputPath = ref('');
+const importOverwriteConfirmVisible = ref(false);
+const pendingImportSegment = ref(null);
 let exportInterval = null;
 let timelineMoveHandler = null;
 let timelineUpHandler = null;
@@ -700,7 +702,9 @@ function isProjectImportedVideo(video) {
   const projectDir = normalizeComparablePath(activeProjectDir.value);
   const localPath = normalizeComparablePath(video.localPath);
 
-  return Boolean(projectDir && localPath && localPath.startsWith(`${projectDir}/`));
+  return Boolean(
+    projectDir && localPath && localPath.startsWith(`${projectDir}/`),
+  );
 }
 
 function isSegmentFullyImported(segment) {
@@ -712,6 +716,10 @@ function isSegmentFullyImported(segment) {
     videos.length >= targetCount &&
     videos.slice(0, targetCount).every(isProjectImportedVideo)
   );
+}
+
+function hasImportedVideoInSegment(segment) {
+  return (segment?.videos || []).some(isProjectImportedVideo);
 }
 
 function getFileNameFromPath(filePath) {
@@ -1128,6 +1136,31 @@ async function openImportFilePicker(segment) {
   }
 }
 
+function requestOneClickImport(segment) {
+  if (hasImportedVideoInSegment(segment)) {
+    pendingImportSegment.value = segment;
+    importOverwriteConfirmVisible.value = true;
+    return;
+  }
+
+  openImportFilePicker(segment);
+}
+
+function closeImportOverwriteConfirm() {
+  importOverwriteConfirmVisible.value = false;
+  pendingImportSegment.value = null;
+}
+
+async function confirmImportOverwrite() {
+  const segment = pendingImportSegment.value;
+  importOverwriteConfirmVisible.value = false;
+  pendingImportSegment.value = null;
+
+  if (segment) {
+    await openImportFilePicker(segment);
+  }
+}
+
 async function openReplaceFilePicker(segment, videoIndex) {
   const [filePath] = await pickVideoPaths(false);
   const previousState = getSegmentImportState(segment.id);
@@ -1502,7 +1535,9 @@ async function showExportConfirmation() {
   console.log('[export] export button clicked');
   if (exportRunning.value) return;
   if (!canExport.value) {
-    console.warn('[export] export disabled because editing project is not ready');
+    console.warn(
+      '[export] export disabled because editing project is not ready',
+    );
     systemMessage.error('请先开始编辑');
     return;
   }
@@ -1575,7 +1610,10 @@ async function openExportDirectory() {
     if (outputDir) {
       try {
         await openPath(outputDir);
-        console.log('[export] fallback open output directory success:', outputDir);
+        console.log(
+          '[export] fallback open output directory success:',
+          outputDir,
+        );
         return;
       } catch (fallbackError) {
         console.error(
@@ -2663,7 +2701,7 @@ onBeforeUnmount(() => {
                             : 'bg-electric-blue text-white shadow-lg shadow-electric-blue/10 hover:brightness-110'
                         "
                         type="button"
-                        @click="openImportFilePicker(style)"
+                        @click="requestOneClickImport(style)"
                       >
                         {{ `一键导入 (${style.count})` }}
                       </button>
@@ -2787,14 +2825,19 @@ onBeforeUnmount(() => {
                     <span
                       class="material-symbols-outlined text-[21px]"
                       :class="{
-                        'start-editing-spinner': isTemplateFavoriteUpdating(card),
+                        'start-editing-spinner':
+                          isTemplateFavoriteUpdating(card),
                       }"
                       :style="
                         isTemplateFavorited(card)
                           ? { fontVariationSettings: `'FILL' 1` }
                           : undefined
                       "
-                      >{{ isTemplateFavoriteUpdating(card) ? 'progress_activity' : 'star' }}</span
+                      >{{
+                        isTemplateFavoriteUpdating(card)
+                          ? 'progress_activity'
+                          : 'star'
+                      }}</span
                     >
                   </button>
                   <img
@@ -2803,7 +2846,7 @@ onBeforeUnmount(() => {
                     :src="card.image"
                   />
                   <div
-                    class="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent flex flex-col justify-end p-4"
+                    class="absolute inset-0 flex flex-col justify-end p-4"
                   >
                     <div class="text-[14px] font-black text-white">
                       {{ card.title }}
@@ -3046,32 +3089,19 @@ onBeforeUnmount(() => {
             class="absolute inset-0 z-[200] flex items-center justify-center"
             :class="{ hidden: !previewModalVisible }"
           >
-            <div
-              class="relative w-full max-w-4xl mx-4 bg-surface-container rounded-2xl overflow-hidden shadow-[0_30px_90px_rgba(0,0,0,0.8)] border border-electric-blue/20 modal-pop-in"
-            >
-              <div class="absolute top-4 right-4 z-10 flex items-center gap-3">
+            <div class="relative w-full max-w-4xl mx-4">
+              <div class="absolute -top-12 right-0 z-20 flex items-center gap-3">
                 <button
-                  class="p-2 bg-black/40 backdrop-blur-md rounded-full text-white/80 hover:text-white transition-colors group"
-                  @click="hidePreviewModal"
-                >
-                  <span
-                    class="material-symbols-outlined text-[24px] group-hover:scale-110"
-                    >close</span
-                  >
-                </button>
-              </div>
-              <div
-                class="aspect-video bg-black flex items-center justify-center relative group cursor-pointer"
-              >
-                <button
-                  class="absolute right-4 top-4 z-20 p-2 bg-black/40 backdrop-blur-md rounded-full transition-colors group"
+                  class="p-2 bg-black/40 backdrop-blur-md rounded-full transition-colors group"
                   :class="
                     previewFavorited
                       ? 'text-yellow-400 hover:text-yellow-300'
                       : 'text-white/80 hover:text-white'
                   "
                   type="button"
-                  :disabled="isTemplateFavoriteUpdating({ id: activeTemplateId })"
+                  :disabled="
+                    isTemplateFavoriteUpdating({ id: activeTemplateId })
+                  "
                   @click.stop="togglePreviewFavorite"
                 >
                   <span
@@ -3093,6 +3123,23 @@ onBeforeUnmount(() => {
                     }}</span
                   >
                 </button>
+                <button
+                  class="p-2 bg-black/40 backdrop-blur-md rounded-full text-white/80 hover:text-white transition-colors group"
+                  type="button"
+                  @click="hidePreviewModal"
+                >
+                  <span
+                    class="material-symbols-outlined text-[24px] group-hover:scale-110"
+                    >close</span
+                  >
+                </button>
+              </div>
+              <div
+                class="relative w-full bg-surface-container rounded-2xl overflow-hidden shadow-[0_30px_90px_rgba(0,0,0,0.8)] border border-electric-blue/20 modal-pop-in"
+              >
+              <div
+                class="aspect-video bg-black flex items-center justify-center relative group cursor-pointer"
+              >
                 <video
                   ref="modalVideoRef"
                   class="w-full h-full object-cover"
@@ -3180,6 +3227,52 @@ onBeforeUnmount(() => {
                       >progress_activity</span
                     >
                     {{ startEditingLoading ? '正在加载' : '开始编辑' }}
+                  </button>
+                </div>
+              </div>
+            </div>
+            </div>
+          </div>
+
+          <div
+            class="fixed inset-0 z-[410] flex items-center justify-center"
+            :class="{ hidden: !importOverwriteConfirmVisible }"
+          >
+            <div class="absolute inset-0 bg-black/50"></div>
+            <div
+              class="relative w-full max-w-sm bg-surface-container-highest rounded-2xl p-7 border border-white/10 shadow-2xl modal-pop-in"
+            >
+              <div class="flex flex-col items-center text-center gap-5">
+                <div
+                  class="w-14 h-14 rounded-full bg-electric-blue/10 border border-electric-blue/20 flex items-center justify-center"
+                >
+                  <span
+                    class="material-symbols-outlined text-electric-blue text-3xl"
+                    >sync_problem</span
+                  >
+                </div>
+                <div>
+                  <h3 class="text-lg font-black text-white mb-2">
+                    确认一键导入
+                  </h3>
+                  <p class="text-[13px] leading-6 text-on-surface-variant">
+                    当前类下已经导入过视频，一键导入会替换全部视频内容，是否继续？
+                  </p>
+                </div>
+                <div class="grid grid-cols-2 gap-3 w-full">
+                  <button
+                    class="h-11 rounded-xl bg-white/5 text-on-surface-variant text-[13px] font-bold hover:bg-white/10 hover:text-white transition-all active:scale-95"
+                    type="button"
+                    @click="closeImportOverwriteConfirm"
+                  >
+                    取消
+                  </button>
+                  <button
+                    class="h-11 rounded-xl bg-electric-blue text-white text-[13px] font-bold hover:brightness-110 transition-all active:scale-95 shadow-lg shadow-electric-blue/20"
+                    type="button"
+                    @click="confirmImportOverwrite"
+                  >
+                    确定
                   </button>
                 </div>
               </div>
@@ -3406,7 +3499,7 @@ onBeforeUnmount(() => {
           暂无工程
         </div>
         <div
-          class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6"
+          class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 templateListWrapper"
         >
           <div
             v-for="project in visibleDraftProjects"
@@ -3420,7 +3513,7 @@ onBeforeUnmount(() => {
               @click="openDraftProject(project.id)"
             />
             <div
-              class="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent flex flex-col justify-end p-4 pointer-events-none"
+              class="absolute inset-0 flex flex-col justify-end p-4 pointer-events-none"
             >
               <input
                 v-if="editingDraftId === project.id"
