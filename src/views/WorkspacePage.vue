@@ -685,6 +685,35 @@ function getSegmentImportState(segmentId) {
   return segmentImportState[segmentId] || { imported: false, videos: [] };
 }
 
+function normalizeComparablePath(filePath) {
+  return String(filePath || '')
+    .replaceAll('\\', '/')
+    .replace(/\/+/g, '/')
+    .replace(/\/$/g, '')
+    .toLowerCase();
+}
+
+function isProjectImportedVideo(video) {
+  if (!video) return false;
+  if (video.projectFilepath) return true;
+
+  const projectDir = normalizeComparablePath(activeProjectDir.value);
+  const localPath = normalizeComparablePath(video.localPath);
+
+  return Boolean(projectDir && localPath && localPath.startsWith(`${projectDir}/`));
+}
+
+function isSegmentFullyImported(segment) {
+  const videos = segment?.videos || [];
+  const targetCount = Number(segment?.count) || 0;
+
+  return (
+    targetCount > 0 &&
+    videos.length >= targetCount &&
+    videos.slice(0, targetCount).every(isProjectImportedVideo)
+  );
+}
+
 function getFileNameFromPath(filePath) {
   return (
     String(filePath || '')
@@ -2627,7 +2656,13 @@ onBeforeUnmount(() => {
                         </div>
                       </div>
                       <button
-                        class="px-3 py-1.5 bg-electric-blue text-white text-[11px] font-bold rounded-md flex items-center gap-1 shadow-lg shadow-electric-blue/10 shrink-0"
+                        class="px-3 py-1.5 text-[11px] font-bold rounded-md flex items-center gap-1 shrink-0 transition-colors"
+                        :class="
+                          isSegmentFullyImported(style)
+                            ? 'bg-white/5 text-on-surface-variant/60 border border-white/10 hover:bg-white/10'
+                            : 'bg-electric-blue text-white shadow-lg shadow-electric-blue/10 hover:brightness-110'
+                        "
+                        type="button"
                         @click="openImportFilePicker(style)"
                       >
                         {{ `一键导入 (${style.count})` }}
@@ -2667,7 +2702,12 @@ onBeforeUnmount(() => {
                         </div>
                         <button
                           type="button"
-                          class="px-2 py-1 bg-electric-blue/10 rounded text-[10px] text-electric-blue font-bold shrink-0"
+                          class="px-2 py-1 rounded text-[10px] font-bold shrink-0 transition-colors"
+                          :class="
+                            isProjectImportedVideo(video)
+                              ? 'bg-white/5 text-on-surface-variant/60 border border-white/10 hover:bg-white/10'
+                              : 'bg-electric-blue/10 text-electric-blue hover:bg-electric-blue/20'
+                          "
                           @click.stop="openReplaceFilePicker(style, videoIndex)"
                         >
                           替换

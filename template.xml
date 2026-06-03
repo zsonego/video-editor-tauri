@@ -67,11 +67,14 @@
         </media-asset>
 
 
-        <clips>
+        <clips id="z7x1c4v8b2n5m9q0w3e6r" target-track="clips">
             <clip id="u4p7a0d3f6g9j2k5p8s1t" name="舞蹈片段">
                 <start>0</start> <!-- 片段开始时间（毫秒） -->
                 <duration>1510</duration> <!-- 片段时长（毫秒） -->
                 <area id="e7r0t3y6u1i4o7p9a2s5d" asset-id="t8r1y4u7i0o3p6a9s2d5f">
+                    <source>                        
+                        <duration>1510</duration> <!-- 剪辑时长（毫秒） -->
+                    </source>
                     <transform>
                         <mirror>none</mirror> <!--镜像效果 none | horizontal | vertical -->
                         <speed>1</speed> <!-- 播放速度 1-原速  <1 慢放  >1快放 -->
@@ -87,6 +90,9 @@
                 <start>1511</start> <!-- 片段开始时间（毫秒） -->
                 <duration>2637</duration> <!-- 片段时长（毫秒） -->
                 <area id="e7r0t3y6u1i4o7p9a2s6d" asset-id="k2n5m8q1w4e7r0t3y6uai">
+                    <source>                        
+                        <duration>2637</duration> <!-- 剪辑时长（毫秒） -->
+                    </source>
                     <transform>
                         <mirror>none</mirror> <!--镜像效果 none | horizontal | vertical -->
                         <speed>1</speed> <!-- 播放速度 1-原速  <1 慢放  >1快放 -->
@@ -102,6 +108,9 @@
                 <start>4146</start> <!-- 片段开始时间（毫秒） -->
                 <duration>3936</duration> <!-- 片段时长（毫秒） -->
                 <area id="e7r0t3y6u1i4o7p9a2s7d" asset-id="t8r1y4u7i0o3p6a9s2d6f">
+                    <source>                        
+                        <duration>3936</duration> <!-- 剪辑时长（毫秒） -->
+                    </source>
                     <transform>
                         <mirror>none</mirror> <!--镜像效果 none | horizontal | vertical -->
                         <speed>1</speed> <!-- 播放速度 1-原速  <1 慢放  >1快放 -->
@@ -113,6 +122,9 @@
                     </destination>
                 </area>
                 <area id="e7r0t3y6u1i4o7p9a2s8d" asset-id="t8r1y4u7i0o3p6a9s2d6f">
+                    <source>                        
+                        <duration>3936</duration> <!-- 剪辑时长（毫秒） -->
+                    </source>
                     <transform>
                         <mirror>none</mirror> <!--镜像效果 none | horizontal | vertical -->
                         <speed>1</speed> <!-- 播放速度 1-原速  <1 慢放  >1快放 -->
@@ -128,6 +140,9 @@
                 <start>8084</start> <!-- 片段开始时间（毫秒） -->
                 <duration>7674</duration> <!-- 片段时长（毫秒） -->
                 <area id="h2k5p8s1d4f7g0j3q6w9e" asset-id="k2n5m8q1w4e7r0t3y6u9i">
+                    <source>                        
+                        <duration>7674</duration> <!-- 剪辑时长（毫秒） -->
+                    </source>
                     <transform>
                         <mirror>none</mirror> <!--镜像效果 none | horizontal | vertical -->
                         <speed>1</speed> <!-- 播放速度 1-原速  <1 慢放  >1快放 -->
@@ -143,6 +158,9 @@
                 <start>15758</start> <!-- 片段开始时间（毫秒） -->
                 <duration>3235</duration> <!-- 片段时长（毫秒） -->
                 <area id="e7r0t3y6u1i4o7p9a2s9d" asset-id="k2n5m8q1w4e7r0t3y6ubi">
+                    <source>                        
+                        <duration>3235</duration> <!-- 剪辑时长（毫秒） -->
+                    </source>
                     <transform>
                         <mirror>none</mirror> <!--镜像效果 none | horizontal | vertical -->
                         <speed>1</speed> <!-- 播放速度 1-原速  <1 慢放  >1快放 -->
@@ -154,6 +172,9 @@
                     </destination>
                 </area>
                 <area id="e7r0t3y6u1i4o7p9a2sad" asset-id="k2n5m8q1w4e7r0t3y6uci">
+                    <source>                        
+                        <duration>3235</duration> <!-- 剪辑时长（毫秒） -->
+                    </source>
                     <transform>
                         <mirror>none</mirror> <!--镜像效果 none | horizontal | vertical -->
                         <speed>1</speed> <!-- 播放速度 1-原速  <1 慢放  >1快放 -->
@@ -169,6 +190,9 @@
                 <start>18994</start> <!-- 片段开始时间（毫秒） -->
                 <duration>20286</duration> <!-- 片段时长（毫秒） -->
                 <area id="h2k5p8s1d4f7g0j3q6wae" asset-id="k2n5m8q1w4e7r0t3y6udi">
+                    <source>                        
+                        <duration>20286</duration> <!-- 剪辑时长（毫秒） -->
+                    </source>
                     <transform>
                         <mirror>none</mirror> <!--镜像效果 none | horizontal | vertical -->
                         <speed>1</speed> <!-- 播放速度 1-原速  <1 慢放  >1快放 -->
@@ -184,6 +208,9 @@
                 <start>47490</start> <!-- 片段开始时间（毫秒） -->
                 <duration>4603</duration> <!-- 片段时长（毫秒） -->
                 <area id="h2k5p8s1d4f7g0j3q6wbe" asset-id="i3o6p9a2s5d8f1g4j7q0w">
+                    <source>                        
+                        <duration>4603</duration> <!-- 剪辑时长（毫秒） -->
+                    </source>
                     <transform>
                         <mirror>none</mirror> <!--镜像效果 none | horizontal | vertical -->
                         <speed>1</speed> <!-- 播放速度 1-原速  <1 慢放  >1快放 -->
@@ -199,6 +226,9 @@
                 <start>52094</start> <!-- 片段开始时间（毫秒） -->
                 <duration>3203</duration> <!-- 片段时长（毫秒） -->
                 <area id="e7r0t3y6u1i4o7p9a2scd" asset-id="y7u1i4o7p0a3s6d9f2g5j">
+                    <source>                        
+                        <duration>3203</duration> <!-- 剪辑时长（毫秒） -->
+                    </source>
                     <transform>
                         <mirror>none</mirror> <!--镜像效果 none | horizontal | vertical -->
                         <speed>1</speed> <!-- 播放速度 1-原速  <1 慢放  >1快放 -->
@@ -210,6 +240,9 @@
                     </destination>
                 </area>
                 <area id="e7r0t3y6u1i4o7p9a2sdd" asset-id="y7u1i4o7p0a3s6d9f2g5j">
+                    <source>                        
+                        <duration>3203</duration> <!-- 剪辑时长（毫秒） -->
+                    </source>
                     <transform>
                         <mirror>none</mirror> <!--镜像效果 none | horizontal | vertical -->
                         <speed>1</speed> <!-- 播放速度 1-原速  <1 慢放  >1快放 -->
@@ -221,6 +254,9 @@
                     </destination>
                 </area>
                 <area id="e7r0t3y6u1i4o7p9a2sed" asset-id="y7u1i4o7p0a3s6d9f2g5j">
+                     <source>                        
+                        <duration>3203</duration> <!-- 剪辑时长（毫秒） -->
+                    </source>
                     <transform>
                         <mirror>none</mirror> <!--镜像效果 none | horizontal | vertical -->
                         <speed>1</speed> <!-- 播放速度 1-原速  <1 慢放  >1快放 -->
@@ -236,6 +272,9 @@
                 <start>55297</start> <!-- 片段开始时间（毫秒） -->
                 <duration>4703</duration> <!-- 片段时长（毫秒） -->
                 <area id="h2k5p8s1d4f7g0j3q6wce" asset-id="c4v7x0z3a6s9d2f5g8j1k">
+                     <source>                        
+                        <duration>4703</duration> <!-- 剪辑时长（毫秒） -->
+                    </source>
                     <transform>
                         <mirror>none</mirror> <!--镜像效果 none | horizontal | vertical -->
                         <speed>1</speed> <!-- 播放速度 1-原速  <1 慢放  >1快放 -->
