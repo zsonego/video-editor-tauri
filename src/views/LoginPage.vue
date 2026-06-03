@@ -794,6 +794,13 @@ onMounted(() => {
   padding-right: 40px;
 }
 
+.password-input::-ms-reveal,
+.password-input::-ms-clear {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
 .toggle-password {
   position: absolute;
   right: 0;

@@ -10,6 +10,7 @@ import {
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener';
 import { getMyProjects } from '../api/project';
 import {
   favoriteTemplate,
@@ -168,6 +169,7 @@ let playerResizeObserver = null;
 let timelineSeekFrame = null;
 let pendingTimelineSeekTime = null;
 let offsetPersistTimer = null;
+const VIDEO_FRAME_REVEAL_TIME = 0.001;
 
 const mainVideoRef = ref(null);
 const modalVideoRef = ref(null);
@@ -216,6 +218,11 @@ const previewFavorited = computed(
   () =>
     Boolean(activeFavoriteKey.value) &&
     favoriteTemplateIds.value.has(activeFavoriteKey.value),
+);
+const canExport = computed(
+  () =>
+    Boolean(activeProjectDir.value) &&
+    Boolean(activeTemplateLocalInfo.value?.templateFilePath),
 );
 const sidebarTitle = computed(() => {
   if (currentViewState.value === 'finished') return '已导入视频';
@@ -1222,6 +1229,68 @@ function seekMainPlayerToTimelineTime(targetTime) {
   updatePlayerControls();
 }
 
+function revealPausedVideoFrame(video, targetTime = 0, updateControls = null) {
+  if (!video || !video.paused) {
+    updateControls?.();
+    return;
+  }
+
+  const duration = Number.isFinite(video.duration) ? video.duration : 0;
+  const normalizedTarget = duration
+    ? Math.min(duration, Math.max(0, targetTime))
+    : Math.max(0, targetTime);
+  const revealTime =
+    normalizedTarget > 0
+      ? normalizedTarget
+      : Math.min(duration || VIDEO_FRAME_REVEAL_TIME, VIDEO_FRAME_REVEAL_TIME);
+
+  const finish = () => {
+    video.pause();
+    updateControls?.();
+  };
+
+  let fallbackTimer = null;
+  const onSeeked = () => {
+    video.removeEventListener('seeked', onSeeked);
+    if (fallbackTimer) {
+      window.clearTimeout(fallbackTimer);
+      fallbackTimer = null;
+    }
+    finish();
+  };
+
+  video.addEventListener('seeked', onSeeked, { once: true });
+
+  try {
+    video.currentTime = revealTime;
+    fallbackTimer = window.setTimeout(() => {
+      video.removeEventListener('seeked', onSeeked);
+      fallbackTimer = null;
+      finish();
+    }, 300);
+  } catch (error) {
+    video.removeEventListener('seeked', onSeeked);
+    if (fallbackTimer) {
+      window.clearTimeout(fallbackTimer);
+      fallbackTimer = null;
+    }
+    finish();
+  }
+}
+
+function handleMainVideoLoadedMetadata() {
+  updatePlayerControls();
+  revealPausedVideoFrame(mainVideoRef.value, timeline.startTime, () => {
+    updatePlayerControls();
+    syncMainPlayerToTimelineStart();
+  });
+}
+
+function handleModalVideoLoadedMetadata() {
+  updateModalPreviewControls();
+  revealPausedVideoFrame(modalVideoRef.value, 0, updateModalPreviewControls);
+}
+
 async function persistSelectedVideoOffset(assetId, offsetMs) {
   if (!activeProjectDir.value || !assetId) return;
 
@@ -1403,6 +1472,11 @@ function resetExportProgress() {
 async function showExportConfirmation() {
   console.log('[export] export button clicked');
   if (exportRunning.value) return;
+  if (!canExport.value) {
+    console.warn('[export] export disabled because editing project is not ready');
+    systemMessage.error('请先开始编辑');
+    return;
+  }
   if (!activeProjectDir.value) {
     console.warn('[export] missing activeProjectDir');
     systemMessage.error('请先开始编辑');
@@ -1440,6 +1514,49 @@ async function showExportConfirmation() {
   } catch (error) {
     console.error('[export] failed to select output directory:', error);
     systemMessage.error(error?.message || '选择导出目录失败');
+  }
+}
+
+async function openExportDirectory() {
+  const outputPath = exportOutputPath.value;
+  const outputDir = exportSelectedDir.value;
+
+  console.log('[export] open export directory clicked', {
+    outputPath,
+    outputDir,
+  });
+
+  try {
+    if (outputPath) {
+      await revealItemInDir(outputPath);
+      console.log('[export] reveal output file success:', outputPath);
+      return;
+    }
+
+    if (outputDir) {
+      await openPath(outputDir);
+      console.log('[export] open output directory success:', outputDir);
+      return;
+    }
+
+    systemMessage.error('导出目录不存在');
+  } catch (error) {
+    console.error('[export] open export directory failed:', error);
+
+    if (outputDir) {
+      try {
+        await openPath(outputDir);
+        console.log('[export] fallback open output directory success:', outputDir);
+        return;
+      } catch (fallbackError) {
+        console.error(
+          '[export] fallback open output directory failed:',
+          fallbackError,
+        );
+      }
+    }
+
+    systemMessage.error(error?.message || '打开导出目录失败');
   }
 }
 
@@ -1737,6 +1854,31 @@ function formatTemplateDuration(duration) {
   return Number.isFinite(seconds) ? `${seconds}s` : '--';
 }
 
+function formatDurationMsToSeconds(durationMs) {
+  const milliseconds = Number(String(durationMs || '').trim());
+  if (!Number.isFinite(milliseconds) || milliseconds <= 0) return '';
+
+  const seconds = milliseconds / 1000;
+  return Number.isInteger(seconds)
+    ? String(seconds)
+    : seconds.toFixed(1).replace(/\.0$/, '');
+}
+
+function formatMaterialDurationRange(minDuration, maxDuration) {
+  const minSeconds = formatDurationMsToSeconds(minDuration);
+  const maxSeconds = formatDurationMsToSeconds(maxDuration);
+
+  if (minSeconds && maxSeconds) {
+    return minSeconds === maxSeconds
+      ? `${minSeconds}秒`
+      : `${minSeconds}~${maxSeconds}秒`;
+  }
+
+  if (minSeconds) return `≥${minSeconds}秒`;
+  if (maxSeconds) return `≤${maxSeconds}秒`;
+  return '--';
+}
+
 function getResponseList(response) {
   if (Array.isArray(response?.rows)) return response.rows;
   if (Array.isArray(response?.data)) return response.data;
@@ -1775,6 +1917,20 @@ function parseTemplateSegments(xmlContent) {
       const defaultAsset = directChildren.find(
         (child) => child.tagName.toLowerCase() === 'default-asset',
       );
+      const constraints = directChildren.find(
+        (child) => child.tagName.toLowerCase() === 'constraints',
+      );
+      const constraintChildren = constraints
+        ? Array.from(constraints.children)
+        : [];
+      const minDuration =
+        constraintChildren
+          .find((child) => child.tagName.toLowerCase() === 'minduration')
+          ?.textContent?.trim() || '';
+      const maxDuration =
+        constraintChildren
+          .find((child) => child.tagName.toLowerCase() === 'maxduration')
+          ?.textContent?.trim() || '';
       const defaultAssets = defaultAsset
         ? Array.from(defaultAsset.children).filter(
             (child) => child.tagName.toLowerCase() === 'asset',
@@ -1800,6 +1956,7 @@ function parseTemplateSegments(xmlContent) {
         name,
         shot: comment,
         count: defaultAssets.length,
+        durationRange: formatMaterialDurationRange(minDuration, maxDuration),
         defaultAssets: defaultAssetItems,
       };
     },
@@ -1857,6 +2014,10 @@ function parseTemplateSegmentsFromText(xmlContent) {
       name,
       shot: getElementText(body, 'comment'),
       count: (defaultAssetBody.match(/<asset\b/gi) || []).length,
+      durationRange: formatMaterialDurationRange(
+        getElementText(body, 'minDuration'),
+        getElementText(body, 'maxDuration'),
+      ),
       defaultAssets: parseAssetTags(defaultAssetBody),
     };
   });
@@ -2142,6 +2303,12 @@ onBeforeUnmount(() => {
         </button>
         <button
           class="h-9 w-24 flex items-center justify-center gap-1.5 bg-surface-container-low/50 text-on-surface-variant hover:text-electric-blue rounded-lg font-bold shadow-sm hover:bg-surface-container-high active:scale-95 transition-all shrink-0 border border-outline-variant/20"
+          :class="{
+            'opacity-45 cursor-not-allowed hover:text-on-surface-variant hover:bg-surface-container-low/50 active:scale-100':
+              !canExport || exportRunning,
+          }"
+          type="button"
+          :disabled="!canExport || exportRunning"
           @click="showExportConfirmation"
         >
           <span class="text-[13px] uppercase tracking-wide whitespace-nowrap"
@@ -2368,7 +2535,9 @@ onBeforeUnmount(() => {
                     </div>
                     <div class="flex justify-between text-[10px]">
                       <span class="text-on-surface-variant">素材时长:</span>
-                      <span class="text-electric-blue font-bold"></span>
+                      <span class="text-electric-blue font-bold">{{
+                        segment.durationRange || '--'
+                      }}</span>
                     </div>
                   </div>
                 </div>
@@ -2630,7 +2799,7 @@ onBeforeUnmount(() => {
                   playsinline
                   preload="metadata"
                   :src="selectedVideoSource"
-                  @loadedmetadata="updatePlayerControls"
+                  @loadedmetadata="handleMainVideoLoadedMetadata"
                   @timeupdate="updatePlayerControls"
                   @play="updatePlayerControls"
                   @pause="updatePlayerControls"
@@ -2890,7 +3059,7 @@ onBeforeUnmount(() => {
                   playsinline
                   preload="metadata"
                   :src="activeTemplateDemoSource"
-                  @loadedmetadata="updateModalPreviewControls"
+                  @loadedmetadata="handleModalVideoLoadedMetadata"
                   @timeupdate="updateModalPreviewControls"
                   @play="updateModalPreviewControls"
                   @pause="updateModalPreviewControls"
@@ -3100,9 +3269,6 @@ onBeforeUnmount(() => {
                   <h3 class="text-lg font-bold text-white mb-1">
                     {{ exportStatus }}
                   </h3>
-                  <p class="text-xs text-on-surface-variant">
-                    请勿关闭当前窗口
-                  </p>
                   <p
                     v-if="exportOutputPath"
                     class="mt-2 max-w-[320px] break-all text-[11px] text-on-surface-variant/70"
@@ -3127,13 +3293,22 @@ onBeforeUnmount(() => {
                   >
                     {{ exportRunning ? '导出中...' : '关闭' }}
                   </button>
-                  <button
-                    v-else
-                    class="w-full py-3 bg-electric-blue text-white font-bold rounded-xl hover:brightness-110 transition-all active:scale-95"
-                    @click="closeExportModal"
-                  >
-                    完成
-                  </button>
+                  <template v-else>
+                    <button
+                      class="w-full py-3 bg-white/5 text-white font-bold rounded-xl hover:bg-white/10 transition-all active:scale-95 border border-white/10"
+                      type="button"
+                      @click="openExportDirectory"
+                    >
+                      打开导出目录
+                    </button>
+                    <button
+                      class="w-full py-3 bg-electric-blue text-white font-bold rounded-xl hover:brightness-110 transition-all active:scale-95"
+                      type="button"
+                      @click="closeExportModal"
+                    >
+                      完成
+                    </button>
+                  </template>
                 </div>
               </div>
             </div>
