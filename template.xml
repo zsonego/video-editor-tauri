@@ -61,8 +61,10 @@
                 <maxDuration>60000</maxDuration> <!-- 最长时长，毫秒 -->
             </constraints>
             <default-asset>
-                 <asset id="k2n5m8q1w4e7r0t3y6uci" filepath= "template/assets/1V6A3995.mp4"/>                                  
-                <asset id="k2n5m8q1w4e7r0t3y6udi" filepath= "template/assets/1V6A4095.mp4"/>                         
+                <asset id="k2n5m8q1w4e7r0t3y6uci" filepath= "template/assets/1V6A3995.mp4"/>                                  
+                <asset id="k2n5m8q1w4e7r0t3y6udi" filepath= "template/assets/1V6A4095.mp4"/>
+                <asset id="k2n5m8q16yh7r0t3y6udi" filepath= "template/assets/1V6A8654.MP4"/> 
+                <asset id="k2n5m8q1gh67r0t3y6udi" filepath= "template/assets/1V6A4099.MP4"/>                          
             </default-asset>            
         </media-asset>
 
@@ -85,6 +87,7 @@
                         <height>1080</height> <!-- 目标高度 -->
                     </destination>
                 </area>
+                <subtitle id="m9n2b4v6c8x1z3a5s7d0f2" text="" /> 
             </clip>
             <clip id="u4p7a0d3f6g9j2k5p8s2t" name="舞蹈片段">
                 <start>1511</start> <!-- 片段开始时间（毫秒） -->
@@ -103,6 +106,7 @@
                         <height>1080</height> <!-- 目标高度 -->
                     </destination>
                 </area>
+                <subtitle id="m9n2b4v6c8x6yha5s7d0f2" text="" /> 
             </clip>
             <clip id="u4p7a0d3f6g9j2k5p8s3t" name="舞蹈片段">
                 <start>4146</start> <!-- 片段开始时间（毫秒） -->
@@ -135,6 +139,7 @@
                         <height>1080</height> <!-- 目标高度 -->
                     </destination>
                 </area>
+                <subtitle id="m9n2b4v6c8x1z3abh7d0f2" text="" /> 
             </clip>
             <clip id="v4c7x1z5a8s2d6f9g3j7k" name="舞蹈片段">
                 <start>8084</start> <!-- 片段开始时间（毫秒） -->
@@ -153,6 +158,7 @@
                         <height>1080</height> <!-- 目标高度 -->
                     </destination>
                 </area>
+                <subtitle id="m9n2b4v45gx1z3a5s7d0f2" text="" /> 
             </clip>
             <clip id="u4p7a0d3f6g9j2k5p8s4t" name="舞蹈片段">
                 <start>15758</start> <!-- 片段开始时间（毫秒） -->
@@ -185,13 +191,16 @@
                         <height>675</height> <!-- 目标高度 -->
                     </destination>
                 </area>
+                <subtitle id="m9n2b4v6c889jz3a5s7d0f2" text="" /> 
             </clip>
+
+
             <clip id="v4c7x1z5a8s2d6f9g3j8k" name="舞蹈片段">
                 <start>18994</start> <!-- 片段开始时间（毫秒） -->
-                <duration>20286</duration> <!-- 片段时长（毫秒） -->
+                <duration>4286</duration> <!-- 片段时长（毫秒） -->
                 <area id="h2k5p8s1d4f7g0j3q6wae" asset-id="k2n5m8q1w4e7r0t3y6udi">
                     <source>                        
-                        <duration>20286</duration> <!-- 剪辑时长（毫秒） -->
+                        <duration>4286</duration> <!-- 剪辑时长（毫秒） -->
                     </source>
                     <transform>
                         <mirror>none</mirror> <!--镜像效果 none | horizontal | vertical -->
@@ -203,7 +212,48 @@
                         <height>1080</height> <!-- 目标高度 -->
                     </destination>
                 </area>
+                <subtitle id="m9n2b4v4rgx1z3a5s7d0f2" text="" /> 
             </clip>
+            <clip id="v4c7x1z5a8s4thf9g3j8k" name="舞蹈片段">
+                <start>23280</start> <!-- 片段开始时间（毫秒） -->
+                <duration>13000</duration> <!-- 片段时长（毫秒） -->
+                <area id="h2k5p8s1d4f7nnj3q6wae" asset-id="k2n5m8q16yh7r0t3y6udi">
+                    <source>                        
+                        <duration>13000</duration> <!-- 剪辑时长（毫秒） -->
+                    </source>
+                    <transform>
+                        <mirror>none</mirror> <!--镜像效果 none | horizontal | vertical -->
+                        <speed>1</speed> <!-- 播放速度 1-原速  <1 慢放  >1快放 -->
+                    </transform>
+                    <destination> 
+                        <position x="0" y="0" /> <!-- 目标起点坐标 -->
+                        <width>1920</width> <!-- 目标宽度 -->
+                        <height>1080</height> <!-- 目标高度 -->
+                    </destination>
+                </area>
+                <subtitle id="m9n2b4v4rgx1z3a5s7d0f2" text="" /> 
+            </clip>
+            <clip id="v4c7x1z5a8s2d6y3g3j8k" name="舞蹈片段">
+                <start>36280</start> <!-- 片段开始时间（毫秒） -->
+                <duration>11210</duration> <!-- 片段时长（毫秒） -->
+                <area id="h2k5p8s1d4f766j3q6wae" asset-id="k2n5m8q1gh67r0t3y6udi">
+                    <source>                        
+                        <duration>11210</duration> <!-- 剪辑时长（毫秒） -->
+                    </source>
+                    <transform>
+                        <mirror>none</mirror> <!--镜像效果 none | horizontal | vertical -->
+                        <speed>1</speed> <!-- 播放速度 1-原速  <1 慢放  >1快放 -->
+                    </transform>
+                    <destination> 
+                        <position x="0" y="0" /> <!-- 目标起点坐标 -->
+                        <width>1920</width> <!-- 目标宽度 -->
+                        <height>1080</height> <!-- 目标高度 -->
+                    </destination>
+                </area>
+                <subtitle id="m9n2b4v4rgx1z3a5s7d0f2" text="" /> 
+            </clip>
+
+
             <clip id="v4c7x1z5a8s2d6f9g3j9k" name="舞蹈片段">
                 <start>47490</start> <!-- 片段开始时间（毫秒） -->
                 <duration>4603</duration> <!-- 片段时长（毫秒） -->
@@ -221,6 +271,7 @@
                         <height>1080</height> <!-- 目标高度 -->
                     </destination>
                 </area>
+                <subtitle id="m9n2b4v6c8x4rga5s7d0f2" text="" /> 
             </clip>
             <clip id="u4p7a0d3f6g9j2k5p8s5t" name="舞蹈片段">
                 <start>52094</start> <!-- 片段开始时间（毫秒） -->
@@ -267,6 +318,7 @@
                         <height>1080</height> <!-- 目标高度 -->
                     </destination>
                 </area>
+                <subtitle id="m9n2b4v6c8x15yh5s7d0f2" text="" /> 
             </clip>
             <clip id="v4c7x1z5a8s2d6f9g3jak" name="舞蹈片段">
                 <start>55297</start> <!-- 片段开始时间（毫秒） -->
@@ -285,6 +337,7 @@
                         <height>1080</height> <!-- 目标高度 -->
                     </destination>
                 </area>
+                <subtitle id="m9n2b46yh8x1z3a5s7d0f2" text="" /> 
             </clip>
         </clips>
     </template>

@@ -1,5 +1,5 @@
 use chrono::{DateTime, Local};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -50,6 +50,13 @@ struct ProjectWorkspace {
 struct ProjectAssetImport {
     copied_path: String,
     project_filepath: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectAreaOffsetUpdate {
+    area_id: String,
+    offset_ms: u64,
 }
 
 #[derive(Clone, Serialize)]
@@ -1266,6 +1273,74 @@ fn update_project_clip_offsets(
     }
 }
 
+fn update_project_clip_area_offsets(
+    project_file_xml: &str,
+    asset_id: &str,
+    area_offsets: &[ProjectAreaOffsetUpdate],
+) -> Result<String, String> {
+    let offset_by_area = area_offsets
+        .iter()
+        .filter(|area_offset| !area_offset.area_id.trim().is_empty())
+        .map(|area_offset| {
+            (
+                area_offset.area_id.trim().to_string(),
+                area_offset.offset_ms.to_string(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+
+    if offset_by_area.is_empty() {
+        return Err("areaOffsets 涓嶈兘涓虹┖".to_string());
+    }
+
+    let mut output = String::new();
+    let mut search_start = 0;
+    let mut updated = false;
+
+    while let Some(relative_start) = project_file_xml[search_start..].find("<area") {
+        let tag_start = search_start + relative_start;
+        let after_name = project_file_xml[tag_start + "<area".len()..].chars().next();
+
+        if !is_xml_name_boundary(after_name) {
+            output.push_str(&project_file_xml[search_start..tag_start + "<area".len()]);
+            search_start = tag_start + "<area".len();
+            continue;
+        }
+
+        let Some(relative_tag_end) = project_file_xml[tag_start..].find('>') else {
+            break;
+        };
+        let tag_end = tag_start + relative_tag_end + 1;
+        let tag = &project_file_xml[tag_start..tag_end];
+
+        output.push_str(&project_file_xml[search_start..tag_start]);
+
+        let area_id = xml_attribute_value(tag, "id").unwrap_or_default();
+        let area_asset_id = xml_attribute_value(tag, "asset-id").unwrap_or_default();
+
+        if area_asset_id == asset_id {
+            if let Some(offset) = offset_by_area.get(&area_id) {
+                output.push_str(&replace_or_insert_xml_attribute(tag, "offset", offset));
+                updated = true;
+            } else {
+                output.push_str(tag);
+            }
+        } else {
+            output.push_str(tag);
+        }
+
+        search_start = tag_end;
+    }
+
+    output.push_str(&project_file_xml[search_start..]);
+
+    if updated {
+        Ok(output)
+    } else {
+        Err("projectFile.xml 涓湭鎵惧埌瀵瑰簲鐨?area".to_string())
+    }
+}
+
 fn remove_subtitle_tags(xml_content: &str) -> String {
     let mut output = String::new();
     let mut search_start = 0;
@@ -1418,8 +1493,9 @@ fn parse_template_clips(xml_content: &str) -> Vec<TemplateClips> {
     find_xml_element_blocks(xml_content, "clips")
         .into_iter()
         .filter_map(|(clips_tag, clips_inner)| {
-            let id = xml_attribute_value(&clips_tag, "id")?;
-            let target_track = xml_attribute_value(&clips_tag, "target-track").unwrap_or_default();
+            let id = xml_attribute_value(&clips_tag, "id").unwrap_or_else(|| "clips".to_string());
+            let target_track = xml_attribute_value(&clips_tag, "target-track")
+                .unwrap_or_else(|| "clips".to_string());
             let clips = find_xml_element_blocks(&clips_inner, "clip")
                 .into_iter()
                 .filter_map(|(clip_tag, clip_inner)| {
@@ -1977,6 +2053,7 @@ fn update_project_asset_offset(
     project_dir: String,
     asset_id: String,
     offset_ms: u64,
+    area_offsets: Option<Vec<ProjectAreaOffsetUpdate>>,
 ) -> Result<(), String> {
     if asset_id.trim().is_empty() {
         return Err("assetId 不能为空".to_string());
@@ -1995,7 +2072,11 @@ fn update_project_asset_offset(
     let project_file_xml =
         fs::read_to_string(&project_file_path).map_err(|error| error.to_string())?;
     let updated_project_file_xml =
-        update_project_clip_offsets(&project_file_xml, &asset_id, offset_ms)?;
+        if let Some(area_offsets) = area_offsets.as_ref().filter(|offsets| !offsets.is_empty()) {
+            update_project_clip_area_offsets(&project_file_xml, &asset_id, area_offsets)?
+        } else {
+            update_project_clip_offsets(&project_file_xml, &asset_id, offset_ms)?
+        };
 
     fs::write(&project_file_path, updated_project_file_xml).map_err(|error| error.to_string())?;
 
@@ -2333,6 +2414,28 @@ mod tests {
     }
 
     #[test]
+    fn generates_project_clips_with_default_clips_attributes() {
+        let template_xml = r#"<xmeml version="5">
+    <template id="template-a" name="Template A" version="1.0" timeunit="millisecond">
+        <clips>
+            <clip id="clip-a">
+                <area id="area-a" asset-id="asset-a">
+                    <source>
+                        <duration>5000</duration>
+                    </source>
+                </area>
+            </clip>
+        </clips>
+    </template>
+</xmeml>"#;
+        let project_xml =
+            generate_project_file_xml(template_xml, "project-a", 1000).expect("project xml");
+
+        assert!(project_xml.contains(r#"<clips id="clips" target-track="clips">"#));
+        assert!(project_xml.contains(r#"id="area-a" asset-id="asset-a" offset="0""#));
+    }
+
+    #[test]
     fn normalizes_template_resource_paths_to_absolute_paths() {
         let template_dir = PathBuf::from(if cfg!(windows) {
             r"C:\aicut\templates\tpl"
@@ -2431,6 +2534,35 @@ mod tests {
         assert!(updated_xml.contains(r#"id="area-a" asset-id="asset-a" offset="2500""#));
         assert!(updated_xml.contains(r#"id="area-b" asset-id="asset-b" offset="0""#));
         assert!(updated_xml.contains(r#"id="area-c" asset-id="asset-a" offset="2500""#));
+    }
+
+    #[test]
+    fn updates_project_clip_offsets_by_area_id() {
+        let project_xml = r#"<project>
+        <clips id="clips" target-track="clips">
+            <clip id="clip-a">
+                <area id="area-a" asset-id="asset-a" offset="0" />
+                <area id="area-b" asset-id="asset-a" offset="0" />
+                <area id="area-c" asset-id="asset-b" offset="0" />
+            </clip>
+        </clips>
+    </project>"#;
+        let area_offsets = vec![
+            ProjectAreaOffsetUpdate {
+                area_id: "area-a".to_string(),
+                offset_ms: 10_000,
+            },
+            ProjectAreaOffsetUpdate {
+                area_id: "area-b".to_string(),
+                offset_ms: 12_000,
+            },
+        ];
+        let updated_xml = update_project_clip_area_offsets(project_xml, "asset-a", &area_offsets)
+            .expect("updated xml");
+
+        assert!(updated_xml.contains(r#"id="area-a" asset-id="asset-a" offset="10000""#));
+        assert!(updated_xml.contains(r#"id="area-b" asset-id="asset-a" offset="12000""#));
+        assert!(updated_xml.contains(r#"id="area-c" asset-id="asset-b" offset="0""#));
     }
 
     #[test]

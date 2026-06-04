@@ -11,7 +11,7 @@ import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener';
-import { getMyProjects } from '../api/project';
+import { createProject, getMyProjects } from '../api/project';
 import {
   favoriteTemplate,
   getTemplateCategories,
@@ -134,6 +134,7 @@ const activeTemplateId = ref('');
 const activeTemplateLocalInfo = ref(null);
 const activeTemplateDemoSource = ref(videoSource);
 const activeProjectDir = ref('');
+const activeBackendProjectId = ref('');
 const favoriteTemplateIds = ref(new Set());
 const favoriteUpdatingIds = ref(new Set());
 const timelineCollapsed = ref(true);
@@ -165,6 +166,10 @@ const pendingImportSegment = ref(null);
 let exportInterval = null;
 let timelineMoveHandler = null;
 let timelineUpHandler = null;
+let timelinePlayheadMoveHandler = null;
+let timelinePlayheadUpHandler = null;
+let modalPreviewProgressMoveHandler = null;
+let modalPreviewProgressUpHandler = null;
 let playerResizeFrame = null;
 let playerResizeTimer = null;
 let playerResizeObserver = null;
@@ -179,14 +184,17 @@ const playerStageRef = ref(null);
 const playerWrapperRef = ref(null);
 const timelineTrackRef = ref(null);
 const timelineDragging = ref(false);
+const timelinePlayheadDragging = ref(false);
 const playerPaused = ref(true);
 const playerMuted = ref(false);
 const playerSpeed = ref(1);
 const playerProgress = ref(0);
+const playerCurrentTime = ref(0);
 const playerTimeLabel = ref('00:00 / 00:00');
 const modalPaused = ref(true);
 const modalProgress = ref(0);
 const modalPlaybackRate = ref(1);
+const modalPreviewProgressDragging = ref(false);
 const selectedVideoDuration = ref('00:00');
 const selectedVideoSource = ref(videoSource);
 const importedVideoObjectUrls = new Set();
@@ -223,6 +231,8 @@ const previewFavorited = computed(
 );
 const canExport = computed(
   () =>
+    currentViewState.value === 'import' &&
+    mainMode.value === 'player' &&
     Boolean(activeProjectDir.value) &&
     Boolean(activeTemplateLocalInfo.value?.templateFilePath),
 );
@@ -283,6 +293,15 @@ const timelineLeftPercent = computed(() => {
   );
 
   return `${(startTime / totalDuration) * 100}%`;
+});
+const timelinePlayheadPercent = computed(() => {
+  const totalDuration = Math.max(1, Number(timeline.totalDuration) || 1);
+  const currentTime = Math.min(
+    totalDuration,
+    Math.max(0, Number(playerCurrentTime.value) || 0),
+  );
+
+  return `${(currentTime / totalDuration) * 100}%`;
 });
 const timelineRangeLabel = computed(() => {
   const endTime = timeline.startTime + timeline.selectedDuration;
@@ -351,6 +370,7 @@ function openPreview(title, subtitle) {
   activeTemplateLocalInfo.value = null;
   activeTemplateDemoSource.value = videoSource;
   activeProjectDir.value = '';
+  activeBackendProjectId.value = '';
   activeTemplateName.value = title;
   previewTitle.value = title;
   previewSubtitle.value = subtitle;
@@ -382,6 +402,7 @@ function enterTemplatePreview(topic, templateId, localInfo) {
   activeTemplateDemoSource.value =
     resolveTemplateVideoSource(demoPath) || videoSource;
   activeProjectDir.value = '';
+  activeBackendProjectId.value = '';
   nextTick(resetModalPreviewVideo);
 }
 
@@ -633,6 +654,58 @@ async function confirmSelection() {
   }
 }
 
+function normalizeBackendId(value) {
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue) ? numericValue : value;
+}
+
+async function createBackendProjectIfNeeded() {
+  if (activeBackendProjectId.value) {
+    return true;
+  }
+
+  const renterId = getStoredTenantId();
+  const userId = getStoredUserId();
+  const templateId = activeTemplateId.value;
+  const projectName =
+    activeTemplateName.value || previewTitle.value || `工程 ${Date.now()}`;
+
+  if (!renterId || !userId || !templateId) {
+    systemMessage.error('用户或模板信息不完整，无法创建工程');
+    return false;
+  }
+
+  try {
+    console.log('[project] creating backend project', {
+      projectName,
+      renter_id: renterId,
+      templateId,
+      userId,
+    });
+    const response = await createProject({
+      projectName,
+      renter_id: renterId,
+      templateId: normalizeBackendId(templateId),
+      userId: normalizeBackendId(userId),
+    });
+
+    if (response?.code !== undefined && Number(response.code) !== 0) {
+      throw new Error(response?.msg || '工程创建失败');
+    }
+
+    const payload = getResponsePayload(response) || {};
+    activeBackendProjectId.value = payload.projectId || payload.id || '';
+    console.log('[project] backend project created', {
+      projectId: activeBackendProjectId.value,
+    });
+    return true;
+  } catch (error) {
+    console.error('[project] backend project create failed:', error);
+    systemMessage.error(error?.message || '工程创建失败');
+    return false;
+  }
+}
+
 async function startEditing() {
   if (activeTemplateId.value && !activeProjectDir.value) {
     try {
@@ -645,6 +718,12 @@ async function startEditing() {
       return false;
     }
   }
+
+  const backendProjectCreated = await createBackendProjectIfNeeded();
+  if (!backendProjectCreated) {
+    return false;
+  }
+  loadMyProjects();
 
   await initializeDefaultTemplateAssets();
   currentViewState.value = 'import';
@@ -661,6 +740,7 @@ async function startEditing() {
       firstSegmentWithVideo.videos[0],
       firstSegmentWithVideo.name,
     );
+    await flushSelectedVideoOffsetPersist();
   } else {
     selectVideoForTimeline('视频 1', '视频轨道 V1');
   }
@@ -796,10 +876,15 @@ function getDirectChildElements(parent, tagName) {
 }
 
 function normalizeTemplateDurationSeconds(durationValue) {
-  const duration = Number(String(durationValue || '').trim());
-  if (!Number.isFinite(duration) || duration <= 0) return 0;
+  const duration = normalizeTemplateDurationMs(durationValue);
+  if (!duration) return 0;
 
   return duration / 1000;
+}
+
+function normalizeTemplateDurationMs(durationValue) {
+  const duration = Number(String(durationValue || '').trim());
+  return Number.isFinite(duration) && duration > 0 ? duration : 0;
 }
 
 function getAreaSourceDurationInfoFromElement(area) {
@@ -810,14 +895,16 @@ function getAreaSourceDurationInfoFromElement(area) {
 
   return {
     durationRaw,
+    durationMs: normalizeTemplateDurationMs(durationRaw),
     durationSeconds: normalizeTemplateDurationSeconds(durationRaw),
   };
 }
 
-function findTemplateAreaMatchFromDom(xmlContent, assetId) {
+function findTemplateAreaMatchesFromDom(xmlContent, assetId) {
   const xml = new DOMParser().parseFromString(xmlContent, 'text/xml');
   if (xml.querySelector('parsererror')) return null;
 
+  const matches = [];
   const clips = Array.from(xml.querySelectorAll('clips'));
   for (const clipsElement of clips) {
     const clipElements = getDirectChildElements(clipsElement, 'clip');
@@ -825,25 +912,26 @@ function findTemplateAreaMatchFromDom(xmlContent, assetId) {
       const areas = getDirectChildElements(clip, 'area');
       for (const area of areas) {
         if (area.getAttribute('asset-id') === assetId) {
-          return {
+          matches.push({
             clipsId: clipsElement.getAttribute('id') || '',
             clipId: clip.getAttribute('id') || '',
             areaId: area.getAttribute('id') || '',
             clipsAssetId: area.getAttribute('asset-id') || '',
             ...getAreaSourceDurationInfoFromElement(area),
-          };
+          });
         }
       }
     }
   }
 
-  return null;
+  return matches;
 }
 
-function findTemplateAreaMatchFromText(xmlContent, assetId) {
+function findTemplateAreaMatchesFromText(xmlContent, assetId) {
   const clipsMatches = Array.from(
     xmlContent.matchAll(/<clips\b([^>]*)>([\s\S]*?)<\/clips>/gi),
   );
+  const matches = [];
 
   for (const clipsMatch of clipsMatches) {
     const clipsAttributes = clipsMatch[1] || '';
@@ -872,34 +960,47 @@ function findTemplateAreaMatchFromText(xmlContent, assetId) {
           'duration',
         );
 
-        return {
+        matches.push({
           clipsId: getAttributeValue(clipsAttributes, 'id'),
           clipId: getAttributeValue(clipAttributes, 'id'),
           areaId: getAttributeValue(areaAttributes, 'id'),
           clipsAssetId,
           durationRaw,
+          durationMs: normalizeTemplateDurationMs(durationRaw),
           durationSeconds: normalizeTemplateDurationSeconds(durationRaw),
-        };
+        });
       }
     }
   }
 
-  return null;
+  return matches;
 }
 
-function findTemplateAreaMatch(assetId) {
+function findTemplateAreaMatches(assetId) {
   const xmlContent = getActiveTemplateXmlContent();
   const normalizedAssetId = String(assetId || '').trim();
-  if (!xmlContent || !normalizedAssetId) return null;
+  if (!xmlContent || !normalizedAssetId) return [];
 
   return (
-    findTemplateAreaMatchFromDom(xmlContent, normalizedAssetId) ??
-    findTemplateAreaMatchFromText(xmlContent, normalizedAssetId)
+    findTemplateAreaMatchesFromDom(xmlContent, normalizedAssetId) ??
+    findTemplateAreaMatchesFromText(xmlContent, normalizedAssetId)
   );
 }
 
+function findTemplateAreaMatch(assetId) {
+  return findTemplateAreaMatches(assetId)[0] || null;
+}
+
+function findLongestTemplateAreaMatch(assetId) {
+  return findTemplateAreaMatches(assetId).reduce((longest, match) => {
+    const duration = Number(match.durationMs) || 0;
+    const longestDuration = Number(longest?.durationMs) || 0;
+    return duration > longestDuration ? match : longest;
+  }, null);
+}
+
 function findTemplateAreaDurationSeconds(assetId) {
-  return findTemplateAreaMatch(assetId)?.durationSeconds || null;
+  return findLongestTemplateAreaMatch(assetId)?.durationSeconds || null;
 }
 
 function getTimelineSelectionDuration(videoInfo, videoDuration) {
@@ -912,7 +1013,8 @@ function getTimelineSelectionDuration(videoInfo, videoDuration) {
 
 function logTemplateAssetDurationMatch(videoInfo) {
   const materialAssetId = videoInfo.assetId || '';
-  const areaMatch = findTemplateAreaMatch(materialAssetId);
+  const areaMatches = findTemplateAreaMatches(materialAssetId);
+  const areaMatch = findLongestTemplateAreaMatch(materialAssetId);
 
   console.log('[duration-track]', {
     materialAssetId,
@@ -924,6 +1026,12 @@ function logTemplateAssetDurationMatch(videoInfo) {
     videoDurationSeconds: videoInfo.durationSeconds || null,
     timelineTrackDuration: timeline.totalDuration,
     timelineSelectionDuration: timeline.selectedDuration,
+    matchedAreas: areaMatches.map((match) => ({
+      areaId: match.areaId,
+      clipsAssetId: match.clipsAssetId,
+      duration: match.durationRaw,
+      durationSeconds: match.durationSeconds,
+    })),
   });
 }
 
@@ -1232,8 +1340,14 @@ function selectVideoForTimeline(video, styleName = '') {
       timeline.totalDuration,
       getTimelineSelectionDuration(videoInfo, duration),
     );
+    const defaultStartTime = Math.max(
+      0,
+      (timeline.totalDuration - timeline.selectedDuration) / 2,
+    );
     timeline.startTime = clampTimelineStart(
-      Number.isFinite(cachedState?.startTime) ? cachedState.startTime : 0,
+      Number.isFinite(cachedState?.startTime)
+        ? cachedState.startTime
+        : defaultStartTime,
     );
   }
   selectedVideoAssetId.value = videoInfo.assetId || '';
@@ -1243,7 +1357,6 @@ function selectVideoForTimeline(video, styleName = '') {
   }
   nextTick(() => {
     resetMainPlayer();
-    syncMainPlayerToTimelineStart();
   });
   timelinePulse.value = true;
   window.setTimeout(() => {
@@ -1289,6 +1402,75 @@ function seekMainPlayerToTimelineTime(targetTime) {
 
   video.currentTime = Math.max(0, nextTime);
   updatePlayerControls();
+}
+
+function seekMainPlayerByTimelineClientX(clientX) {
+  const track = timelineTrackRef.value;
+  if (!track) return;
+
+  const rect = track.getBoundingClientRect();
+  const ratio = rect.width
+    ? Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
+    : 0;
+  const targetTime = ratio * Math.max(0, Number(timeline.totalDuration) || 0);
+
+  seekMainPlayerToTimelineTime(targetTime);
+}
+
+function startTimelinePlayheadDrag(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  event.currentTarget.setPointerCapture?.(event.pointerId);
+  timelinePlayheadDragging.value = true;
+  seekMainPlayerByTimelineClientX(event.clientX);
+
+  if (timelinePlayheadMoveHandler) {
+    window.removeEventListener('pointermove', timelinePlayheadMoveHandler);
+  }
+  if (timelinePlayheadUpHandler) {
+    window.removeEventListener('pointerup', timelinePlayheadUpHandler);
+  }
+
+  timelinePlayheadMoveHandler = (moveEvent) => {
+    seekMainPlayerByTimelineClientX(moveEvent.clientX);
+  };
+
+  timelinePlayheadUpHandler = () => {
+    timelinePlayheadDragging.value = false;
+    window.removeEventListener('pointermove', timelinePlayheadMoveHandler);
+    window.removeEventListener('pointerup', timelinePlayheadUpHandler);
+    timelinePlayheadMoveHandler = null;
+    timelinePlayheadUpHandler = null;
+  };
+
+  window.addEventListener('pointermove', timelinePlayheadMoveHandler);
+  window.addEventListener('pointerup', timelinePlayheadUpHandler);
+}
+
+function getTemplateAreaOffsetPayload(assetId, baseOffsetMs) {
+  const matches = findTemplateAreaMatches(assetId).filter(
+    (match) => match.areaId,
+  );
+  if (matches.length === 0) return [];
+
+  const maxDurationMs = Math.max(
+    ...matches.map((match) => Number(match.durationMs) || 0),
+  );
+  if (!Number.isFinite(maxDurationMs) || maxDurationMs <= 0) return [];
+
+  return matches.map((match) => {
+    const matchDurationMs = Number(match.durationMs);
+    const durationMs =
+      Number.isFinite(matchDurationMs) && matchDurationMs > 0
+        ? matchDurationMs
+        : maxDurationMs;
+    const centeredOffsetMs = Math.max(0, maxDurationMs - durationMs) / 2;
+
+    return {
+      areaId: match.areaId,
+      offsetMs: Math.max(0, Math.round(baseOffsetMs + centeredOffsetMs)),
+    };
+  });
 }
 
 function revealPausedVideoFrame(video, targetTime = 0, updateControls = null) {
@@ -1342,10 +1524,7 @@ function revealPausedVideoFrame(video, targetTime = 0, updateControls = null) {
 
 function handleMainVideoLoadedMetadata() {
   updatePlayerControls();
-  revealPausedVideoFrame(mainVideoRef.value, timeline.startTime, () => {
-    updatePlayerControls();
-    syncMainPlayerToTimelineStart();
-  });
+  revealPausedVideoFrame(mainVideoRef.value, 0, updatePlayerControls);
 }
 
 function handleModalVideoLoadedMetadata() {
@@ -1357,10 +1536,18 @@ async function persistSelectedVideoOffset(assetId, offsetMs) {
   if (!activeProjectDir.value || !assetId) return;
 
   try {
+    const areaOffsets = getTemplateAreaOffsetPayload(assetId, offsetMs);
+    console.log('[duration-track] persist offsets', {
+      assetId,
+      offsetMs,
+      areaOffsets,
+    });
+
     await invoke('update_project_asset_offset', {
       projectDir: activeProjectDir.value,
       assetId,
       offsetMs,
+      areaOffsets,
     });
   } catch (error) {
     systemMessage.error(error?.message || '时间偏移更新失败');
@@ -1730,6 +1917,9 @@ function updatePlayerControls() {
   playerProgress.value = duration
     ? Math.max(0, Math.min(100, (video.currentTime / duration) * 100))
     : 0;
+  playerCurrentTime.value = Number.isFinite(video.currentTime)
+    ? Math.max(0, video.currentTime)
+    : 0;
   playerTimeLabel.value = `${formatPlayerTime(video.currentTime)} / ${formatPlayerTime(duration)}`;
   playerPaused.value = video.paused;
   playerMuted.value = video.muted || video.volume === 0;
@@ -1844,13 +2034,51 @@ function seekModalPreviewTo(event) {
   const video = modalVideoRef.value;
   if (!video || !video.duration) return;
 
-  const rect = event.currentTarget.getBoundingClientRect();
-  const ratio = (event.clientX - rect.left) / rect.width;
+  seekModalPreviewByClientX(event.currentTarget, event.clientX);
+}
+
+function seekModalPreviewByClientX(track, clientX) {
+  const video = modalVideoRef.value;
+  if (!video || !video.duration || !track) return;
+
+  const rect = track.getBoundingClientRect();
+  const ratio = (clientX - rect.left) / rect.width;
   video.currentTime = Math.max(
     0,
     Math.min(video.duration, ratio * video.duration),
   );
   updateModalPreviewControls();
+}
+
+function startModalPreviewProgressDrag(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  const track = event.currentTarget;
+  track.setPointerCapture?.(event.pointerId);
+  modalPreviewProgressDragging.value = true;
+  seekModalPreviewByClientX(track, event.clientX);
+
+  if (modalPreviewProgressMoveHandler) {
+    window.removeEventListener('pointermove', modalPreviewProgressMoveHandler);
+  }
+  if (modalPreviewProgressUpHandler) {
+    window.removeEventListener('pointerup', modalPreviewProgressUpHandler);
+  }
+
+  modalPreviewProgressMoveHandler = (moveEvent) => {
+    seekModalPreviewByClientX(track, moveEvent.clientX);
+  };
+
+  modalPreviewProgressUpHandler = () => {
+    modalPreviewProgressDragging.value = false;
+    window.removeEventListener('pointermove', modalPreviewProgressMoveHandler);
+    window.removeEventListener('pointerup', modalPreviewProgressUpHandler);
+    modalPreviewProgressMoveHandler = null;
+    modalPreviewProgressUpHandler = null;
+  };
+
+  window.addEventListener('pointermove', modalPreviewProgressMoveHandler);
+  window.addEventListener('pointerup', modalPreviewProgressUpHandler);
 }
 
 function cycleModalPlaybackRate() {
@@ -2124,11 +2352,14 @@ function mapTemplateTopic(template, index) {
 }
 
 function normalizeProjectStatus(status) {
-  return status === '已导出' || status === 'exported' ? 'exported' : 'editing';
+  return status === 1 || status === '1' || status === '已导出' || status === 'exported'
+    ? 'exported'
+    : 'editing';
 }
 
 function mapProject(project, index) {
   const status = normalizeProjectStatus(project.status);
+  const statusLabel = project.statusName || (status === 'exported' ? '已导出' : '编辑中');
 
   return {
     ...project,
@@ -2136,7 +2367,7 @@ function mapProject(project, index) {
     title: project.projectName || project.title || '未命名工程',
     status,
     duration: project.duration || '--:--',
-    time: status === 'exported' ? '已导出' : '编辑中',
+    time: statusLabel,
     image:
       project.thumbnailUrl ||
       project.image ||
@@ -2235,22 +2466,21 @@ async function loadTemplateCategories() {
 
 async function loadMyProjects() {
   try {
-    const userInfo = getStoredUserInfo();
+    const renterId = getStoredTenantId();
+    const userId = getStoredUserId();
 
-    if (!(userInfo.tenantId || userInfo.renterId) || !userInfo.userId) {
+    if (!renterId || !userId) {
       draftProjects.value = [];
       return;
     }
 
     const response = await getMyProjects({
-      tenantId: userInfo.tenantId || userInfo.renterId,
-      userId: userInfo.userId,
+      renter_id: renterId,
+      userId: normalizeBackendId(userId),
+      pageNum: 1,
+      pageSize: 9999,
     });
-    const list = Array.isArray(response?.data)
-      ? response.data
-      : Array.isArray(response)
-        ? response
-        : [];
+    const list = getResponseList(response);
 
     draftProjects.value = list.map(mapProject);
   } catch (error) {
@@ -2303,6 +2533,18 @@ onBeforeUnmount(() => {
   }
   if (timelineUpHandler) {
     window.removeEventListener('pointerup', timelineUpHandler);
+  }
+  if (timelinePlayheadMoveHandler) {
+    window.removeEventListener('pointermove', timelinePlayheadMoveHandler);
+  }
+  if (timelinePlayheadUpHandler) {
+    window.removeEventListener('pointerup', timelinePlayheadUpHandler);
+  }
+  if (modalPreviewProgressMoveHandler) {
+    window.removeEventListener('pointermove', modalPreviewProgressMoveHandler);
+  }
+  if (modalPreviewProgressUpHandler) {
+    window.removeEventListener('pointerup', modalPreviewProgressUpHandler);
   }
   if (playerResizeFrame) {
     cancelAnimationFrame(playerResizeFrame);
@@ -3010,6 +3252,7 @@ onBeforeUnmount(() => {
                   >
                     {{ selectedStyleName }}
                   </div>
+                  <div class="timeline-overview">
                   <div class="timeline-ruler" aria-label="时间刻度">
                     <div class="timeline-ruler-major"></div>
                     <div class="timeline-ruler-labels">
@@ -3018,6 +3261,17 @@ onBeforeUnmount(() => {
                       }}</span>
                     </div>
                   </div>
+                  <button
+                    class="timeline-playhead"
+                    :class="{ 'is-dragging': timelinePlayheadDragging }"
+                    :style="{ left: timelinePlayheadPercent }"
+                    type="button"
+                    aria-label="时间轴播放指针"
+                    @pointerdown="startTimelinePlayheadDrag"
+                  >
+                    <span class="timeline-playhead-handle"></span>
+                    <span class="timeline-playhead-line"></span>
+                  </button>
                   <div class="clips-row relative h-16">
                     <div ref="timelineTrackRef" class="duration-track">
                       <div
@@ -3056,6 +3310,7 @@ onBeforeUnmount(() => {
                         </div>
                       </div>
                     </div>
+                  </div>
                   </div>
                 </div>
                 <div
@@ -3168,12 +3423,17 @@ onBeforeUnmount(() => {
                 </div>
                 <div
                   class="modal-preview-progress absolute inset-x-4 bottom-4 cursor-pointer"
-                  @click="seekModalPreviewTo"
+                  :class="{ 'is-dragging': modalPreviewProgressDragging }"
+                  @pointerdown="startModalPreviewProgressDrag"
                 >
                   <div
                     class="finished-progress-fill"
                     :style="{ width: `${modalProgress}%` }"
                   ></div>
+                  <span
+                    class="modal-preview-progress-thumb"
+                    :style="{ left: `${modalProgress}%` }"
+                  ></span>
                 </div>
               </div>
               <div
@@ -3753,6 +4013,65 @@ onBeforeUnmount(() => {
   text-align: right;
 }
 
+.timeline-overview {
+  position: relative;
+  margin: 0 12px;
+}
+
+.timeline-overview .timeline-ruler {
+  margin: 0;
+}
+
+.timeline-overview .clips-row {
+  padding: 8px 0;
+}
+
+.timeline-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 90;
+  width: 18px;
+  min-width: 18px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: ew-resize;
+  touch-action: none;
+  transform: translateX(-50%);
+}
+
+.timeline-playhead-line {
+  position: absolute;
+  top: 8px;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  background: #4a8eff;
+  box-shadow: 0 0 10px rgba(74, 142, 255, 0.55);
+  pointer-events: none;
+}
+
+.timeline-playhead-handle {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 13px;
+  height: 13px;
+  transform: translateX(-50%);
+  border-radius: 0 0 4px 4px;
+  background: #4a8eff;
+  box-shadow: 0 0 12px rgba(74, 142, 255, 0.5);
+  pointer-events: none;
+}
+
+.timeline-playhead.is-dragging .timeline-playhead-line,
+.timeline-playhead.is-dragging .timeline-playhead-handle {
+  background: #4a8eff;
+  box-shadow: 0 0 14px rgba(74, 142, 255, 0.72);
+}
+
 .timeline-ruler {
   height: 32px;
   position: relative;
@@ -3825,8 +4144,28 @@ onBeforeUnmount(() => {
   height: 4px;
   border-radius: 999px;
   background: rgba(217, 226, 255, 0.18);
-  overflow: hidden;
+  overflow: visible;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.22);
+  touch-action: none;
+  user-select: none;
+}
+
+.modal-preview-progress-thumb {
+  position: absolute;
+  top: 50%;
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background: #ffffff;
+  border: 2px solid #4a8eff;
+  box-shadow: 0 0 12px rgba(74, 142, 255, 0.8);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.modal-preview-progress.is-dragging .modal-preview-progress-thumb {
+  width: 14px;
+  height: 14px;
 }
 
 .finished-progress-fill {
