@@ -18,6 +18,7 @@ import {
   getTemplateDetail,
   getTemplates,
 } from '../api/template';
+import { logoutUser, resetPassword } from '../api/user';
 import { systemMessage } from '../utils/message';
 import logoImage from '../assets/logo.png';
 import bundledTemplateXml from '../../template.xml?raw';
@@ -121,6 +122,13 @@ const previewTitle = ref('新娘备婚');
 const previewSubtitle = ref('5个片段 · 记录点滴');
 const previewModalVisible = ref(false);
 const accountMenuVisible = ref(false);
+const profileModalVisible = ref(false);
+const passwordModalVisible = ref(false);
+const helpCenterVisible = ref(false);
+const activeHelpTab = ref('guide');
+const logoutConfirmVisible = ref(false);
+const logoutSubmitting = ref(false);
+const passwordSubmitting = ref(false);
 const templateDetailLoading = ref(false);
 const startEditingLoading = ref(false);
 const templateDownloadVisible = ref(false);
@@ -151,8 +159,14 @@ const timelinePulse = ref(false);
 const draftLibraryVisible = ref(false);
 const finishedLibraryVisible = ref(false);
 const draftFilter = ref('all');
+const activeFavoriteFilter = ref('all');
 const editingDraftId = ref('');
 const draftEditTitle = ref('');
+const passwordForm = reactive({
+  oldPassword: '',
+  newPassword: '',
+  confirmPassword: '',
+});
 
 const exportModalVisible = ref(false);
 const exportState = ref('confirm');
@@ -229,6 +243,31 @@ const previewFavorited = computed(
     Boolean(activeFavoriteKey.value) &&
     favoriteTemplateIds.value.has(activeFavoriteKey.value),
 );
+const storedUserProfile = computed(() => getStoredUserProfile());
+const accountDisplayName = computed(() => {
+  const profile = storedUserProfile.value;
+  return profile.phone || '--';
+});
+const accountVersionName = computed(() => {
+  const profile = storedUserProfile.value;
+  return profile.nickName || '--';
+});
+const accountTenantName = computed(() => {
+  const profile = storedUserProfile.value;
+  return profile.renterName || '--';
+});
+const accountBalance = computed(() => {
+  const profile = storedUserProfile.value;
+  return formatAccountBalance(
+    profile.points ??
+      profile.point ??
+      profile.kaCoin ??
+      profile.kaCoins ??
+      profile.coinBalance ??
+      profile.balance ??
+      999,
+  );
+});
 const canExport = computed(
   () =>
     currentViewState.value === 'import' &&
@@ -271,6 +310,56 @@ const visibleDraftProjects = computed(() =>
         (project) => project.status === draftFilter.value,
       ),
 );
+const favoriteLibraryItems = computed(() => {
+  const seen = new Set();
+  const items = [];
+
+  for (const template of [...subtopics.value, ...recommendationCards.value]) {
+    const key = getTemplateFavoriteKey(template);
+    if (!key || seen.has(key) || !isTemplateFavorited(template)) continue;
+
+    seen.add(key);
+    items.push(template);
+  }
+
+  if (activeFavoriteFilter.value === 'all') {
+    return items;
+  }
+
+  return items.filter(
+    (template) =>
+      getTemplateCategoryKey(template) === activeFavoriteFilter.value,
+  );
+});
+const favoriteCategoryFilters = computed(() => {
+  const map = new Map();
+  const favoritedTemplates = [
+    ...subtopics.value,
+    ...recommendationCards.value,
+  ].filter((template) => isTemplateFavorited(template));
+
+  for (const template of favoritedTemplates) {
+    const key = getTemplateCategoryKey(template);
+    if (!key) continue;
+
+    const current = map.get(key) || {
+      key,
+      label: getTemplateCategoryLabel(template, key),
+      count: 0,
+    };
+    current.count += 1;
+    map.set(key, current);
+  }
+
+  return [
+    {
+      key: 'all',
+      label: '全部',
+      count: favoritedTemplates.length,
+    },
+    ...Array.from(map.values()),
+  ];
+});
 const timelineWidthPercent = computed(() => {
   const totalDuration = Math.max(1, Number(timeline.totalDuration) || 1);
   const selectedDuration = Math.min(
@@ -539,6 +628,33 @@ function hidePreviewModal() {
 function getTemplateFavoriteKey(template) {
   const id = template?.templateId || template?.id || '';
   return id ? String(id) : '';
+}
+
+function getTemplateCategoryKey(template) {
+  const key =
+    template?.templateCategoryId ||
+    template?.categoryId ||
+    template?.category_id ||
+    template?.type ||
+    '';
+
+  return key ? String(key) : '';
+}
+
+function getTemplateCategoryLabel(template, key) {
+  const category = categories.value.find(
+    (item) =>
+      String(item.categoryId || item.id || '') === key ||
+      item.categoryName === template?.categoryName,
+  );
+
+  return (
+    template?.categoryName ||
+    template?.templateCategoryName ||
+    category?.categoryName ||
+    key ||
+    '未分类'
+  );
 }
 
 function isTemplateFavorited(template) {
@@ -1688,10 +1804,20 @@ function showFinishedLibrary() {
   draftLibraryVisible.value = false;
   finishedLibraryVisible.value = true;
   sidebarHidden.value = true;
+  activeFavoriteFilter.value = 'all';
 }
 
 function hideFinishedLibrary() {
   finishedLibraryVisible.value = false;
+}
+
+function filterFavorites(filterKey) {
+  activeFavoriteFilter.value = filterKey;
+}
+
+function openFavoriteTemplate(template) {
+  finishedLibraryVisible.value = false;
+  openTemplatePreview(template);
 }
 
 function openFinishedVideo(videoId) {
@@ -2131,6 +2257,20 @@ function getStoredUserInfo() {
   }
 }
 
+function getStoredUserProfile() {
+  const userInfo = getStoredUserInfo();
+  return userInfo.user || userInfo.profile || userInfo.sysUser || userInfo;
+}
+
+function formatAccountBalance(value) {
+  const balance = Number(value);
+  if (!Number.isFinite(balance)) return '--';
+
+  return new Intl.NumberFormat('zh-CN', {
+    maximumFractionDigits: 2,
+  }).format(balance);
+}
+
 function getStoredTenantId() {
   const userInfo = getStoredUserInfo();
   return userInfo.tenantId || userInfo.renterId || '';
@@ -2352,14 +2492,18 @@ function mapTemplateTopic(template, index) {
 }
 
 function normalizeProjectStatus(status) {
-  return status === 1 || status === '1' || status === '已导出' || status === 'exported'
+  return status === 1 ||
+    status === '1' ||
+    status === '已导出' ||
+    status === 'exported'
     ? 'exported'
     : 'editing';
 }
 
 function mapProject(project, index) {
   const status = normalizeProjectStatus(project.status);
-  const statusLabel = project.statusName || (status === 'exported' ? '已导出' : '编辑中');
+  const statusLabel =
+    project.statusName || (status === 'exported' ? '已导出' : '编辑中');
 
   return {
     ...project,
@@ -2494,6 +2638,142 @@ function toggleAccountMenu() {
 
 function closeAccountMenu() {
   accountMenuVisible.value = false;
+}
+
+function showProfileModal() {
+  profileModalVisible.value = true;
+  closeAccountMenu();
+}
+
+function hideProfileModal() {
+  profileModalVisible.value = false;
+}
+
+function resetPasswordForm() {
+  passwordForm.oldPassword = '';
+  passwordForm.newPassword = '';
+  passwordForm.confirmPassword = '';
+}
+
+function showPasswordModal() {
+  passwordModalVisible.value = true;
+  closeAccountMenu();
+}
+
+function hidePasswordModal() {
+  if (passwordSubmitting.value) return;
+
+  passwordModalVisible.value = false;
+  resetPasswordForm();
+}
+
+async function submitPasswordReset() {
+  if (passwordSubmitting.value) return;
+
+  const oldPassword = passwordForm.oldPassword.trim();
+  const newPassword = passwordForm.newPassword.trim();
+  const confirmPassword = passwordForm.confirmPassword.trim();
+
+  if (!oldPassword) {
+    systemMessage.error('请输入旧密码');
+    return;
+  }
+
+  if (!newPassword) {
+    systemMessage.error('请输入新密码');
+    return;
+  }
+
+  if (!confirmPassword) {
+    systemMessage.error('请确认新密码');
+    return;
+  }
+
+  if (newPassword !== confirmPassword) {
+    systemMessage.error('两次输入的新密码不一致');
+    return;
+  }
+
+  const profile = getStoredUserProfile();
+  const renterId = getStoredTenantId();
+  const userId = getStoredUserId();
+  const phone = profile.phone || profile.phonenumber || '';
+
+  if (!renterId || !userId || !phone) {
+    systemMessage.error('用户信息不完整，无法修改密码');
+    return;
+  }
+
+  passwordSubmitting.value = true;
+  try {
+    const response = await resetPassword({
+      renterId,
+      userId: normalizeBackendId(userId),
+      phone,
+      modifyType: 0,
+      oldPassword,
+      newPassword,
+    });
+
+    if (response?.code !== undefined && Number(response.code) !== 0) {
+      throw new Error(response?.msg || '修改密码失败');
+    }
+
+    systemMessage.success(response?.msg || '修改密码成功');
+    passwordModalVisible.value = false;
+    resetPasswordForm();
+  } catch (error) {
+    systemMessage.error(error?.message || '修改密码失败');
+  } finally {
+    passwordSubmitting.value = false;
+  }
+}
+
+function showHelpCenter() {
+  helpCenterVisible.value = true;
+  closeAccountMenu();
+}
+
+function hideHelpCenter() {
+  helpCenterVisible.value = false;
+}
+
+function switchHelpTab(tab) {
+  activeHelpTab.value = tab;
+}
+
+function downloadHelpGuide() {
+  systemMessage.info('离线指南暂未开放下载');
+}
+
+function showLogoutConfirm() {
+  logoutConfirmVisible.value = true;
+  closeAccountMenu();
+}
+
+function hideLogoutConfirm() {
+  if (logoutSubmitting.value) return;
+
+  logoutConfirmVisible.value = false;
+}
+
+async function confirmLogout() {
+  if (logoutSubmitting.value) return;
+
+  logoutSubmitting.value = true;
+  try {
+    const response = await logoutUser();
+    if (response?.code !== undefined && Number(response.code) !== 0) {
+      throw new Error(response?.msg || '退出登录失败');
+    }
+
+    logoutConfirmVisible.value = false;
+    emit('logout');
+  } catch (error) {
+    systemMessage.error(error?.message || '退出登录失败');
+  } finally {
+    logoutSubmitting.value = false;
+  }
 }
 
 function handleWorkspaceClick() {
@@ -2633,32 +2913,51 @@ onBeforeUnmount(() => {
             <span class="text-[13px] font-bold">个人中心</span>
           </button>
           <div
-            class="absolute top-full right-0 mt-2 w-40 bg-surface-container-highest border border-outline-variant/30 rounded-lg shadow-2xl transition-all duration-200 ease-out z-[110] py-1"
+            class="absolute top-full right-0 mt-2 w-36 bg-surface-container-highest/95 backdrop-blur-xl border border-white/10 rounded-xl shadow-[0_20px_50px_rgba(0,0,0,0.5)] transition-all duration-200 ease-out z-[110] py-2 overflow-hidden"
             :class="
               accountMenuVisible
                 ? 'opacity-100 translate-y-0 pointer-events-auto'
                 : 'opacity-0 translate-y-2 pointer-events-none'
             "
           >
-            <a
-              class="flex items-center gap-3 px-4 py-2.5 text-[12px] text-on-surface-variant hover:bg-primary-container/10 hover:text-white transition-colors"
-              href="#"
-              ><span>我的咔币</span></a
+            <button
+              class="w-full flex items-center gap-3 px-4 py-2.5 text-[13px] text-on-surface-variant hover:bg-electric-blue/10 hover:text-white transition-colors text-left"
+              type="button"
+              @click="showProfileModal"
             >
+              <span class="material-symbols-outlined text-[18px]"
+                >account_circle</span
+              >
+              <span>个人信息</span>
+            </button>
+            <div class="mx-2 my-1 border-t border-outline-variant/30"></div>
+            <button
+              class="w-full flex items-center gap-3 px-4 py-2.5 text-[13px] text-on-surface-variant hover:bg-electric-blue/10 hover:text-white transition-colors text-left"
+              type="button"
+              @click="showPasswordModal"
+            >
+              <span class="material-symbols-outlined text-[18px]"
+                >lock_reset</span
+              >
+              <span>修改密码</span>
+            </button>
+            <div class="mx-2 my-1 border-t border-outline-variant/30"></div>
+            <button
+              class="w-full flex items-center gap-3 px-4 py-2.5 text-[13px] text-on-surface-variant hover:bg-electric-blue/10 hover:text-white transition-colors text-left"
+              type="button"
+              @click="showHelpCenter"
+            >
+              <span class="material-symbols-outlined text-[18px]"
+                >help_center</span
+              >
+              <span>帮助中心</span>
+            </button>
             <div class="mx-2 my-1 border-t border-outline-variant/30"></div>
             <a
-              class="flex items-center gap-3 px-4 py-2.5 text-[12px] text-on-surface-variant hover:bg-primary-container/10 hover:text-white transition-colors"
+              class="flex items-center gap-3 px-4 py-2.5 text-[13px] text-[#ec4034] hover:bg-[#ec4034]/10 transition-colors"
               href="#"
-              ><span>帮助</span></a
-            >
-            <div class="mx-2 my-1 border-t border-outline-variant/30"></div>
-            <a
-              class="flex items-center gap-3 px-4 py-2.5 text-[12px] text-error hover:bg-error-container/20 transition-colors"
-              href="#"
-              @click.prevent="
-                closeAccountMenu();
-                emit('logout');
-              "
+              @click.prevent="showLogoutConfirm"
+              ><span class="material-symbols-outlined text-[18px]">logout</span
               ><span>退出登录</span></a
             >
           </div>
@@ -2691,6 +2990,7 @@ onBeforeUnmount(() => {
         <button
           class="category-btn flex items-center gap-2 px-4 py-1.5 rounded-full border text-[12px] font-bold whitespace-nowrap transition-all duration-300 shrink-0 border-outline-variant/30 bg-white/5 text-on-surface-variant hover:border-electric-blue/50 hover:text-electric-blue"
           type="button"
+          @click="showFinishedLibrary"
         >
           <span>收藏夹</span>
         </button>
@@ -3087,9 +3387,7 @@ onBeforeUnmount(() => {
                     class="w-full h-full object-cover opacity-70 group-hover:scale-105 transition-transform duration-500"
                     :src="card.image"
                   />
-                  <div
-                    class="absolute inset-0 flex flex-col justify-end p-4"
-                  >
+                  <div class="absolute inset-0 flex flex-col justify-end p-4">
                     <div class="text-[14px] font-black text-white">
                       {{ card.title }}
                     </div>
@@ -3253,64 +3551,64 @@ onBeforeUnmount(() => {
                     {{ selectedStyleName }}
                   </div>
                   <div class="timeline-overview">
-                  <div class="timeline-ruler" aria-label="时间刻度">
-                    <div class="timeline-ruler-major"></div>
-                    <div class="timeline-ruler-labels">
-                      <span v-for="tick in timelineRulerTicks" :key="tick">{{
-                        formatTimelineTick(tick)
-                      }}</span>
+                    <div class="timeline-ruler" aria-label="时间刻度">
+                      <div class="timeline-ruler-major"></div>
+                      <div class="timeline-ruler-labels">
+                        <span v-for="tick in timelineRulerTicks" :key="tick">{{
+                          formatTimelineTick(tick)
+                        }}</span>
+                      </div>
                     </div>
-                  </div>
-                  <button
-                    class="timeline-playhead"
-                    :class="{ 'is-dragging': timelinePlayheadDragging }"
-                    :style="{ left: timelinePlayheadPercent }"
-                    type="button"
-                    aria-label="时间轴播放指针"
-                    @pointerdown="startTimelinePlayheadDrag"
-                  >
-                    <span class="timeline-playhead-handle"></span>
-                    <span class="timeline-playhead-line"></span>
-                  </button>
-                  <div class="clips-row relative h-16">
-                    <div ref="timelineTrackRef" class="duration-track">
-                      <div
-                        class="duration-selection bg-electric-blue/20 border-2 border-electric-blue rounded-md flex items-center px-3 shadow-[0_0_15px_rgba(74,142,255,0.25)]"
-                        :class="{ 'is-dragging': timelineDragging }"
-                        :style="{
-                          left: timelineLeftPercent,
-                          width: timelineWidthPercent,
-                          transform: `translateY(-50%) scale(${timelinePulse && !timelineDragging ? 1.02 : 1})`,
-                          boxShadow:
-                            timelinePulse && !timelineDragging
-                              ? '0 0 20px rgba(74,142,255,0.45)'
-                              : '0 0 15px rgba(74,142,255,0.25)',
-                        }"
-                        @pointerdown="startTimelineDrag"
-                      >
+                    <button
+                      class="timeline-playhead"
+                      :class="{ 'is-dragging': timelinePlayheadDragging }"
+                      :style="{ left: timelinePlayheadPercent }"
+                      type="button"
+                      aria-label="时间轴播放指针"
+                      @pointerdown="startTimelinePlayheadDrag"
+                    >
+                      <span class="timeline-playhead-handle"></span>
+                      <span class="timeline-playhead-line"></span>
+                    </button>
+                    <div class="clips-row relative h-16">
+                      <div ref="timelineTrackRef" class="duration-track">
                         <div
-                          class="flex flex-col justify-between h-full py-1 px-2 w-full min-w-0"
+                          class="duration-selection bg-electric-blue/20 border-2 border-electric-blue rounded-md flex items-center px-3 shadow-[0_0_15px_rgba(74,142,255,0.25)]"
+                          :class="{ 'is-dragging': timelineDragging }"
+                          :style="{
+                            left: timelineLeftPercent,
+                            width: timelineWidthPercent,
+                            transform: `translateY(-50%) scale(${timelinePulse && !timelineDragging ? 1.02 : 1})`,
+                            boxShadow:
+                              timelinePulse && !timelineDragging
+                                ? '0 0 20px rgba(74,142,255,0.45)'
+                                : '0 0 15px rgba(74,142,255,0.25)',
+                          }"
+                          @pointerdown="startTimelineDrag"
                         >
-                          <div class="flex items-center gap-1.5 min-w-0">
-                            <span
-                              class="text-[12px] font-bold text-white tracking-wide truncate"
-                              >{{ selectedClipTitle }}</span
-                            >
-                          </div>
-                          <div class="duration-meta-row">
-                            <span
-                              class="duration-meta-duration text-[10px] font-bold text-primary"
-                              >时长：{{ timelineSelectedDurationLabel }}</span
-                            >
-                            <span
-                              class="duration-meta-range text-[10px] font-medium text-white/90 font-code-data tracking-tighter"
-                              >{{ timelineRangeLabel }}</span
-                            >
+                          <div
+                            class="flex flex-col justify-between h-full py-1 px-2 w-full min-w-0"
+                          >
+                            <div class="flex items-center gap-1.5 min-w-0">
+                              <span
+                                class="text-[12px] font-bold text-white tracking-wide truncate"
+                                >{{ selectedClipTitle }}</span
+                              >
+                            </div>
+                            <div class="duration-meta-row">
+                              <span
+                                class="duration-meta-duration text-[10px] font-bold text-primary"
+                                >时长：{{ timelineSelectedDurationLabel }}</span
+                              >
+                              <span
+                                class="duration-meta-range text-[10px] font-medium text-white/90 font-code-data tracking-tighter"
+                                >{{ timelineRangeLabel }}</span
+                              >
+                            </div>
                           </div>
                         </div>
                       </div>
                     </div>
-                  </div>
                   </div>
                 </div>
                 <div
@@ -3345,7 +3643,9 @@ onBeforeUnmount(() => {
             :class="{ hidden: !previewModalVisible }"
           >
             <div class="relative w-full max-w-4xl mx-4">
-              <div class="absolute -top-12 right-0 z-20 flex items-center gap-3">
+              <div
+                class="absolute -top-12 right-0 z-20 flex items-center gap-3"
+              >
                 <button
                   class="p-2 bg-black/40 backdrop-blur-md rounded-full transition-colors group"
                   :class="
@@ -3392,105 +3692,462 @@ onBeforeUnmount(() => {
               <div
                 class="relative w-full bg-surface-container rounded-2xl overflow-hidden shadow-[0_30px_90px_rgba(0,0,0,0.8)] border border-electric-blue/20 modal-pop-in"
               >
-              <div
-                class="aspect-video bg-black flex items-center justify-center relative group cursor-pointer"
-              >
-                <video
-                  ref="modalVideoRef"
-                  class="w-full h-full object-cover"
-                  playsinline
-                  preload="metadata"
-                  :src="activeTemplateDemoSource"
-                  @loadedmetadata="handleModalVideoLoadedMetadata"
-                  @timeupdate="updateModalPreviewControls"
-                  @play="updateModalPreviewControls"
-                  @pause="updateModalPreviewControls"
-                  @ended="updateModalPreviewControls"
-                ></video>
                 <div
-                  class="absolute inset-0 flex items-center justify-center bg-black/20"
+                  class="aspect-video bg-black flex items-center justify-center relative group cursor-pointer"
                 >
-                  <button
-                    class="w-20 h-20 bg-white/5 backdrop-blur-3xl rounded-full flex items-center justify-center border border-white/10 hover:scale-110 transition-transform shadow-2xl"
-                    @click="toggleModalPreviewPlayback"
-                  >
-                    <span
-                      class="material-symbols-outlined text-white text-[48px]"
-                      style="font-variation-settings: 'FILL' 1"
-                      >{{ modalPaused ? 'play_arrow' : 'pause' }}</span
-                    >
-                  </button>
-                </div>
-                <div
-                  class="modal-preview-progress absolute inset-x-4 bottom-4 cursor-pointer"
-                  :class="{ 'is-dragging': modalPreviewProgressDragging }"
-                  @pointerdown="startModalPreviewProgressDrag"
-                >
+                  <video
+                    ref="modalVideoRef"
+                    class="w-full h-full object-cover"
+                    playsinline
+                    preload="metadata"
+                    :src="activeTemplateDemoSource"
+                    @loadedmetadata="handleModalVideoLoadedMetadata"
+                    @timeupdate="updateModalPreviewControls"
+                    @play="updateModalPreviewControls"
+                    @pause="updateModalPreviewControls"
+                    @ended="updateModalPreviewControls"
+                  ></video>
                   <div
-                    class="finished-progress-fill"
-                    :style="{ width: `${modalProgress}%` }"
-                  ></div>
-                  <span
-                    class="modal-preview-progress-thumb"
-                    :style="{ left: `${modalProgress}%` }"
-                  ></span>
-                </div>
-              </div>
-              <div
-                class="p-6 flex items-center justify-between bg-surface-container-lowest/80 border-t border-white/5"
-              >
-                <div class="min-w-0 flex-1">
-                  <h3 class="text-lg font-black text-on-surface">
-                    {{ previewTitle }}
-                  </h3>
+                    class="absolute inset-0 flex items-center justify-center bg-black/20"
+                  >
+                    <button
+                      class="w-20 h-20 bg-white/5 backdrop-blur-3xl rounded-full flex items-center justify-center border border-white/10 hover:scale-110 transition-transform shadow-2xl"
+                      @click="toggleModalPreviewPlayback"
+                    >
+                      <span
+                        class="material-symbols-outlined text-white text-[48px]"
+                        style="font-variation-settings: 'FILL' 1"
+                        >{{ modalPaused ? 'play_arrow' : 'pause' }}</span
+                      >
+                    </button>
+                  </div>
+                  <div
+                    class="modal-preview-progress absolute inset-x-4 bottom-4 cursor-pointer"
+                    :class="{ 'is-dragging': modalPreviewProgressDragging }"
+                    @pointerdown="startModalPreviewProgressDrag"
+                  >
+                    <div
+                      class="finished-progress-fill"
+                      :style="{ width: `${modalProgress}%` }"
+                    ></div>
+                    <span
+                      class="modal-preview-progress-thumb"
+                      :style="{ left: `${modalProgress}%` }"
+                    ></span>
+                  </div>
                 </div>
                 <div
-                  class="flex items-center justify-center gap-16 px-8 py-2 rounded-full bg-white/5 border border-white/10 min-w-[420px]"
+                  class="p-6 flex items-center justify-between bg-surface-container-lowest/80 border-t border-white/5"
                 >
-                  <button
-                    class="w-16 h-9 rounded-full bg-white/5 border border-white/10 text-[12px] font-bold text-white/80 hover:bg-white/10 hover:text-white transition-colors"
-                    type="button"
-                    @click="cycleModalPlaybackRate"
+                  <div class="min-w-0 flex-1">
+                    <h3 class="text-lg font-black text-on-surface">
+                      {{ previewTitle }}
+                    </h3>
+                  </div>
+                  <div
+                    class="flex items-center justify-center gap-16 px-8 py-2 rounded-full bg-white/5 border border-white/10 min-w-[420px]"
                   >
-                    {{ modalPlaybackRate }}x
-                  </button>
-                  <button
-                    class="w-11 h-11 rounded-full bg-electric-blue text-white hover:brightness-110 active:scale-95 transition-all shadow-lg shadow-electric-blue/20 flex items-center justify-center"
-                    type="button"
-                    @click="toggleModalPreviewPlayback"
-                  >
-                    <span
-                      class="material-symbols-outlined text-[28px]"
-                      style="font-variation-settings: 'FILL' 1"
-                      >{{ modalPaused ? 'play_arrow' : 'pause' }}</span
+                    <button
+                      class="w-16 h-9 rounded-full bg-white/5 border border-white/10 text-[12px] font-bold text-white/80 hover:bg-white/10 hover:text-white transition-colors"
+                      type="button"
+                      @click="cycleModalPlaybackRate"
                     >
-                  </button>
-                  <button
-                    class="w-16 h-9 rounded-full bg-white/5 border border-white/10 text-white/80 hover:bg-white/10 hover:text-white transition-colors flex items-center justify-center"
-                    type="button"
-                    @click="seekModalPreviewBy(5)"
-                  >
-                    <span class="material-symbols-outlined text-[22px]"
-                      >fast_forward</span
+                      {{ modalPlaybackRate }}x
+                    </button>
+                    <button
+                      class="w-11 h-11 rounded-full bg-electric-blue text-white hover:brightness-110 active:scale-95 transition-all shadow-lg shadow-electric-blue/20 flex items-center justify-center"
+                      type="button"
+                      @click="toggleModalPreviewPlayback"
                     >
-                  </button>
-                </div>
-                <div class="flex items-center gap-4 flex-1 justify-end">
-                  <button
-                    class="px-10 py-3 bg-electric-blue text-white rounded-lg font-bold text-[16px] shadow-2xl shadow-electric-blue/30 hover:brightness-110 active:scale-95 transition-all uppercase disabled:opacity-70 disabled:cursor-not-allowed disabled:active:scale-100 inline-flex items-center gap-2"
-                    :disabled="startEditingLoading"
-                    @click="confirmSelection"
-                  >
-                    <span
-                      v-if="startEditingLoading"
-                      class="material-symbols-outlined text-[20px] start-editing-spinner"
-                      >progress_activity</span
+                      <span
+                        class="material-symbols-outlined text-[28px]"
+                        style="font-variation-settings: 'FILL' 1"
+                        >{{ modalPaused ? 'play_arrow' : 'pause' }}</span
+                      >
+                    </button>
+                    <button
+                      class="w-16 h-9 rounded-full bg-white/5 border border-white/10 text-white/80 hover:bg-white/10 hover:text-white transition-colors flex items-center justify-center"
+                      type="button"
+                      @click="seekModalPreviewBy(5)"
                     >
-                    {{ startEditingLoading ? '正在加载' : '开始编辑' }}
-                  </button>
+                      <span class="material-symbols-outlined text-[22px]"
+                        >fast_forward</span
+                      >
+                    </button>
+                  </div>
+                  <div class="flex items-center gap-4 flex-1 justify-end">
+                    <button
+                      class="px-10 py-3 bg-electric-blue text-white rounded-lg font-bold text-[16px] shadow-2xl shadow-electric-blue/30 hover:brightness-110 active:scale-95 transition-all uppercase disabled:opacity-70 disabled:cursor-not-allowed disabled:active:scale-100 inline-flex items-center gap-2"
+                      :disabled="startEditingLoading"
+                      @click="confirmSelection"
+                    >
+                      <span
+                        v-if="startEditingLoading"
+                        class="material-symbols-outlined text-[20px] start-editing-spinner"
+                        >progress_activity</span
+                      >
+                      {{ startEditingLoading ? '正在加载' : '开始编辑' }}
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
+          </div>
+
+          <div
+            class="fixed inset-0 z-[440] flex items-center justify-center transition-all duration-300"
+            :class="{ hidden: !helpCenterVisible }"
+          >
+            <div
+              class="absolute inset-0 bg-black/60 backdrop-blur-sm"
+              @click="hideHelpCenter"
+            ></div>
+            <div
+              class="relative w-[90vw] h-[85vh] bg-surface-container rounded-3xl border border-white/10 shadow-[0_32px_64px_-12px_rgba(0,0,0,0.8)] overflow-hidden flex flex-col modal-pop-in"
+            >
+              <div
+                class="h-16 shrink-0 bg-surface-container-highest border-b border-white/10 px-8 flex items-center justify-between"
+              >
+                <div class="flex items-center gap-3">
+                  <div
+                    class="w-8 h-8 bg-electric-blue rounded-lg flex items-center justify-center"
+                  >
+                    <span
+                      class="material-symbols-outlined text-white text-[20px]"
+                      >menu_book</span
+                    >
+                  </div>
+                  <h3 class="text-lg font-black text-white">产品帮助中心</h3>
+                </div>
+                <button
+                  class="p-2 hover:bg-white/10 rounded-full text-on-surface-variant transition-colors"
+                  type="button"
+                  @click="hideHelpCenter"
+                >
+                  <span class="material-symbols-outlined">close</span>
+                </button>
+              </div>
+              <div class="flex-1 flex overflow-hidden">
+                <aside
+                  class="w-64 shrink-0 bg-black/20 border-r border-white/5 p-4 flex flex-col gap-1"
+                >
+                  <button
+                    class="help-nav-item flex items-center gap-3 px-4 py-3 rounded-xl transition-all text-left"
+                    :class="
+                      activeHelpTab === 'guide'
+                        ? 'bg-electric-blue/10 text-electric-blue font-bold'
+                        : 'text-on-surface-variant hover:bg-white/5'
+                    "
+                    type="button"
+                    @click="switchHelpTab('guide')"
+                  >
+                    <span class="material-symbols-outlined text-[20px]"
+                      >explore</span
+                    >
+                    <span>使用指南</span>
+                  </button>
+                  <button
+                    class="help-nav-item flex items-center gap-3 px-4 py-3 rounded-xl transition-all text-left"
+                    :class="
+                      activeHelpTab === 'faq'
+                        ? 'bg-electric-blue/10 text-electric-blue font-bold'
+                        : 'text-on-surface-variant hover:bg-white/5'
+                    "
+                    type="button"
+                    @click="switchHelpTab('faq')"
+                  >
+                    <span class="material-symbols-outlined text-[20px]"
+                      >quiz</span
+                    >
+                    <span>常见问题</span>
+                  </button>
+                  <button
+                    class="help-nav-item flex items-center gap-3 px-4 py-3 rounded-xl transition-all text-left"
+                    :class="
+                      activeHelpTab === 'changelog'
+                        ? 'bg-electric-blue/10 text-electric-blue font-bold'
+                        : 'text-on-surface-variant hover:bg-white/5'
+                    "
+                    type="button"
+                    @click="switchHelpTab('changelog')"
+                  >
+                    <span class="material-symbols-outlined text-[20px]"
+                      >history</span
+                    >
+                    <span>更新日志</span>
+                  </button>
+                </aside>
+                <main
+                  class="flex-1 flex flex-col bg-surface-container-lowest p-8 overflow-hidden relative"
+                >
+                  <div
+                    class="flex-1 bg-surface-container rounded-2xl border border-white/5 shadow-inner overflow-y-auto custom-scrollbar p-12"
+                  >
+                    <div
+                      v-if="activeHelpTab === 'guide'"
+                      class="max-w-2xl mx-auto space-y-8"
+                    >
+                      <div class="space-y-4">
+                        <h1 class="text-3xl font-black text-white">
+                          核心使用指南 V1.0
+                        </h1>
+                        <p class="text-on-surface-variant leading-relaxed">
+                          欢迎使用 AICut
+                          专业版剪辑系统。这里可以快速了解模板选择、素材导入、开始编辑和导出成片的核心流程。
+                        </p>
+                      </div>
+                      <div class="grid grid-cols-2 gap-6">
+                        <div
+                          class="p-6 bg-white/5 rounded-2xl border border-white/10"
+                        >
+                          <h4 class="text-electric-blue font-bold mb-2">
+                            智能模板匹配
+                          </h4>
+                          <p class="text-[13px] text-on-surface-variant/80">
+                            选择模板后，系统会按模板素材位展示所需视频数量和时长范围。
+                          </p>
+                        </div>
+                        <div
+                          class="p-6 bg-white/5 rounded-2xl border border-white/10"
+                        >
+                          <h4 class="text-electric-blue font-bold mb-2">
+                            一键批量导入
+                          </h4>
+                          <p class="text-[13px] text-on-surface-variant/80">
+                            可以按分类批量替换素材，也可以单独替换某一个素材位。
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                    <div
+                      v-else-if="activeHelpTab === 'faq'"
+                      class="max-w-2xl mx-auto space-y-6"
+                    >
+                      <h1 class="text-3xl font-black text-white">常见问题</h1>
+                      <div class="space-y-4">
+                        <div
+                          class="p-5 bg-white/5 rounded-2xl border border-white/10"
+                        >
+                          <h4 class="text-white font-bold mb-2">
+                            导入素材后为什么不能导出？
+                          </h4>
+                          <p class="text-[13px] text-on-surface-variant/80">
+                            需要先点击开始编辑，生成工程文件后导出按钮才会可用。
+                          </p>
+                        </div>
+                        <div
+                          class="p-5 bg-white/5 rounded-2xl border border-white/10"
+                        >
+                          <h4 class="text-white font-bold mb-2">
+                            时间滑块有什么作用？
+                          </h4>
+                          <p class="text-[13px] text-on-surface-variant/80">
+                            时间滑块用于选择素材在原视频中的起始片段，工程文件会同步记录偏移时间。
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                    <div v-else class="max-w-2xl mx-auto space-y-6">
+                      <h1 class="text-3xl font-black text-white">更新日志</h1>
+                      <div
+                        class="p-5 bg-white/5 rounded-2xl border border-white/10"
+                      >
+                        <h4 class="text-electric-blue font-bold mb-2">
+                          当前版本
+                        </h4>
+                        <p class="text-[13px] text-on-surface-variant/80">
+                          优化模板素材导入、时间轴偏移、工程创建和导出流程。
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="absolute bottom-12 right-12">
+                    <button
+                      class="flex items-center gap-2 px-6 py-3 bg-electric-blue text-white rounded-full font-black shadow-2xl shadow-electric-blue/40 hover:scale-105 active:scale-95 transition-all"
+                      type="button"
+                      @click="downloadHelpGuide"
+                    >
+                      <span class="material-symbols-outlined">download</span>
+                      <span>下载离线指南</span>
+                    </button>
+                  </div>
+                </main>
+              </div>
+            </div>
+          </div>
+
+          <div
+            class="fixed inset-0 z-[430] flex items-center justify-center transition-opacity duration-300"
+            :class="{ hidden: !profileModalVisible }"
+          >
+            <div
+              class="absolute inset-0 bg-black/60 backdrop-blur-sm"
+              @click="hideProfileModal"
+            ></div>
+            <div
+              class="relative w-full max-w-md bg-surface-container-highest rounded-2xl border border-white/10 shadow-2xl modal-pop-in p-8 text-center"
+            >
+              <button
+                class="absolute top-4 right-4 text-on-surface-variant hover:text-white transition-colors"
+                type="button"
+                @click="hideProfileModal"
+              >
+                <span class="material-symbols-outlined">close</span>
+              </button>
+              <div
+                class="w-16 h-16 bg-electric-blue/10 rounded-full flex items-center justify-center mx-auto mb-4"
+              >
+                <span
+                  class="material-symbols-outlined text-electric-blue text-3xl"
+                  >person</span
+                >
+              </div>
+              <h3 class="text-xl font-black text-white mb-6">个人信息</h3>
+              <div
+                class="space-y-3 text-left bg-black/20 p-5 rounded-xl border border-white/5"
+              >
+                <div class="flex justify-between gap-4">
+                  <span class="text-on-surface-variant/60 text-xs shrink-0"
+                    >账号</span
+                  >
+                  <span class="text-white text-xs font-bold truncate">{{
+                    accountDisplayName
+                  }}</span>
+                </div>
+                <div class="flex justify-between gap-4">
+                  <span class="text-on-surface-variant/60 text-xs shrink-0"
+                    >昵称</span
+                  >
+                  <span class="text-white text-xs font-bold truncate">{{
+                    accountVersionName
+                  }}</span>
+                </div>
+                <div class="flex justify-between gap-4">
+                  <span class="text-on-surface-variant/60 text-xs shrink-0"
+                    >所属租户</span
+                  >
+                  <span class="text-electric-blue text-xs font-bold truncate">{{
+                    accountTenantName
+                  }}</span>
+                </div>
+                <div
+                  class="pt-3 border-t border-white/10 flex justify-between items-baseline gap-4"
+                >
+                  <span class="text-on-surface-variant/60 text-xs shrink-0"
+                    >剩余积分</span
+                  >
+                  <span class="text-2xl font-black text-electric-blue"
+                    >{{ accountBalance }}
+                    <span class="text-[10px]">pts</span></span
+                  >
+                </div>
+              </div>
+              <button
+                class="w-full mt-6 py-3 bg-white/5 text-on-surface-variant font-bold rounded-xl hover:text-white hover:bg-white/10 transition-all"
+                type="button"
+                @click="hideProfileModal"
+              >
+                关闭
+              </button>
+            </div>
+          </div>
+
+          <div
+            class="fixed inset-0 z-[430] flex items-center justify-center transition-opacity duration-300"
+            :class="{ hidden: !passwordModalVisible }"
+          >
+            <div
+              class="absolute inset-0 bg-black/60 backdrop-blur-sm"
+              @click="hidePasswordModal"
+            ></div>
+            <div
+              class="relative w-full max-w-sm bg-surface-container-highest rounded-2xl border border-white/10 shadow-2xl modal-pop-in p-6"
+            >
+              <h3
+                class="text-lg font-black text-white mb-6 flex items-center gap-2"
+              >
+                <span class="material-symbols-outlined text-electric-blue"
+                  >lock_reset</span
+                >
+                修改密码
+              </h3>
+              <div class="space-y-4">
+                <input
+                  v-model="passwordForm.oldPassword"
+                  class="w-full bg-surface-container-low border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:border-electric-blue/50 outline-none"
+                  :disabled="passwordSubmitting"
+                  placeholder="旧密码"
+                  type="password"
+                  @keydown.enter.prevent="submitPasswordReset"
+                />
+                <input
+                  v-model="passwordForm.newPassword"
+                  class="w-full bg-surface-container-low border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:border-electric-blue/50 outline-none"
+                  :disabled="passwordSubmitting"
+                  placeholder="新密码"
+                  type="password"
+                  @keydown.enter.prevent="submitPasswordReset"
+                />
+                <input
+                  v-model="passwordForm.confirmPassword"
+                  class="w-full bg-surface-container-low border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:border-electric-blue/50 outline-none"
+                  :disabled="passwordSubmitting"
+                  placeholder="确认新密码"
+                  type="password"
+                  @keydown.enter.prevent="submitPasswordReset"
+                />
+                <button
+                  class="w-full py-3 bg-electric-blue text-white font-black rounded-xl hover:brightness-110 transition-all disabled:opacity-60 disabled:cursor-not-allowed"
+                  type="button"
+                  :disabled="passwordSubmitting"
+                  @click="submitPasswordReset"
+                >
+                  {{ passwordSubmitting ? '正在保存...' : '保存修改' }}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div
+            class="fixed inset-0 z-[450] flex items-center justify-center transition-opacity duration-300"
+            :class="{ hidden: !logoutConfirmVisible }"
+          >
+            <div
+              class="absolute inset-0 bg-black/60 backdrop-blur-sm"
+              @click="hideLogoutConfirm"
+            ></div>
+            <div
+              class="relative w-full max-w-sm bg-surface-container-highest rounded-2xl p-8 border border-white/10 shadow-2xl modal-pop-in text-center"
+            >
+              <div
+                class="w-16 h-16 bg-white/5 rounded-full flex items-center justify-center mx-auto mb-4 border border-white/10"
+              >
+                <span class="material-symbols-outlined text-[#ec4034] text-3xl"
+                  >logout</span
+                >
+              </div>
+              <h3 class="text-xl font-black text-white mb-2">退出登录</h3>
+              <p class="text-on-surface-variant text-sm mb-6">
+                确认退出当前账号吗？
+              </p>
+              <div class="flex flex-col gap-3">
+                <button
+                  class="w-full py-3 bg-[#ec4034] text-white font-bold rounded-xl hover:brightness-110 transition-all active:scale-95 disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100"
+                  type="button"
+                  :disabled="logoutSubmitting"
+                  @click="confirmLogout"
+                >
+                  {{ logoutSubmitting ? '正在退出...' : '确认退出' }}
+                </button>
+                <button
+                  class="w-full py-3 bg-transparent text-on-surface-variant font-bold rounded-xl hover:text-white transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+                  type="button"
+                  :disabled="logoutSubmitting"
+                  @click="hideLogoutConfirm"
+                >
+                  取消
+                </button>
+              </div>
             </div>
           </div>
 
@@ -3725,9 +4382,7 @@ onBeforeUnmount(() => {
             <span class="material-symbols-outlined text-[20px]">arrow_back</span
             ><span class="text-[12px] font-bold">返回</span>
           </button>
-          <h2
-            class="font-header-section text-on-surface flex items-center gap-2"
-          >
+          <h2 class="text-xl font-black text-white flex items-center gap-2">
             工程库
           </h2>
         </div>
@@ -3811,84 +4466,105 @@ onBeforeUnmount(() => {
     </div>
 
     <div
-      class="absolute top-[120px] left-0 right-0 bottom-0 bg-background flex flex-col z-[210]"
+      class="absolute top-[120px] left-0 right-0 bottom-0 bg-background flex flex-col z-[220] overlay-view-enter"
       :class="{ hidden: !finishedLibraryVisible }"
     >
       <div
-        class="p-6 border-b border-white/5 flex items-center justify-between bg-surface-container/80 backdrop-blur-3xl"
+        class="p-6 border-b border-white/5 bg-surface-container/80 backdrop-blur-3xl space-y-4"
       >
-        <div class="flex items-center gap-4">
-          <button
-            class="flex items-center gap-2 text-on-surface-variant hover:text-electric-blue bg-surface-container-lowest px-3 py-1.5 rounded-lg border border-white/5 transition-all"
-            @click="hideFinishedLibrary"
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-4">
+            <button
+              class="flex items-center gap-2 text-on-surface-variant hover:text-electric-blue bg-surface-container-lowest px-3 py-1.5 rounded-lg border border-white/5 transition-all"
+              type="button"
+              @click="hideFinishedLibrary"
+            >
+              <span class="material-symbols-outlined text-[20px]"
+                >arrow_back</span
+              >
+              <span class="text-[12px] font-bold">返回</span>
+            </button>
+            <h2 class="text-xl font-black flex items-center gap-2 text-white">
+              <span>我的收藏</span>
+            </h2>
+          </div>
+        </div>
+        <div class="flex items-center gap-3">
+          <span
+            class="text-[11px] text-on-surface-variant/60 font-bold uppercase tracking-wider"
+            >全部分类:</span
           >
-            <span class="material-symbols-outlined text-[20px]">arrow_back</span
-            ><span class="text-[12px] font-bold">返回</span>
-          </button>
-          <h2
-            class="font-header-section text-on-surface flex items-center gap-2"
-          >
-            成片库
-          </h2>
+          <div class="flex items-center gap-2 overflow-x-auto no-scrollbar">
+            <button
+              v-for="filter in favoriteCategoryFilters"
+              :key="filter.key"
+              class="px-4 py-1.5 rounded-full text-[11px] border transition-all whitespace-nowrap"
+              :class="
+                activeFavoriteFilter === filter.key
+                  ? 'bg-electric-blue text-white font-black border-white shadow-lg shadow-electric-blue/20'
+                  : 'bg-white/5 text-on-surface-variant font-bold border-white/5 hover:border-electric-blue/40'
+              "
+              type="button"
+              @click="filterFavorites(filter.key)"
+            >
+              {{ filter.label }} ({{ filter.count }})
+            </button>
+          </div>
         </div>
       </div>
-      <div class="flex-1 overflow-y-auto custom-scrollbar p-6">
-        <div class="space-y-4 max-w-5xl mx-auto">
-          <div
-            class="flex items-center px-4 py-2 text-[10px] font-bold text-on-surface-variant/50 uppercase tracking-widest border-b border-outline-variant/30"
+      <div class="flex-1 overflow-y-auto custom-scrollbar p-8">
+        <div
+          v-if="favoriteLibraryItems.length"
+          class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 gap-6"
+        >
+          <button
+            v-for="template in favoriteLibraryItems"
+            :key="getTemplateFavoriteKey(template)"
+            class="group relative aspect-[16/9] bg-surface-container-high rounded-xl overflow-hidden border border-white/5 hover:border-electric-blue/60 transition-all cursor-pointer shadow-lg text-left"
+            type="button"
+            @click="openFavoriteTemplate(template)"
           >
-            <div class="w-48 shrink-0">预览</div>
-            <div class="flex-1">成片名称</div>
-            <div class="w-24 text-center">时长</div>
-            <div class="w-32 text-center">生成时间</div>
-            <div class="w-24"></div>
-          </div>
-          <div
-            v-for="video in finishedVideos"
-            :key="video.id"
-            class="flex items-center gap-6 p-4 rounded-xl bg-surface-container-high/40 border border-white/5 hover:border-electric-blue/40 transition-all group cursor-pointer"
-            @click="openFinishedVideo(video.id)"
-          >
+            <img
+              class="w-full h-full object-cover opacity-70 group-hover:scale-105 transition-transform duration-500"
+              :src="template.image"
+              alt="favorite template preview"
+            />
             <div
-              class="w-48 aspect-video bg-surface-container-highest rounded-lg overflow-hidden relative border border-outline-variant/30 shrink-0"
+              class="absolute inset-0 bg-gradient-to-t from-black/90 via-transparent flex flex-col justify-end p-4"
             >
-              <img
-                alt="finished video preview"
-                class="w-full h-full object-cover opacity-75"
-                :src="video.image"
-              />
-              <div
-                class="absolute inset-0 flex items-center justify-center bg-black/30"
-              >
-                <span class="material-symbols-outlined text-white/70"
-                  >play_circle</span
-                >
+              <div class="text-[13px] font-black text-white truncate">
+                {{ template.title }}
+              </div>
+              <div class="text-[10px] text-white/60 truncate">
+                {{ template.subtitle }}
               </div>
             </div>
-            <div class="flex-1 min-w-0">
-              <h3 class="text-sm font-bold text-on-surface truncate">
-                {{ video.title }}
-              </h3>
-              <p class="text-[11px] text-on-surface-variant/60 mt-1">
-                1080p | H.264 | 已导出
-              </p>
-            </div>
             <div
-              class="w-24 text-center text-[12px] font-medium text-on-surface-variant"
+              class="absolute top-2 left-2 p-1.5 bg-black/40 backdrop-blur-md rounded-lg opacity-0 group-hover:opacity-100 transition-opacity"
             >
-              {{ video.duration }}
-            </div>
-            <div class="w-32 text-center text-[11px] text-on-surface-variant">
-              {{ video.date }}
-            </div>
-            <div class="w-24 flex justify-end">
-              <button
-                class="flex items-center gap-1.5 px-4 py-2 bg-electric-blue/10 hover:bg-electric-blue text-electric-blue hover:text-white rounded-lg text-[11px] font-bold transition-all"
+              <span
+                class="material-symbols-outlined text-[16px] text-electric-blue"
+                style="font-variation-settings: 'FILL' 1"
+                >stars</span
               >
-                打开
-              </button>
             </div>
+          </button>
+        </div>
+        <div
+          v-else
+          class="h-full min-h-[320px] flex flex-col items-center justify-center text-center"
+        >
+          <div
+            class="w-16 h-16 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center mb-4"
+          >
+            <span class="material-symbols-outlined text-electric-blue text-3xl"
+              >stars</span
+            >
           </div>
+          <h3 class="text-lg font-black text-white">暂无收藏模板</h3>
+          <p class="text-[13px] text-on-surface-variant mt-2">
+            在模板预览中点亮星标后，会显示在这里。
+          </p>
         </div>
       </div>
     </div>
