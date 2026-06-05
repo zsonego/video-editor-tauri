@@ -11,9 +11,10 @@ import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener';
-import { createProject, getMyProjects } from '../api/project';
+import { createProject, deleteProjects, getMyProjects } from '../api/project';
 import {
   favoriteTemplate,
+  getFavoriteTemplates,
   getTemplateCategories,
   getTemplateDetail,
   getTemplates,
@@ -38,6 +39,8 @@ const TEMPLATE_DOWNLOAD_BASE_URL =
 
 const categories = ref([]);
 const recommendationCards = ref([]);
+const favoriteTemplates = ref([]);
+const templateSearchKeyword = ref('');
 const fallbackSubtopics = [
   {
     title: '片头开启',
@@ -57,8 +60,10 @@ const fallbackSubtopics = [
 const subtopics = ref([]);
 const templatesLoading = ref(false);
 const recommendationsLoading = ref(false);
+const favoritesLoading = ref(false);
 let templateRequestId = 0;
 let recommendationRequestId = 0;
+let templateSearchTimer = null;
 const templateSegments = {
   婚礼亮点: [
     { name: '片段 1: 浪漫片头', shot: '全景 (Wide)', count: 2 },
@@ -162,6 +167,10 @@ const draftFilter = ref('all');
 const activeFavoriteFilter = ref('all');
 const editingDraftId = ref('');
 const draftEditTitle = ref('');
+const draftBatchDeleteMode = ref(false);
+const draftDeleteConfirmVisible = ref(false);
+const draftDeleting = ref(false);
+const selectedDraftProjectIds = ref(new Set());
 const passwordForm = reactive({
   oldPassword: '',
   newPassword: '',
@@ -238,6 +247,9 @@ const selectedTemplateThemeName = computed(() => {
   const category = categories.value[activeCategory.value] || {};
   return category.categoryName || category.categoryId || '';
 });
+const hasTemplateSearchKeyword = computed(
+  () => templateSearchKeyword.value.trim().length > 0,
+);
 const activeFavoriteKey = computed(() => String(activeTemplateId.value || ''));
 const previewFavorited = computed(
   () =>
@@ -312,32 +324,18 @@ const visibleDraftProjects = computed(() =>
       ),
 );
 const favoriteLibraryItems = computed(() => {
-  const seen = new Set();
-  const items = [];
-
-  for (const template of [...subtopics.value, ...recommendationCards.value]) {
-    const key = getTemplateFavoriteKey(template);
-    if (!key || seen.has(key) || !isTemplateFavorited(template)) continue;
-
-    seen.add(key);
-    items.push(template);
-  }
-
   if (activeFavoriteFilter.value === 'all') {
-    return items;
+    return favoriteTemplates.value;
   }
 
-  return items.filter(
+  return favoriteTemplates.value.filter(
     (template) =>
       getTemplateCategoryKey(template) === activeFavoriteFilter.value,
   );
 });
 const favoriteCategoryFilters = computed(() => {
   const map = new Map();
-  const favoritedTemplates = [
-    ...subtopics.value,
-    ...recommendationCards.value,
-  ].filter((template) => isTemplateFavorited(template));
+  const favoritedTemplates = favoriteTemplates.value;
 
   for (const template of favoritedTemplates) {
     const key = getTemplateCategoryKey(template);
@@ -433,6 +431,40 @@ function statusMeta(status) {
         className: 'bg-electric-blue text-white',
         detail: '工程继续编辑',
       };
+}
+
+function goHome() {
+  resetDraftBatchDelete();
+  activeCategory.value = -1;
+  templateSearchKeyword.value = '';
+  currentViewState.value = 'subtopics';
+  mainMode.value = 'grid';
+  sidebarHidden.value = true;
+  timelineCollapsed.value = true;
+  showFinishedControls.value = false;
+
+  previewModalVisible.value = false;
+  draftLibraryVisible.value = false;
+  finishedLibraryVisible.value = false;
+  profileModalVisible.value = false;
+  passwordModalVisible.value = false;
+  helpCenterVisible.value = false;
+  accountMenuVisible.value = false;
+  exportModalVisible.value = false;
+  importOverwriteConfirmVisible.value = false;
+
+  activeTemplateName.value = '';
+  activeTemplateId.value = '';
+  activeTemplateLocalInfo.value = null;
+  activeTemplateDemoSource.value = videoSource;
+  activeProjectDir.value = '';
+  activeBackendProjectId.value = '';
+  selectedVideoSource.value = videoSource;
+
+  resetModalPreviewVideo();
+  resetMainPlayer();
+  loadRecommendedTemplates();
+  nextTick(schedulePlayerResize);
 }
 
 async function selectCategory(index) {
@@ -589,7 +621,8 @@ async function openTemplatePreview(topic) {
       systemMessage.error(message || '模板详情加载失败');
     }
   } finally {
-    const isCurrentDownload = !downloadId || activeDownloadId.value === downloadId;
+    const isCurrentDownload =
+      !downloadId || activeDownloadId.value === downloadId;
     if (isCurrentDownload) {
       templateDetailLoading.value = false;
       templateDownloadVisible.value = false;
@@ -701,6 +734,11 @@ function setTemplateFavoriteState(templateId, favorited) {
 
   subtopics.value = subtopics.value.map(patchTemplate);
   recommendationCards.value = recommendationCards.value.map(patchTemplate);
+  favoriteTemplates.value = favorited
+    ? favoriteTemplates.value.map(patchTemplate)
+    : favoriteTemplates.value.filter(
+        (template) => getTemplateFavoriteKey(template) !== key,
+      );
 }
 
 function syncTemplateFavoriteStates(templates) {
@@ -718,6 +756,50 @@ function syncTemplateFavoriteStates(templates) {
   }
 
   favoriteTemplateIds.value = nextFavorites;
+}
+
+function addFavoriteTemplateToLibrary(template) {
+  const key = getTemplateFavoriteKey(template);
+  if (
+    !key ||
+    !(template?.title || template?.templateName) ||
+    favoriteTemplates.value.some((item) => getTemplateFavoriteKey(item) === key)
+  ) {
+    return;
+  }
+
+  favoriteTemplates.value = [
+    {
+      ...template,
+      favorite: 1,
+      favorited: true,
+    },
+    ...favoriteTemplates.value,
+  ];
+}
+
+async function loadFavoriteTemplates() {
+  favoritesLoading.value = true;
+
+  try {
+    const response = await getFavoriteTemplates({
+      renter_id: getStoredTenantId(),
+      userId: getStoredUserId(),
+    });
+    const templates = getResponseList(response).map((template, index) => ({
+      ...mapTemplateTopic(template, index),
+      favorite: 1,
+      favorited: true,
+    }));
+
+    favoriteTemplates.value = templates;
+    syncTemplateFavoriteStates(templates);
+  } catch (error) {
+    favoriteTemplates.value = [];
+    systemMessage.error(error?.message || '收藏模板加载失败');
+  } finally {
+    favoritesLoading.value = false;
+  }
 }
 
 async function toggleTemplateFavorite(template) {
@@ -746,6 +828,9 @@ async function toggleTemplateFavorite(template) {
     }
 
     setTemplateFavoriteState(key, !currentlyFavorited);
+    if (!currentlyFavorited) {
+      addFavoriteTemplateToLibrary(template);
+    }
     systemMessage.success(
       response?.msg || (currentlyFavorited ? '已取消收藏' : '收藏成功'),
     );
@@ -1792,6 +1877,8 @@ function toggleDraftLibrary() {
   if (draftLibraryVisible.value) {
     draftFilter.value = 'all';
     loadMyProjects();
+  } else {
+    resetDraftBatchDelete();
   }
 }
 
@@ -1808,18 +1895,97 @@ function saveDraftTitle(project) {
   editingDraftId.value = '';
 }
 
+function getDraftProjectDeleteId(project) {
+  return project?.projectId || project?.deleteId || '';
+}
+
+function resetDraftBatchDelete() {
+  draftBatchDeleteMode.value = false;
+  draftDeleteConfirmVisible.value = false;
+  selectedDraftProjectIds.value = new Set();
+}
+
+function toggleDraftBatchDeleteMode() {
+  if (!draftBatchDeleteMode.value) {
+    draftBatchDeleteMode.value = true;
+    selectedDraftProjectIds.value = new Set();
+    return;
+  }
+
+  if (!selectedDraftProjectIds.value.size) {
+    systemMessage.error('请选择要删除的工程');
+    return;
+  }
+
+  draftDeleteConfirmVisible.value = true;
+}
+
+function toggleDraftProjectSelection(project) {
+  const id = getDraftProjectDeleteId(project);
+  if (!id) return;
+
+  const nextSelected = new Set(selectedDraftProjectIds.value);
+  const key = String(id);
+  if (nextSelected.has(key)) {
+    nextSelected.delete(key);
+  } else {
+    nextSelected.add(key);
+  }
+  selectedDraftProjectIds.value = nextSelected;
+}
+
+function isDraftProjectSelected(project) {
+  const id = getDraftProjectDeleteId(project);
+  return Boolean(id) && selectedDraftProjectIds.value.has(String(id));
+}
+
+function cancelDraftDeleteConfirm() {
+  resetDraftBatchDelete();
+}
+
+async function confirmDraftBatchDelete() {
+  const ids = Array.from(selectedDraftProjectIds.value);
+  if (!ids.length || draftDeleting.value) return;
+
+  draftDeleting.value = true;
+  try {
+    const response = await deleteProjects({
+      ids: ids.join(','),
+      pageNum: 1,
+      pageSize: 9999,
+      renter_id: getStoredTenantId(),
+      userId: getStoredUserId(),
+    });
+
+    if (response?.code !== undefined && Number(response.code) !== 0) {
+      throw new Error(response?.msg || '工程删除失败');
+    }
+
+    systemMessage.success(response?.msg || '工程删除成功');
+    resetDraftBatchDelete();
+    await loadMyProjects();
+  } catch (error) {
+    systemMessage.error(error?.message || '工程删除失败');
+  } finally {
+    draftDeleting.value = false;
+  }
+}
+
 function openDraftProject(projectId) {
   const project = draftProjects.value.find((item) => item.id === projectId);
   const displayName = project?.title || projectId;
   draftLibraryVisible.value = false;
+  resetDraftBatchDelete();
   openPlayerFromLibrary(displayName);
 }
 
 function showFinishedLibrary() {
   draftLibraryVisible.value = false;
+  resetDraftBatchDelete();
   finishedLibraryVisible.value = true;
   sidebarHidden.value = true;
   activeFavoriteFilter.value = 'all';
+  loadFavoriteTemplates();
 }
 
 function hideFinishedLibrary() {
@@ -2299,9 +2465,34 @@ function getCategoryId(category) {
   return category?.categoryId || category?.id || '';
 }
 
+function getActiveTemplateCategoryId() {
+  return activeCategory.value >= 0
+    ? getCategoryId(categories.value[activeCategory.value])
+    : '';
+}
+
+function searchTemplatesNow() {
+  const activeCategoryId = getActiveTemplateCategoryId();
+  currentViewState.value = 'subtopics';
+  mainMode.value = 'grid';
+  previewModalVisible.value = false;
+  loadTemplatesByCategory(
+    activeCategoryId ? categories.value[activeCategory.value] : null,
+  );
+}
+
 function formatTemplateDuration(duration) {
   const seconds = Number(duration);
-  return Number.isFinite(seconds) ? `${seconds}s` : '--';
+  if (!Number.isFinite(seconds)) return '--';
+
+  const totalSeconds = Math.max(0, Math.round(seconds));
+  if (totalSeconds < 60) return `${totalSeconds}秒`;
+
+  const minutes = Math.floor(totalSeconds / 60);
+  const remainingSeconds = totalSeconds % 60;
+  return remainingSeconds
+    ? `${minutes}分${remainingSeconds}秒`
+    : `${minutes}分`;
 }
 
 function formatDurationMsToSeconds(durationMs) {
@@ -2523,11 +2714,13 @@ function mapProject(project, index) {
   return {
     ...project,
     id: project.projectId || project.id || `project-${index}`,
+    deleteId: project.projectId || project.id || '',
     title: project.projectName || project.title || '未命名工程',
     status,
     duration: project.duration || '--:--',
     time: statusLabel,
     image:
+      project.coverPic ||
       project.thumbnailUrl ||
       project.image ||
       (index % 2 === 0 ? weddingImage : travelImage),
@@ -2541,7 +2734,10 @@ async function loadTemplatesByCategory(category) {
   recommendationsLoading.value = true;
 
   try {
-    const topics = await fetchTemplateTopics(getCategoryId(category));
+    const topics = await fetchTemplateTopics(
+      getCategoryId(category),
+      templateSearchKeyword.value,
+    );
 
     if (requestId !== templateRequestId) return;
 
@@ -2567,10 +2763,10 @@ async function loadTemplatesByCategory(category) {
   }
 }
 
-async function fetchTemplateTopics(categoryId = '') {
+async function fetchTemplateTopics(categoryId = '', keyword = '') {
   const payload = {
     favorite: '',
-    keyword: '',
+    keyword: String(keyword || '').trim(),
     pageNum: 1,
     pageSize: 9999,
     renter_id: getStoredTenantId(),
@@ -2874,7 +3070,12 @@ onBeforeUnmount(() => {
         class="flex items-center px-6 gap-4 overflow-visible no-scrollbar border-b-2 border-white/10 h-16"
       >
         <div class="flex items-center gap-4 shrink-0">
-          <img alt="艾咔" class="h-10 w-auto object-contain" :src="logoImage" />
+          <img
+            alt="艾咔"
+            class="h-10 w-auto object-contain cursor-pointer"
+            :src="logoImage"
+            @click.stop="goHome"
+          />
           <h1
             class="font-display text-[26px] font-bold tracking-tight text-on-surface whitespace-nowrap"
           >
@@ -2889,13 +3090,13 @@ onBeforeUnmount(() => {
           >
             <span
               class="text-[13px] text-electric-blue font-bold whitespace-nowrap"
-              >企业: 星辰传媒</span
+              >{{ accountTenantName }}</span
             >
           </div>
           <div class="flex items-center gap-1.5 px-3 py-1 rounded-full">
             <span
               class="text-[13px] text-on-surface-variant font-medium whitespace-nowrap"
-              >剪辑师_01</span
+              >{{ accountVersionName }}</span
             >
           </div>
         </div>
@@ -3016,9 +3217,11 @@ onBeforeUnmount(() => {
             >search</span
           >
           <input
+            v-model="templateSearchKeyword"
             class="w-full bg-surface-container-lowest/50 border border-outline-variant/30 rounded-full pl-9 pr-4 py-1.5 text-[11px] focus:border-electric-blue/50 focus:bg-surface-container-lowest outline-none transition-all text-on-surface placeholder:text-on-surface-variant/40"
             placeholder="搜索主题..."
             type="text"
+            @keydown.enter.prevent="searchTemplatesNow"
           />
         </div>
       </div>
@@ -3088,7 +3291,7 @@ onBeforeUnmount(() => {
                 模板加载中...
               </div>
               <div
-                v-else-if="!selectedTemplateThemeName"
+                v-else-if="!selectedTemplateThemeName && !hasTemplateSearchKeyword"
                 class="px-2 py-6 text-center text-[12px] text-on-surface-variant/70"
               >
                 请选择模板主题
@@ -3430,7 +3633,7 @@ onBeforeUnmount(() => {
             >
               <div
                 ref="playerWrapperRef"
-                class="playerWrapper relative rounded-xl overflow-hidden shadow-2xl border border-white/10"
+                class="playerWrapper group relative rounded-xl overflow-hidden shadow-2xl border border-white/10"
               >
                 <video
                   ref="mainVideoRef"
@@ -3446,10 +3649,10 @@ onBeforeUnmount(() => {
                   @ratechange="updatePlayerControls"
                 ></video>
                 <div
-                  class="absolute inset-0 flex items-center justify-center bg-black/20 group"
+                  class="absolute inset-0 flex items-center justify-center opacity-0 pointer-events-none transition-opacity duration-200 group-hover:opacity-100 group-hover:pointer-events-auto"
                 >
                   <button
-                    class="w-20 h-20 bg-white/20 backdrop-blur-md rounded-full flex items-center justify-center border border-white/40 hover:scale-110 transition-transform"
+                    class="w-20 h-20 bg-black/45 rounded-full flex items-center justify-center border border-white/20 hover:scale-105 transition-transform shadow-2xl"
                     @click="togglePlayerPlayback"
                   >
                     <span
@@ -3724,10 +3927,10 @@ onBeforeUnmount(() => {
                     @ended="updateModalPreviewControls"
                   ></video>
                   <div
-                    class="absolute inset-0 flex items-center justify-center bg-black/20"
+                    class="absolute inset-0 flex items-center justify-center opacity-0 pointer-events-none transition-opacity duration-200 group-hover:opacity-100 group-hover:pointer-events-auto"
                   >
                     <button
-                      class="w-20 h-20 bg-white/5 backdrop-blur-3xl rounded-full flex items-center justify-center border border-white/10 hover:scale-110 transition-transform shadow-2xl"
+                      class="w-20 h-20 bg-black/45 rounded-full flex items-center justify-center border border-white/20 hover:scale-105 transition-transform shadow-2xl"
                       @click="toggleModalPreviewPlayback"
                     >
                       <span
@@ -4420,6 +4623,14 @@ onBeforeUnmount(() => {
               >expand_more</span
             >
           </div>
+          <button
+            class="h-9 px-3 rounded-md border border-white/5 bg-surface-container-lowest text-[12px] font-bold text-on-surface-variant hover:border-electric-blue/50 hover:text-electric-blue transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            type="button"
+            :disabled="draftDeleting"
+            @click="toggleDraftBatchDeleteMode"
+          >
+            {{ draftBatchDeleteMode ? '确定' : '批量删除' }}
+          </button>
         </div>
       </div>
       <div class="flex-1 overflow-y-auto custom-scrollbar p-6">
@@ -4435,13 +4646,42 @@ onBeforeUnmount(() => {
           <div
             v-for="project in visibleDraftProjects"
             :key="project.id"
-            class="group relative aspect-[16/9] bg-surface-container-high rounded-xl overflow-hidden border border-white/5 hover:border-electric-blue/60 transition-all cursor-pointer shadow-lg hover:shadow-electric-blue/10"
+            class="draft-project-card group relative aspect-[16/9] bg-surface-container-high rounded-xl overflow-hidden border border-white/5 hover:border-electric-blue/60 transition-all cursor-pointer shadow-lg hover:shadow-electric-blue/10"
           >
+            <label
+              v-if="draftBatchDeleteMode && getDraftProjectDeleteId(project)"
+              class="absolute left-3 top-3 z-20 flex h-9 w-9 items-center justify-center cursor-pointer"
+              @click.stop
+            >
+              <input
+                class="sr-only"
+                type="checkbox"
+                :checked="isDraftProjectSelected(project)"
+                @change="toggleDraftProjectSelection(project)"
+              />
+              <span
+                class="material-symbols-outlined text-[26px]"
+                :class="
+                  isDraftProjectSelected(project)
+                    ? 'text-electric-blue'
+                    : 'text-white/50'
+                "
+                >{{
+                  isDraftProjectSelected(project)
+                    ? 'check_box'
+                    : 'check_box_outline_blank'
+                }}</span
+              >
+            </label>
             <img
               alt="draft preview"
               class="w-full h-full object-cover opacity-70 group-hover:scale-105 transition-transform duration-500 cursor-pointer"
               :src="project.image"
-              @click="openDraftProject(project.id)"
+              @click="
+                draftBatchDeleteMode
+                  ? toggleDraftProjectSelection(project)
+                  : openDraftProject(project.id)
+              "
             />
             <div
               class="absolute inset-0 flex flex-col justify-end p-4 pointer-events-none"
@@ -4477,6 +4717,38 @@ onBeforeUnmount(() => {
               {{ statusMeta(project.status).label }}
             </div>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <div
+      class="fixed inset-0 z-[260] flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      :class="{ hidden: !draftDeleteConfirmVisible }"
+    >
+      <div
+        class="w-[360px] max-w-[calc(100vw-32px)] rounded-2xl border border-white/10 bg-surface-container-high p-6 shadow-[0_24px_80px_rgba(0,0,0,0.45)]"
+      >
+        <h3 class="text-lg font-black text-white mb-3">确认删除</h3>
+        <p class="text-[14px] leading-6 text-on-surface-variant">
+          删除内容无法找回 是否确定删除？
+        </p>
+        <div class="mt-6 grid grid-cols-2 gap-3">
+          <button
+            class="h-10 rounded-lg border border-white/10 bg-white/5 text-[13px] font-bold text-on-surface-variant hover:bg-white/10 hover:text-white transition-colors"
+            type="button"
+            :disabled="draftDeleting"
+            @click="cancelDraftDeleteConfirm"
+          >
+            取消
+          </button>
+          <button
+            class="h-10 rounded-lg bg-[#ec4034] text-[13px] font-bold text-white hover:brightness-110 transition-all disabled:opacity-60 disabled:cursor-not-allowed"
+            type="button"
+            :disabled="draftDeleting"
+            @click="confirmDraftBatchDelete"
+          >
+            {{ draftDeleting ? '删除中...' : '确定' }}
+          </button>
         </div>
       </div>
     </div>
@@ -4530,7 +4802,13 @@ onBeforeUnmount(() => {
       </div>
       <div class="flex-1 overflow-y-auto custom-scrollbar p-8">
         <div
-          v-if="favoriteLibraryItems.length"
+          v-if="favoritesLoading"
+          class="h-full flex items-center justify-center text-on-surface-variant/70 text-[13px]"
+        >
+          收藏模板加载中...
+        </div>
+        <div
+          v-else-if="favoriteLibraryItems.length"
           class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 gap-6"
         >
           <button
@@ -4554,15 +4832,6 @@ onBeforeUnmount(() => {
               <div class="text-[10px] text-white/60 truncate">
                 {{ template.subtitle }}
               </div>
-            </div>
-            <div
-              class="absolute top-2 left-2 p-1.5 bg-black/40 backdrop-blur-md rounded-lg opacity-0 group-hover:opacity-100 transition-opacity"
-            >
-              <span
-                class="material-symbols-outlined text-[16px] text-electric-blue"
-                style="font-variation-settings: 'FILL' 1"
-                >stars</span
-              >
             </div>
           </button>
         </div>
@@ -4603,6 +4872,18 @@ onBeforeUnmount(() => {
     'GRAD' 0,
     'opsz' 24;
   vertical-align: middle;
+}
+
+.templateListWrapper .draft-project-card {
+  box-sizing: border-box;
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.templateListWrapper .draft-project-card:hover {
+  border-color: #4a8eff !important;
+  box-shadow:
+    0 0 0 1px rgba(74, 142, 255, 0.35),
+    0 12px 30px rgba(74, 142, 255, 0.1);
 }
 
 .custom-scrollbar::-webkit-scrollbar {

@@ -15,3 +15,7 @@ export function getTemplateDetail(data = {}) {
 export function favoriteTemplate(data = {}) {
   return request("/api/template/favorite", { data });
 }
+
+export function getFavoriteTemplates(data = {}) {
+  return request("/api/template/favorite/list", { data });
+}
