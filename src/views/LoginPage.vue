@@ -3,7 +3,8 @@ import { computed, onMounted, ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { getUserInfo, loginUser } from '../api/user';
 import { systemMessage } from '../utils/message';
-import bgImage from '../assets/bg.png';
+import backgroundVideo from '../assets/background.mp4';
+import boxImage from '../assets/box.png';
 import logoImage from '../assets/logo1.png';
 
 const emit = defineEmits(['login']);
@@ -289,7 +290,16 @@ onMounted(() => {
 </script>
 
 <template>
-  <section class="login-page" :style="{ backgroundImage: `url(${bgImage})` }">
+  <section class="login-page">
+    <video
+      class="login-background-video"
+      :src="backgroundVideo"
+      autoplay
+      muted
+      loop
+      playsinline
+    ></video>
+    <div class="login-background-shade"></div>
     <main class="login-container">
       <div class="intro-panel">
         <img :src="logoImage" alt="鉴音" class="app-logo" />
@@ -333,7 +343,8 @@ onMounted(() => {
       </div>
 
       <div class="login-card-wrap">
-        <div class="login-card">
+        <img :src="logoImage" alt="AICUT" class="login-brand-logo" />
+        <div class="login-card" :style="{ backgroundImage: `url(${boxImage})` }">
           <button
             type="button"
             class="back-button"
@@ -375,7 +386,7 @@ onMounted(() => {
               </svg>
             </div>
 
-            <h2>账号登录</h2>
+            <h2>用户登录</h2>
 
             <form class="login-form" @submit.prevent="handleLogin">
               <div class="form-row">
@@ -384,7 +395,7 @@ onMounted(() => {
                   id="login-account"
                   v-model="account"
                   class="input-underline"
-                  placeholder="请输入手机号"
+                  placeholder="输入您的用户名"
                   type="tel"
                   autocomplete="username"
                 />
@@ -396,7 +407,7 @@ onMounted(() => {
                   id="login-password"
                   v-model="password"
                   class="input-underline password-input"
-                  placeholder="请输入密码"
+                  placeholder="输入登录密码"
                   :type="passwordVisible ? 'text' : 'password'"
                   autocomplete="current-password"
                 />
@@ -459,6 +470,11 @@ onMounted(() => {
                     />
                   </svg>
                 </button>
+              </div>
+
+              <div class="login-links">
+                <button type="button">注册</button>
+                <button type="button">忘记密码?</button>
               </div>
 
               <div class="submit-wrap">
@@ -1051,6 +1067,244 @@ onMounted(() => {
 
   .login-card {
     padding: 40px 28px;
+  }
+}
+
+.login-page {
+  position: relative;
+  justify-content: flex-end;
+  padding: 0;
+  background: #07121d;
+}
+
+.login-background-video,
+.login-background-shade {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.login-background-video {
+  z-index: 0;
+  object-fit: cover;
+}
+
+.login-background-shade {
+  z-index: 1;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 75% 42%, rgba(23, 84, 128, 0.14), transparent 28%),
+    linear-gradient(90deg, rgba(0, 0, 0, 0.08), rgba(2, 7, 15, 0.18));
+}
+
+.login-container {
+  position: relative;
+  z-index: 2;
+  max-width: none;
+  height: 100vh;
+  max-height: none;
+  justify-content: flex-end;
+  padding-right: clamp(86px, 15vw, 220px);
+  gap: 0;
+}
+
+.intro-panel {
+  display: none;
+}
+
+.login-card-wrap {
+  width: 320px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-top: -56px;
+}
+
+.login-brand-logo {
+  width: 148px;
+  height: auto;
+  margin-bottom: 8px;
+  object-fit: contain;
+}
+
+.login-card {
+  width: 320px;
+  height: 376px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background-color: transparent;
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 100% 100%;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.back-button,
+.profile-icon {
+  display: none;
+}
+
+.card-content {
+  height: 100%;
+  padding: 66px 34px 46px;
+}
+
+.card-content h2 {
+  position: relative;
+  margin: 0 0 38px;
+  color: #23d9ff;
+  font-size: 21px;
+  line-height: 1;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-align: center;
+  text-transform: none;
+}
+
+.card-content h2::after {
+  content: 'USER LOGIN';
+  display: block;
+  margin-top: 7px;
+  color: rgba(35, 217, 255, 0.78);
+  font-size: 9px;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+}
+
+.login-form {
+  gap: 10px;
+}
+
+.form-row {
+  height: 36px;
+  align-items: center;
+  gap: 0;
+}
+
+.form-row label {
+  position: absolute;
+  left: 16px;
+  top: 50%;
+  z-index: 1;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  transform: translateY(-50%);
+  color: rgba(180, 207, 244, 0.72);
+  font-size: 0;
+}
+
+.form-row label::before {
+  content: 'person';
+  font-family: 'Material Symbols Outlined';
+  font-size: 20px;
+  line-height: 1;
+  font-weight: 300;
+}
+
+.password-row label::before {
+  content: 'vpn_key';
+}
+
+.input-underline {
+  height: 36px;
+  padding: 0 44px 0 48px;
+  border: 1px solid rgba(191, 218, 255, 0.68);
+  border-radius: 999px;
+  background: rgba(12, 25, 45, 0.18);
+  color: rgba(230, 242, 255, 0.92);
+  font-size: 13px;
+  line-height: 36px;
+  box-shadow:
+    inset 0 0 12px rgba(77, 144, 214, 0.16),
+    0 0 8px rgba(73, 143, 220, 0.12);
+}
+
+.input-underline::placeholder {
+  color: rgba(202, 222, 255, 0.46);
+}
+
+.input-underline:focus {
+  border-color: rgba(178, 213, 255, 0.96);
+  box-shadow:
+    inset 0 0 14px rgba(77, 144, 214, 0.2),
+    0 0 12px rgba(73, 143, 220, 0.22);
+}
+
+.toggle-password {
+  right: 14px;
+  bottom: 50%;
+  width: 22px;
+  height: 22px;
+  transform: translateY(50%);
+  color: rgba(202, 222, 255, 0.74);
+}
+
+.toggle-password svg {
+  width: 20px;
+  height: 20px;
+}
+
+.login-links {
+  display: flex;
+  justify-content: flex-end;
+  gap: 16px;
+  padding-right: 6px;
+  margin: 6px 0 34px;
+}
+
+.login-links button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: rgba(194, 216, 245, 0.68);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.login-links button:hover {
+  color: #23d9ff;
+}
+
+.submit-wrap {
+  padding-top: 0;
+}
+
+.login-button {
+  height: 39px;
+  padding: 0 16px;
+  border-radius: 4px;
+  background: #a9c5f0;
+  color: #fff;
+  font-size: 17px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  box-shadow: 0 0 16px rgba(169, 197, 240, 0.3);
+}
+
+.login-button:hover:not(:disabled) {
+  background: #bad3f8;
+  transform: none;
+}
+
+.login-button:disabled {
+  opacity: 0.72;
+}
+
+@media (max-width: 900px) {
+  .login-container {
+    justify-content: center;
+    padding: 0 24px;
+  }
+
+  .login-card-wrap {
+    margin-top: 0;
   }
 }
 </style>

@@ -190,6 +190,7 @@ let playerResizeObserver = null;
 let timelineSeekFrame = null;
 let pendingTimelineSeekTime = null;
 let offsetPersistTimer = null;
+const canceledTemplateDownloadIds = new Set();
 const VIDEO_FRAME_REVEAL_TIME = 0.001;
 
 const mainVideoRef = ref(null);
@@ -516,6 +517,7 @@ async function openTemplatePreview(topic) {
   templateDownloadProgress.value = 0;
   activeDownloadId.value = '';
   let unlistenProgress = null;
+  let downloadId = '';
 
   try {
     const detailResponse = await getTemplateDetail({ templateId });
@@ -537,7 +539,7 @@ async function openTemplatePreview(topic) {
       return;
     }
 
-    const downloadId = `${localTemplateId}-${Date.now()}`;
+    downloadId = `${localTemplateId}-${Date.now()}`;
     activeDownloadId.value = downloadId;
     templateDownloadVisible.value = true;
     templateDownloadStatus.value = '正在获取模板详情...';
@@ -545,6 +547,7 @@ async function openTemplatePreview(topic) {
     unlistenProgress = await listen('template-download-progress', (event) => {
       const payload = event.payload || {};
       if (payload.downloadId !== downloadId) return;
+      if (canceledTemplateDownloadIds.has(downloadId)) return;
 
       templateDownloadProgress.value = Number(payload.progress) || 0;
       templateDownloadStatus.value =
@@ -568,6 +571,10 @@ async function openTemplatePreview(topic) {
       apiBaseUrl: TEMPLATE_DOWNLOAD_BASE_URL,
       downloadId,
     });
+    if (canceledTemplateDownloadIds.has(downloadId)) {
+      throw new Error('Download canceled');
+    }
+
     templateDownloadStatus.value = '正在解析模板片段...';
     templateDownloadProgress.value = Math.max(
       templateDownloadProgress.value,
@@ -582,35 +589,43 @@ async function openTemplatePreview(topic) {
       systemMessage.error(message || '模板详情加载失败');
     }
   } finally {
-    templateDetailLoading.value = false;
-    templateDownloadVisible.value = false;
-    templateDownloadCanceling.value = false;
-    templateDownloadCancelRequested.value = false;
-    templateDownloadStatus.value = '';
-    templateDownloadProgress.value = 0;
-    activeDownloadId.value = '';
+    const isCurrentDownload = !downloadId || activeDownloadId.value === downloadId;
+    if (isCurrentDownload) {
+      templateDetailLoading.value = false;
+      templateDownloadVisible.value = false;
+      templateDownloadCanceling.value = false;
+      templateDownloadCancelRequested.value = false;
+      templateDownloadStatus.value = '';
+      templateDownloadProgress.value = 0;
+      activeDownloadId.value = '';
+    }
+    if (downloadId) {
+      canceledTemplateDownloadIds.delete(downloadId);
+    }
     if (unlistenProgress) {
       unlistenProgress();
     }
   }
 }
 
-async function cancelTemplateDownload() {
+function cancelTemplateDownload() {
   if (!activeDownloadId.value || templateDownloadCanceling.value) return;
 
   const downloadId = activeDownloadId.value;
-  templateDownloadCanceling.value = true;
   templateDownloadCancelRequested.value = true;
-  templateDownloadStatus.value = '正在取消下载...';
+  canceledTemplateDownloadIds.add(downloadId);
+  templateDownloadVisible.value = false;
+  templateDownloadCanceling.value = false;
+  templateDetailLoading.value = false;
+  templateDownloadStatus.value = '';
+  templateDownloadProgress.value = 0;
+  activeDownloadId.value = '';
 
-  try {
-    await invoke('cancel_template_download', {
-      downloadId,
-    });
-  } catch (error) {
-    systemMessage.error(error?.message || '取消下载失败');
-    templateDownloadCanceling.value = false;
-  }
+  invoke('cancel_template_download', {
+    downloadId,
+  }).catch((error) => {
+    console.error('[template-download] cancel failed', error);
+  });
 }
 
 function hidePreviewModal() {
@@ -2719,9 +2734,10 @@ async function submitPasswordReset() {
       throw new Error(response?.msg || '修改密码失败');
     }
 
-    systemMessage.success(response?.msg || '修改密码成功');
+    systemMessage.success(response?.msg || '修改密码成功，请重新登录');
     passwordModalVisible.value = false;
     resetPasswordForm();
+    emit('logout');
   } catch (error) {
     systemMessage.error(error?.message || '修改密码失败');
   } finally {
