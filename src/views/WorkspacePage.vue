@@ -22,109 +22,36 @@ import {
 import { logoutUser, resetPassword } from '../api/user';
 import { systemMessage } from '../utils/message';
 import logoImage from '../assets/logo.png';
-import bundledTemplateXml from '../../template.xml?raw';
 
+// 页面对外事件与远程/本地资源配置。
 const emit = defineEmits(['logout']);
 
-const videoSource =
-  'https://github.com/zsonego/video-editor-tauri/releases/download/new/video2.mp4';
-
-const weddingImage =
-  'https://lh3.googleusercontent.com/aida-public/AB6AXuAKUjxUCNitv9tXTzfgFJpJ4Ej2XBvFvC1QMHEvkCguRpbLnSBT-kk_vXIIoyD7N1vu54LtsFl8I-qrAPoQ5ugSt1UZmfUCbNYNGVgsNUoAepuaVksq5X2i4VxN6p5yZNN7-98lafAPrgTXJlKD7WRNAb90zS7OTDMthSpKGyVhyjdK3iFjr4wWg4esqt0UjogKVo_E-UDa7AgxhHefXqneVydxtp_jQThpAjL49uUw3p6I71h6jgJM4UVFvJNhRD7JEsqJepC6_ZD5';
-const travelImage =
-  'https://lh3.googleusercontent.com/aida-public/AB6AXuDt5PYLfvUtvuJfd9ZXljOhgs6n3G7R0iINSiXx-ZoXEu-JOruIUsel9dwYttKDKMJnsKyDopxdF1OY733OuzNsL3fzYyTIDqFUACrdIIv2WryUoF4T3fSxwuP0j8mZObr1sEQwYVdgKlIoermFPZEBOVTTSBzlsJ8xe_pFnMkrTTANjkAS3J7tgsoYud_mRfeEeHnCF8uJ4VIt6O-cmoH_30lPeXfZjAqGD3k7VhyUN2QIdI-_YCtH7HLHbJyCB7-YCGLmEaCFw9BH';
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 const TEMPLATE_DOWNLOAD_BASE_URL =
   import.meta.env.VITE_TEMPLATE_DOWNLOAD_BASE_URL || API_BASE_URL;
 
+// 模板列表、收藏列表及请求状态。
 const categories = ref([]);
 const recommendationCards = ref([]);
 const favoriteTemplates = ref([]);
 const templateSearchKeyword = ref('');
-const fallbackSubtopics = [
-  {
-    title: '片头开启',
-    count: 1,
-    subtitle: '1个片段 · 唯美片头',
-    material: 1,
-    duration: '15s',
-  },
-  {
-    title: '新娘备婚',
-    count: 5,
-    subtitle: '5个片段 · 记录点滴',
-    material: 8,
-    duration: '12s',
-  },
-];
 const subtopics = ref([]);
+const activeTemplateSegments = ref([]);
 const templatesLoading = ref(false);
 const recommendationsLoading = ref(false);
 const favoritesLoading = ref(false);
 let templateRequestId = 0;
 let recommendationRequestId = 0;
 let templateSearchTimer = null;
-const templateSegments = {
-  婚礼亮点: [
-    { name: '片段 1: 浪漫片头', shot: '全景 (Wide)', count: 2 },
-    { name: '片段 2: 细节捕捉', shot: '特写 (Close-up)', count: 4 },
-    { name: '片段 3: 情感高潮', shot: '中景 (Medium)', count: 3 },
-    { name: '片段 4: 交换戒指', shot: '手部特写', count: 2 },
-  ],
-  旅行Vlog快剪: [
-    { name: '片段 1: 出发准备', shot: '主观视角 (POV)', count: 3 },
-    { name: '片段 2: 风光空镜', shot: '全景航拍', count: 5 },
-    { name: '片段 3: 快节奏闪现', shot: '定格动画', count: 4 },
-  ],
-  片头开启: [{ name: '片段 1: 动态标题', shot: '文字特写', count: 1 }],
-  新娘备婚: [
-    { name: '片段 1: 晨间梳妆', shot: '侧脸特写', count: 2 },
-    { name: '片段 2: 婚纱细节', shot: '慢动作特写', count: 3 },
-    { name: '片段 3: 伴娘合影', shot: '中景', count: 3 },
-  ],
-};
-const finishedGroups = [
-  {
-    name: '主线叙事',
-    videos: [
-      { name: '视频 1', time: '00:00 - 00:48' },
-      { name: '视频 2', time: '00:48 - 01:36' },
-    ],
-  },
-  {
-    name: '氛围补充',
-    videos: [
-      { name: '视频 3', time: '01:36 - 02:42' },
-      { name: '视频 4', time: '02:42 - 03:45' },
-    ],
-  },
-];
-const finishedVideos = [
-  {
-    id: 'finished-wedding-highlight',
-    title: '婚礼亮点_最终成片.mp4',
-    displayName: '婚礼亮点_最终成片',
-    image: weddingImage,
-    duration: '03:45',
-    date: '2026-05-14',
-  },
-  {
-    id: 'finished-travel-vlog',
-    title: '旅行Vlog_快剪成片.mp4',
-    displayName: '旅行Vlog_快剪成片',
-    image: travelImage,
-    duration: '01:28',
-    date: '2026-05-13',
-  },
-];
 
+// 工作区导航、弹窗和当前模板状态。
 const activeCategory = ref(-1);
 const sidebarHidden = ref(true);
 const currentViewState = ref('subtopics');
 const mainMode = ref('grid');
 const activeTemplateName = ref('');
-const previewTitle = ref('新娘备婚');
-const previewSubtitle = ref('5个片段 · 记录点滴');
+const previewTitle = ref('');
+const previewSubtitle = ref('');
 const previewModalVisible = ref(false);
 const accountMenuVisible = ref(false);
 const profileModalVisible = ref(false);
@@ -145,22 +72,23 @@ const templateDownloadCancelRequested = ref(false);
 const activeDownloadId = ref('');
 const activeTemplateId = ref('');
 const activeTemplateLocalInfo = ref(null);
-const activeTemplateDemoSource = ref(videoSource);
+const activeTemplateDemoSource = ref('');
 const activeProjectDir = ref('');
 const activeBackendProjectId = ref('');
 const favoriteTemplateIds = ref(new Set());
 const favoriteUpdatingIds = ref(new Set());
 const timelineCollapsed = ref(true);
 const showFinishedControls = ref(false);
-const selectedVideoName = ref('视频 1');
+const selectedVideoName = ref('');
 const selectedVideoKey = ref('');
 const selectedVideoAssetId = ref('');
-const selectedStyleName = ref('视频轨道 V1');
+const selectedStyleName = ref('');
 const defaultSubtitleText = '';
 const subtitleText = ref(defaultSubtitleText);
 const subtitleApplying = ref(false);
 const timelinePulse = ref(false);
 
+// 工程库、收藏夹和账户表单状态。
 const draftLibraryVisible = ref(false);
 const finishedLibraryVisible = ref(false);
 const draftFilter = ref('all');
@@ -177,6 +105,7 @@ const passwordForm = reactive({
   confirmPassword: '',
 });
 
+// 导出、素材替换确认及全局交互句柄。
 const exportModalVisible = ref(false);
 const exportState = ref('confirm');
 const exportProgress = ref(0);
@@ -202,6 +131,7 @@ let offsetPersistTimer = null;
 const canceledTemplateDownloadIds = new Set();
 const VIDEO_FRAME_REVEAL_TIME = 0.001;
 
+// 播放器 DOM 引用、播放状态和拖动状态。
 const mainVideoRef = ref(null);
 const modalVideoRef = ref(null);
 const playerStageRef = ref(null);
@@ -220,9 +150,10 @@ const modalProgress = ref(0);
 const modalPlaybackRate = ref(1);
 const modalPreviewProgressDragging = ref(false);
 const selectedVideoDuration = ref('00:00');
-const selectedVideoSource = ref(videoSource);
+const selectedVideoSource = ref('');
 const importedVideoObjectUrls = new Set();
 
+// 时间线选区使用秒作为统一单位。
 const timeline = reactive({
   totalDuration: 50,
   selectedDuration: 20,
@@ -233,6 +164,7 @@ const draftProjects = ref([]);
 const segmentImportState = reactive({});
 const videoTimelineStateCache = reactive({});
 
+// 页面展示数据与交互权限的派生状态。
 const sidebarContextLabel = computed(() => {
   if (currentViewState.value === 'finished') return '成片素材';
   if (currentViewState.value === 'segments') return '';
@@ -294,10 +226,7 @@ const sidebarTitle = computed(() => {
   if (currentViewState.value === 'import') return '素材导入';
   return '工作台';
 });
-const visibleSegments = computed(
-  () =>
-    templateSegments[activeTemplateName.value] || templateSegments['婚礼亮点'],
-);
+const visibleSegments = computed(() => activeTemplateSegments.value);
 const importSegments = computed(() =>
   visibleSegments.value.map((segment, index) => {
     const id = `${activeTemplateName.value || 'template'}-${index}-${segment.name}`;
@@ -419,6 +348,7 @@ const selectedClipTitle = computed(
   () => `${selectedVideoName.value} - 主体内容`,
 );
 
+// 页面级导航和主视图切换。
 function statusMeta(status) {
   return status === 'exported'
     ? {
@@ -456,10 +386,11 @@ function goHome() {
   activeTemplateName.value = '';
   activeTemplateId.value = '';
   activeTemplateLocalInfo.value = null;
-  activeTemplateDemoSource.value = videoSource;
+  activeTemplateSegments.value = [];
+  activeTemplateDemoSource.value = '';
   activeProjectDir.value = '';
   activeBackendProjectId.value = '';
-  selectedVideoSource.value = videoSource;
+  selectedVideoSource.value = '';
 
   resetModalPreviewVideo();
   resetMainPlayer();
@@ -490,7 +421,7 @@ function openPreview(title, subtitle) {
   showFinishedControls.value = false;
   activeTemplateId.value = '';
   activeTemplateLocalInfo.value = null;
-  activeTemplateDemoSource.value = videoSource;
+  activeTemplateDemoSource.value = '';
   activeProjectDir.value = '';
   activeBackendProjectId.value = '';
   activeTemplateName.value = title;
@@ -502,6 +433,7 @@ function openPreview(title, subtitle) {
   resetModalPreviewVideo();
 }
 
+// 将模板素材统计映射为预览页面可用结构。
 function getTemplateMaterialSummary(segments) {
   const styleCount = segments.length;
   const videoCount = segments.reduce(
@@ -517,12 +449,11 @@ function enterTemplatePreview(topic, templateId, localInfo) {
   const segments = parseTemplateSegments(localInfo.xmlContent);
   const demoPath = parseTemplateDemoPath(localInfo.xmlContent);
 
-  templateSegments[title] = segments;
+  activeTemplateSegments.value = segments;
   openPreview(title, getTemplateMaterialSummary(segments));
   activeTemplateId.value = templateId;
   activeTemplateLocalInfo.value = localInfo;
-  activeTemplateDemoSource.value =
-    resolveTemplateVideoSource(demoPath) || videoSource;
+  activeTemplateDemoSource.value = resolveTemplateVideoSource(demoPath);
   activeProjectDir.value = '';
   activeBackendProjectId.value = '';
   nextTick(resetModalPreviewVideo);
@@ -641,6 +572,7 @@ async function openTemplatePreview(topic) {
   }
 }
 
+// 取消模板下载并同步清理前端下载状态。
 function cancelTemplateDownload() {
   if (!activeDownloadId.value || templateDownloadCanceling.value) return;
 
@@ -673,6 +605,7 @@ function hidePreviewModal() {
   }
 }
 
+// 模板收藏状态在侧边列表、推荐列表和收藏夹之间保持同步。
 function getTemplateFavoriteKey(template) {
   const id = template?.templateId || template?.id || '';
   return id ? String(id) : '';
@@ -852,6 +785,7 @@ function togglePreviewFavorite() {
   });
 }
 
+// 确认模板后创建后端工程，并切换到素材导入工作流。
 async function confirmSelection() {
   if (startEditingLoading.value) {
     return;
@@ -979,6 +913,7 @@ function handleSidebarBack() {
   }
 }
 
+// 素材导入状态与本地路径处理。
 function getSegmentImportState(segmentId) {
   return segmentImportState[segmentId] || { imported: false, videos: [] };
 }
@@ -1079,8 +1014,9 @@ function resolveTemplateVideoSource(filePath) {
   return localPath ? convertFileSrc(localPath) : '';
 }
 
+// 从模板 XML 中读取素材区域，后续解析同时提供 DOM 和文本兜底方案。
 function getActiveTemplateXmlContent() {
-  return activeTemplateLocalInfo.value?.xmlContent || bundledTemplateXml || '';
+  return activeTemplateLocalInfo.value?.xmlContent || '';
 }
 
 function getDirectChildElements(parent, tagName) {
@@ -1203,6 +1139,7 @@ function findTemplateAreaMatches(assetId) {
   );
 }
 
+// 为时间线选区查找当前素材对应的模板时长约束。
 function findTemplateAreaMatch(assetId) {
   return findTemplateAreaMatches(assetId)[0] || null;
 }
@@ -1251,6 +1188,7 @@ function logTemplateAssetDurationMatch(videoInfo) {
   });
 }
 
+// 切换视频前缓存时间线状态，避免不同素材之间互相覆盖选区。
 function cacheCurrentVideoTimelineState() {
   const key = selectedVideoKey.value;
   if (!key) return;
@@ -1303,6 +1241,7 @@ async function initializeDefaultTemplateAssets() {
   }
 }
 
+// 读取视频元数据并将用户选择的本地文件转换为可播放素材。
 function getVideoMetadata(source) {
   return new Promise((resolve) => {
     const video = document.createElement('video');
@@ -1485,6 +1424,7 @@ async function confirmImportOverwrite() {
   }
 }
 
+// 替换单个已导入视频，同时清理被替换的工程素材文件。
 async function openReplaceFilePicker(segment, videoIndex) {
   const [filePath] = await pickVideoPaths(false);
   const previousState = getSegmentImportState(segment.id);
@@ -1532,6 +1472,7 @@ async function openReplaceFilePicker(segment, videoIndex) {
   selectVideoForTimeline(replacementVideo, segment.name);
 }
 
+// 选择素材后恢复其时间线状态，并同步主播放器。
 function selectVideoForTimeline(video, styleName = '') {
   cacheCurrentVideoTimelineState();
 
@@ -1545,7 +1486,7 @@ function selectVideoForTimeline(video, styleName = '') {
   selectedVideoName.value = videoInfo.name;
   selectedVideoKey.value = nextVideoKey;
   selectedVideoDuration.value = videoInfo.duration || '00:00';
-  selectedVideoSource.value = videoInfo.source || videoSource;
+  selectedVideoSource.value = videoInfo.source || '';
   if (
     Number.isFinite(videoInfo.durationSeconds) &&
     videoInfo.durationSeconds > 0
@@ -1633,6 +1574,7 @@ function seekMainPlayerByTimelineClientX(clientX) {
   seekMainPlayerToTimelineTime(targetTime);
 }
 
+// 播放头拖动实时 seek，结束拖动时移除全局事件监听。
 function startTimelinePlayheadDrag(event) {
   event.preventDefault();
   event.stopPropagation();
@@ -1663,6 +1605,7 @@ function startTimelinePlayheadDrag(event) {
   window.addEventListener('pointerup', timelinePlayheadUpHandler);
 }
 
+// 同一素材可能出现在多个模板区域中，统一计算并提交各区域偏移。
 function getTemplateAreaOffsetPayload(assetId, baseOffsetMs) {
   const matches = findTemplateAreaMatches(assetId).filter(
     (match) => match.areaId,
@@ -1689,6 +1632,7 @@ function getTemplateAreaOffsetPayload(assetId, baseOffsetMs) {
   });
 }
 
+// 暂停状态 seek 后短暂推进一帧，确保 WebView 能刷新视频画面。
 function revealPausedVideoFrame(video, targetTime = 0, updateControls = null) {
   if (!video || !video.paused) {
     updateControls?.();
@@ -1748,6 +1692,7 @@ function handleModalVideoLoadedMetadata() {
   revealPausedVideoFrame(modalVideoRef.value, 0, updateModalPreviewControls);
 }
 
+// 将用户调整后的素材偏移写回工程 XML。
 async function persistSelectedVideoOffset(assetId, offsetMs) {
   if (!activeProjectDir.value || !assetId) return;
 
@@ -1825,6 +1770,7 @@ async function applySubtitleChange() {
   }
 }
 
+// 拖动选区时限制其始终落在时间线有效范围内。
 function startTimelineDrag(event) {
   const track = timelineTrackRef.value;
   if (!track) return;
@@ -1871,6 +1817,7 @@ function startTimelineDrag(event) {
   window.addEventListener('pointerup', timelineUpHandler);
 }
 
+// 工程库浏览、编辑标题和删除操作。
 function toggleDraftLibrary() {
   finishedLibraryVisible.value = false;
   draftLibraryVisible.value = !draftLibraryVisible.value;
@@ -2009,12 +1956,7 @@ function openFavoriteTemplate(template) {
   openTemplatePreview(template);
 }
 
-function openFinishedVideo(videoId) {
-  const video = finishedVideos.find((item) => item.id === videoId);
-  finishedLibraryVisible.value = false;
-  openPlayerFromLibrary(video?.displayName || videoId);
-}
-
+// 从工程库或成片库打开主播放器。
 function openPlayerFromLibrary(displayName) {
   sidebarHidden.value = false;
   mainMode.value = 'player';
@@ -2027,6 +1969,7 @@ function openPlayerFromLibrary(displayName) {
   nextTick(schedulePlayerResize);
 }
 
+// 视频导出流程和进度事件处理。
 function resetExportProgress() {
   exportProgress.value = 0;
   exportStatus.value = '正在准备导出...';
@@ -2202,6 +2145,7 @@ async function startExportProgress() {
   }
 }
 
+// 主播放器和模板预览播放器的控制逻辑。
 function formatPlayerTime(value) {
   if (!Number.isFinite(value)) return '00:00';
   const minutes = Math.floor(value / 60)
@@ -2408,6 +2352,7 @@ function cycleModalPlaybackRate() {
   }
 }
 
+// 根据可用舞台尺寸维持播放器 16:9 比例。
 function resizePlayerToStage() {
   const stage = playerStageRef.value;
   const wrapper = playerWrapperRef.value;
@@ -2438,6 +2383,7 @@ function schedulePlayerResize() {
   playerResizeTimer = window.setTimeout(resizePlayerToStage, 340);
 }
 
+// 登录缓存、通用格式化和接口响应兼容工具。
 function getStoredUserInfo() {
   try {
     return JSON.parse(localStorage.getItem('userInfo') || 'null') || {};
@@ -2543,6 +2489,7 @@ function getResponsePayload(response) {
     : response;
 }
 
+// 将模板 XML 解析为预览视频、素材段和默认素材信息。
 function parseTemplateDemoPath(xmlContent) {
   const xml = new DOMParser().parseFromString(xmlContent, 'text/xml');
 
@@ -2672,6 +2619,7 @@ function parseTemplateSegmentsFromText(xmlContent) {
   });
 }
 
+// 将后端模板和工程数据转换为页面统一展示模型。
 function mapTemplateTopic(template, index) {
   const clipCount =
     Number(template.mediaCount) ||
@@ -2697,11 +2645,7 @@ function mapTemplateTopic(template, index) {
     material: clipCount,
     duration,
     meta: `${materialTypeCount}类 · ${clipCount}个素材 · ${duration}`,
-    image:
-      template.coverPic ||
-      template.thumbnailUrl ||
-      template.image ||
-      (index % 2 === 0 ? weddingImage : travelImage),
+    image: template.coverPic || template.thumbnailUrl || template.image || '',
   };
 }
 
@@ -2727,14 +2671,11 @@ function mapProject(project, index) {
     status,
     duration: project.duration || '--:--',
     time: statusLabel,
-    image:
-      project.coverPic ||
-      project.thumbnailUrl ||
-      project.image ||
-      (index % 2 === 0 ? weddingImage : travelImage),
+    image: project.coverPic || project.thumbnailUrl || project.image || '',
   };
 }
 
+// 模板、分类、推荐和工程库接口加载。
 async function loadTemplatesByCategory(category) {
   const requestId = ++templateRequestId;
   const recommendationRequest = ++recommendationRequestId;
@@ -2851,6 +2792,7 @@ async function loadMyProjects() {
   }
 }
 
+// 账户菜单、密码修改、帮助中心和退出登录。
 function toggleAccountMenu() {
   accountMenuVisible.value = !accountMenuVisible.value;
 }
@@ -2996,10 +2938,12 @@ async function confirmLogout() {
   }
 }
 
+// 点击页面空白处时关闭临时浮层。
 function handleWorkspaceClick() {
   closeAccountMenu();
 }
 
+// 初始化页面数据、窗口监听和播放器尺寸观察。
 onMounted(() => {
   document.title = '艾咔 · AICut - 视频快速剪辑软件';
   document.documentElement.classList.add('dark');
@@ -3021,6 +2965,7 @@ onMounted(() => {
   });
 });
 
+// 离开页面时释放全局监听、定时器和本地视频 URL。
 onBeforeUnmount(() => {
   cacheCurrentVideoTimelineState();
   document.documentElement.classList.remove('dark');
@@ -3385,67 +3330,9 @@ onBeforeUnmount(() => {
               >
                 <template v-if="currentViewState === 'finished'">
                   <div
-                    v-for="group in finishedGroups"
-                    :key="group.name"
-                    class="videoList rounded-lg bg-surface-container-low border border-white/5 overflow-hidden mb-3 shadow-sm"
+                    class="px-3 py-8 text-center text-[12px] text-on-surface-variant/70"
                   >
-                    <div
-                      class="flex items-center justify-between p-3 bg-white/5"
-                    >
-                      <div class="flex items-center gap-2 min-w-0">
-                        <span
-                          class="material-symbols-outlined text-primary text-[18px] shrink-0"
-                          >folder_open</span
-                        >
-                        <span class="text-[13px] font-bold text-white truncate"
-                          >风格: {{ group.name }}</span
-                        >
-                      </div>
-                      <span class="text-[10px] font-bold text-primary shrink-0"
-                        >{{ group.videos.length }} 个视频</span
-                      >
-                    </div>
-                    <div class="p-3 space-y-2 border-t border-outline-variant">
-                      <div
-                        v-for="video in group.videos"
-                        :key="video.name"
-                        class="flex items-center justify-between p-2 rounded bg-surface-container-lowest/50 border border-white/5 hover:border-electric-blue/40 transition-all cursor-pointer group"
-                        :class="{
-                          'is-selected': selectedVideoKey === video.name,
-                        }"
-                        @click="selectVideoForTimeline(video.name, group.name)"
-                      >
-                        <div class="flex items-center gap-2 min-w-0">
-                          <div
-                            class="w-12 aspect-video rounded bg-black/70 border border-white/10 flex items-center justify-center shrink-0"
-                          >
-                            <span
-                              class="material-symbols-outlined text-primary text-[18px]"
-                              >movie</span
-                            >
-                          </div>
-                          <div class="min-w-0">
-                            <div class="text-[12px] text-white truncate">
-                              {{ video.name }}
-                            </div>
-                            <div
-                              class="text-[10px] text-on-surface-variant font-code-data"
-                            >
-                              {{ video.time }}
-                            </div>
-                          </div>
-                        </div>
-                        <button
-                          class="flex items-center gap-1 px-2 py-1 bg-white/5 hover:bg-white/10 rounded text-[11px] text-white/80 transition-colors shrink-0"
-                          @click.stop
-                        >
-                          <span class="material-symbols-outlined text-[15px]"
-                            >sync</span
-                          >
-                          替换
-                        </button>
-                      </div>
-                    </div>
+                    暂无视频
                   </div>
                 </template>
                 <template v-else>
@@ -3610,6 +3497,7 @@ onBeforeUnmount(() => {
                     >
                   </button>
                   <img
+                    v-if="card.image"
                     :alt="card.title"
                     class="w-full h-full object-cover opacity-70 group-hover:scale-105 transition-transform duration-500"
                     :src="card.image"
@@ -4692,6 +4580,7 @@ onBeforeUnmount(() => {
               >
             </label>
             <img
+              v-if="project.image"
               alt="draft preview"
               class="w-full h-full object-cover opacity-70 group-hover:scale-105 transition-transform duration-500 cursor-pointer"
               :src="project.image"
@@ -4804,7 +4693,7 @@ onBeforeUnmount(() => {
             </h2>
           </div>
         </div>
-        <div class="flex items-center gap-3">
+        <!-- <div class="flex items-center gap-3">
           <span
             class="text-[11px] text-on-surface-variant/60 font-bold uppercase tracking-wider"
             >全部分类:</span
@@ -4825,7 +4714,7 @@ onBeforeUnmount(() => {
               {{ filter.label }} ({{ filter.count }})
             </button>
           </div>
-        </div>
+        </div> -->
       </div>
       <div class="flex-1 overflow-y-auto custom-scrollbar p-8">
         <div
@@ -4846,6 +4735,7 @@ onBeforeUnmount(() => {
             @click="openFavoriteTemplate(template)"
           >
             <img
+              v-if="template.image"
               class="w-full h-full object-cover opacity-70 group-hover:scale-105 transition-transform duration-500"
               :src="template.image"
               alt="favorite template preview"
