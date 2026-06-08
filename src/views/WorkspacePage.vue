@@ -1939,6 +1939,14 @@ function isDraftProjectSelected(project) {
   return Boolean(id) && selectedDraftProjectIds.value.has(String(id));
 }
 
+function requestSingleDraftDelete(project) {
+  const id = getDraftProjectDeleteId(project);
+  if (!id) return;
+
+  selectedDraftProjectIds.value = new Set([String(id)]);
+  draftDeleteConfirmVisible.value = true;
+}
+
 function cancelDraftDeleteConfirm() {
   resetDraftBatchDelete();
 }
@@ -3096,7 +3104,7 @@ onBeforeUnmount(() => {
           <div class="flex items-center gap-1.5 px-3 py-1 rounded-full">
             <span
               class="text-[13px] text-on-surface-variant font-medium whitespace-nowrap"
-              >{{ accountVersionName }}</span
+              >{{ accountDisplayName }}</span
             >
           </div>
         </div>
@@ -4605,14 +4613,15 @@ onBeforeUnmount(() => {
             工程库
           </h2>
         </div>
-        <div class="flex items-center gap-2">
-          <span class="text-[11px] font-bold text-on-surface-variant"
+        <div class="flex items-end gap-2">
+          <span
+            class="h-9 flex items-center text-[12px] font-bold text-on-surface-variant"
             >分类</span
           >
           <div class="relative">
             <select
               v-model="draftFilter"
-              class="appearance-none h-9 min-w-[112px] bg-surface-container-lowest border border-white/5 rounded-md pl-3 pr-9 text-[12px] font-bold text-on-surface outline-none hover:border-electric-blue/50 focus:border-electric-blue transition-colors shadow-inner"
+              class="draft-filter-select appearance-none h-9 min-w-[112px] bg-surface-container-lowest border border-white/5 rounded-md pl-3 pr-9 py-0 text-[12px] font-bold text-on-surface outline-none hover:border-electric-blue/50 focus:border-electric-blue transition-colors shadow-inner"
             >
               <option value="all">全部</option>
               <option value="editing">编辑中</option>
@@ -4630,6 +4639,15 @@ onBeforeUnmount(() => {
             @click="toggleDraftBatchDeleteMode"
           >
             {{ draftBatchDeleteMode ? '确定' : '批量删除' }}
+          </button>
+          <button
+            v-if="draftBatchDeleteMode"
+            class="h-9 px-3 rounded-md border border-white/5 bg-surface-container-lowest text-[12px] font-bold text-on-surface-variant hover:border-white/20 hover:text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            type="button"
+            :disabled="draftDeleting"
+            @click="resetDraftBatchDelete"
+          >
+            取消
           </button>
         </div>
       </div>
@@ -4716,6 +4734,15 @@ onBeforeUnmount(() => {
             >
               {{ statusMeta(project.status).label }}
             </div>
+            <button
+              v-if="!draftBatchDeleteMode && getDraftProjectDeleteId(project)"
+              class="absolute bottom-3 right-3 z-20 flex h-6 w-6 items-center justify-center rounded bg-[#ec4034] text-white"
+              type="button"
+              title="删除工程"
+              @click.stop="requestSingleDraftDelete(project)"
+            >
+              <span class="material-symbols-outlined text-[15px]">delete</span>
+            </button>
           </div>
         </div>
       </div>
@@ -4884,6 +4911,10 @@ onBeforeUnmount(() => {
   box-shadow:
     0 0 0 1px rgba(74, 142, 255, 0.35),
     0 12px 30px rgba(74, 142, 255, 0.1);
+}
+
+.draft-filter-select {
+  line-height: 34px;
 }
 
 .custom-scrollbar::-webkit-scrollbar {

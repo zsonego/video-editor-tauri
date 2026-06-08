@@ -6,6 +6,7 @@ import { systemMessage } from '../utils/message';
 import backgroundVideo from '../assets/background.mp4';
 import boxImage from '../assets/box.png';
 import logoImage from '../assets/logo1.png';
+import userAgreementText from '../assets/user-agreement.txt?raw';
 
 const emit = defineEmits(['login']);
 
@@ -13,6 +14,8 @@ const account = ref('');
 const password = ref('');
 const passwordVisible = ref(false);
 const submitting = ref(false);
+const agreementAccepted = ref(false);
+const agreementVisible = ref(false);
 
 const tenantDialogVisible = ref(false);
 const tenantList = ref([]);
@@ -131,6 +134,14 @@ function saveUserInfo(userInfo, identity) {
 
 function togglePasswordVisible() {
   passwordVisible.value = !passwordVisible.value;
+}
+
+function openAgreement() {
+  agreementVisible.value = true;
+}
+
+function closeAgreement() {
+  agreementVisible.value = false;
 }
 
 function handleBack() {
@@ -266,6 +277,10 @@ async function submitLogin(extra = {}) {
 }
 
 function handleLogin() {
+  if (!agreementAccepted.value) {
+    systemMessage.error('请先阅读并同意服务协议及隐私政策');
+    return;
+  }
   submitLogin();
 }
 
@@ -473,15 +488,34 @@ onMounted(() => {
               </div>
 
               <div class="login-links">
-                <button type="button">注册</button>
                 <button type="button">忘记密码?</button>
+              </div>
+
+              <div class="agreement-consent">
+                <input
+                  id="agreement-consent"
+                  v-model="agreementAccepted"
+                  type="checkbox"
+                />
+                <span
+                  class="agreement-check material-symbols-outlined"
+                  aria-hidden="true"
+                  @click="agreementAccepted = !agreementAccepted"
+                  >{{
+                    agreementAccepted ? 'check_box' : 'check_box_outline_blank'
+                  }}</span
+                >
+                <label for="agreement-consent">我已阅读并同意</label>
+                <button type="button" @click="openAgreement">
+                  《服务协议及隐私政策》
+                </button>
               </div>
 
               <div class="submit-wrap">
                 <button
                   class="login-button"
                   type="submit"
-                  :disabled="submitting"
+                  :disabled="submitting || !agreementAccepted"
                 >
                   {{ submitting ? '登录中...' : '登录' }}
                 </button>
@@ -491,6 +525,42 @@ onMounted(() => {
         </div>
       </div>
     </main>
+
+    <transition name="tenant-fade">
+      <div
+        v-if="agreementVisible"
+        class="agreement-mask"
+        @click.self="closeAgreement"
+      >
+        <section class="agreement-dialog" aria-modal="true" role="dialog">
+          <header class="agreement-dialog-header">
+            <div>
+              <h3>服务协议及隐私政策</h3>
+              <p>请仔细阅读以下全部内容</p>
+            </div>
+            <button
+              type="button"
+              class="dialog-close"
+              aria-label="关闭"
+              @click="closeAgreement"
+            >
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="M6 6l12 12M18 6 6 18"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                />
+              </svg>
+            </button>
+          </header>
+          <div class="agreement-document">{{ userAgreementText }}</div>
+          <footer class="agreement-dialog-footer">
+            <button type="button" @click="closeAgreement">关闭</button>
+          </footer>
+        </section>
+      </div>
+    </transition>
 
     <transition name="tenant-fade">
       <div
@@ -1255,7 +1325,7 @@ onMounted(() => {
   justify-content: flex-end;
   gap: 16px;
   padding-right: 6px;
-  margin: 6px 0 34px;
+  margin: 4px 0 8px;
 }
 
 .login-links button {
@@ -1270,6 +1340,57 @@ onMounted(() => {
 
 .login-links button:hover {
   color: #23d9ff;
+}
+
+.agreement-consent {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  margin: 0 3px 4px;
+  color: rgba(194, 216, 245, 0.72);
+  font-size: 10px;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.agreement-consent input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.agreement-check {
+  flex: 0 0 auto;
+  color: rgba(194, 216, 245, 0.62);
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.agreement-consent input:checked + .agreement-check {
+  color: #23d9ff;
+}
+
+.agreement-consent label {
+  cursor: pointer;
+}
+
+.agreement-consent button {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #23d9ff;
+  font: inherit;
+  cursor: pointer;
+}
+
+.agreement-consent button:hover {
+  color: #8cebff;
 }
 
 .submit-wrap {
@@ -1297,6 +1418,97 @@ onMounted(() => {
   opacity: 0.72;
 }
 
+.agreement-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(2, 6, 23, 0.7);
+  backdrop-filter: blur(10px);
+}
+
+.agreement-dialog {
+  width: min(820px, 100%);
+  max-height: min(82vh, 780px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(130, 190, 255, 0.24);
+  border-radius: 14px;
+  background: rgba(7, 18, 42, 0.98);
+  box-shadow: 0 28px 90px rgba(0, 0, 0, 0.55);
+}
+
+.agreement-dialog-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 20px 24px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.agreement-dialog-header h3 {
+  margin: 0;
+  color: #fff;
+  font-size: 18px;
+  line-height: 1.35;
+}
+
+.agreement-dialog-header p {
+  margin: 5px 0 0;
+  color: rgba(202, 222, 255, 0.58);
+  font-size: 12px;
+}
+
+.agreement-document {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 22px 28px;
+  background: rgba(0, 0, 0, 0.12);
+  color: rgba(230, 240, 255, 0.82);
+  font-size: 13px;
+  line-height: 1.85;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.agreement-document::-webkit-scrollbar {
+  width: 6px;
+}
+
+.agreement-document::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(35, 217, 255, 0.3);
+}
+
+.agreement-dialog-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 14px 20px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.agreement-dialog-footer button {
+  min-width: 88px;
+  height: 36px;
+  border: 1px solid rgba(35, 217, 255, 0.34);
+  border-radius: 8px;
+  background: rgba(35, 217, 255, 0.1);
+  color: #b9f4ff;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.agreement-dialog-footer button:hover {
+  background: rgba(35, 217, 255, 0.18);
+}
+
 @media (max-width: 900px) {
   .login-container {
     justify-content: center;
@@ -1305,6 +1517,18 @@ onMounted(() => {
 
   .login-card-wrap {
     margin-top: 0;
+  }
+
+  .agreement-mask {
+    padding: 12px;
+  }
+
+  .agreement-dialog {
+    max-height: 88vh;
+  }
+
+  .agreement-document {
+    padding: 18px;
   }
 }
 </style>
