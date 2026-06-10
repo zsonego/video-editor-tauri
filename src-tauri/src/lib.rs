@@ -43,6 +43,7 @@ struct PreparedTemplate {
 #[serde(rename_all = "camelCase")]
 struct ProjectWorkspace {
     project_dir: String,
+    project_xml: String,
 }
 
 #[derive(Serialize)]
@@ -50,6 +51,18 @@ struct ProjectWorkspace {
 struct ProjectAssetImport {
     copied_path: String,
     project_filepath: String,
+    project_xml: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalProjectWorkspace {
+    project_dir: String,
+    template_file_path: String,
+    assets_dir: String,
+    template_xml: String,
+    project_file_xml: String,
+    existing_asset_ids: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -659,7 +672,16 @@ fn path_to_xml_filepath(path: PathBuf) -> String {
     let filepath = path.to_string_lossy().to_string();
 
     if cfg!(windows) {
-        filepath.replace('/', "\\")
+        let filepath = filepath.replace('/', "\\");
+
+        if let Some(network_path) = filepath.strip_prefix(r"\\?\UNC\") {
+            format!(r"\\{network_path}")
+        } else {
+            filepath
+                .strip_prefix(r"\\?\")
+                .unwrap_or(&filepath)
+                .to_string()
+        }
     } else {
         filepath.replace('\\', "/")
     }
@@ -1464,6 +1486,87 @@ fn update_project_subtitle(
     }
 }
 
+fn update_template_subtitle_default(
+    template_xml: &str,
+    subtitle: &TemplateSubtitle,
+    text: &str,
+) -> Result<String, String> {
+    let mut output = String::new();
+    let mut search_start = 0;
+    let mut updated = false;
+
+    while let Some(relative_start) = template_xml[search_start..].find("<subtitle") {
+        let tag_start = search_start + relative_start;
+        let after_name = template_xml[tag_start + "<subtitle".len()..].chars().next();
+
+        if !is_xml_name_boundary(after_name) {
+            output.push_str(&template_xml[search_start..tag_start + "<subtitle".len()]);
+            search_start = tag_start + "<subtitle".len();
+            continue;
+        }
+
+        let Some(relative_tag_end) = template_xml[tag_start..].find('>') else {
+            break;
+        };
+        let tag_end = tag_start + relative_tag_end + 1;
+        let tag = &template_xml[tag_start..tag_end];
+
+        if xml_attribute_value(tag, "id")
+            .map(|value| value != subtitle.id)
+            .unwrap_or(true)
+        {
+            output.push_str(&template_xml[search_start..tag_end]);
+            search_start = tag_end;
+            continue;
+        }
+
+        if tag.trim_end().ends_with("/>") {
+            output.push_str(&template_xml[search_start..tag_start]);
+            output.push_str(&replace_or_insert_xml_attribute(tag, "text", text));
+            search_start = tag_end;
+            updated = true;
+            continue;
+        }
+
+        let Some(relative_close_start) = template_xml[tag_end..].find("</subtitle>") else {
+            break;
+        };
+        let close_start = tag_end + relative_close_start;
+        let close_end = close_start + "</subtitle>".len();
+        let inner = &template_xml[tag_end..close_start];
+        let updated_inner = if let Some(default_start) = inner.find("<default>") {
+            let default_content_start = default_start + "<default>".len();
+            if let Some(relative_default_end) = inner[default_content_start..].find("</default>") {
+                let default_end = default_content_start + relative_default_end;
+                format!(
+                    "{}{}{}",
+                    &inner[..default_content_start],
+                    escape_xml_text(text),
+                    &inner[default_end..]
+                )
+            } else {
+                format!("{inner}<default>{}</default>", escape_xml_text(text))
+            }
+        } else {
+            format!("{inner}<default>{}</default>", escape_xml_text(text))
+        };
+
+        output.push_str(&template_xml[search_start..tag_end]);
+        output.push_str(&updated_inner);
+        output.push_str("</subtitle>");
+        search_start = close_end;
+        updated = true;
+    }
+
+    output.push_str(&template_xml[search_start..]);
+
+    if updated {
+        Ok(output)
+    } else {
+        Err("template.xml 中未找到对应的 subtitle".to_string())
+    }
+}
+
 fn parse_template_media_assets(xml_content: &str) -> Vec<TemplateMediaAsset> {
     find_xml_element_blocks(xml_content, "media-asset")
         .into_iter()
@@ -1967,14 +2070,21 @@ fn ensure_default_output_dir() -> Result<String, String> {
 }
 
 #[tauri::command]
-fn create_project_workspace(template_id: String) -> Result<ProjectWorkspace, String> {
+fn create_project_workspace(
+    template_id: String,
+    project_id: String,
+) -> Result<ProjectWorkspace, String> {
     let (_, project_root) = ensure_aicut_dirs()?;
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| error.to_string())?
         .as_millis();
-    let project_id = format!("{}-{timestamp}", sanitize_name(&template_id));
-    let project_dir = project_root.join(&project_id);
+    let workspace_id = format!(
+        "{}-{}",
+        sanitize_name(&template_id),
+        sanitize_name(&project_id)
+    );
+    let project_dir = project_root.join(&workspace_id);
 
     fs::create_dir_all(&project_dir).map_err(|error| error.to_string())?;
     let (template_dir, template_file_path, assets_dir) = cached_template_paths(&template_id)?;
@@ -1986,12 +2096,61 @@ fn create_project_workspace(template_id: String) -> Result<ProjectWorkspace, Str
         &assets_dir,
         template_xml,
     )?;
-    let project_file_xml = generate_project_file_xml(&template_xml, &project_id, timestamp)?;
+    let project_file_xml = generate_project_file_xml(&template_xml, &workspace_id, timestamp)?;
+    fs::write(project_dir.join("template.xml"), &template_xml)
+        .map_err(|error| error.to_string())?;
     fs::write(project_dir.join("projectFile.xml"), project_file_xml)
         .map_err(|error| error.to_string())?;
 
     Ok(ProjectWorkspace {
         project_dir: project_dir.to_string_lossy().to_string(),
+        project_xml: template_xml,
+    })
+}
+
+#[tauri::command]
+fn read_project_workspace(
+    template_id: String,
+    project_id: String,
+) -> Result<LocalProjectWorkspace, String> {
+    let (_, project_root) = ensure_aicut_dirs()?;
+    let workspace_id = format!(
+        "{}-{}",
+        sanitize_name(&template_id),
+        sanitize_name(&project_id)
+    );
+    let project_dir = project_root.join(workspace_id);
+    if !project_dir.is_dir() {
+        return Err("本地工程目录不存在".to_string());
+    }
+
+    let project_dir = fs::canonicalize(project_dir).map_err(|error| error.to_string())?;
+    let template_file_path = project_dir.join("template.xml");
+    let project_file_path = project_dir.join("projectFile.xml");
+    if !template_file_path.is_file() || !project_file_path.is_file() {
+        return Err("本地工程缺少 template.xml 或 projectFile.xml".to_string());
+    }
+
+    let template_xml =
+        fs::read_to_string(&template_file_path).map_err(|error| error.to_string())?;
+    let project_file_xml =
+        fs::read_to_string(&project_file_path).map_err(|error| error.to_string())?;
+    let existing_asset_ids = find_xml_start_tags(&template_xml, "asset")
+        .into_iter()
+        .filter_map(|tag| {
+            let asset_id = xml_attribute_value(&tag, "id")?;
+            let filepath = xml_attribute_value(&tag, "filepath")?;
+            PathBuf::from(filepath).is_file().then_some(asset_id)
+        })
+        .collect();
+
+    Ok(LocalProjectWorkspace {
+        project_dir: path_to_xml_filepath(project_dir.clone()),
+        template_file_path: path_to_xml_filepath(template_file_path),
+        assets_dir: path_to_xml_filepath(project_dir.join("assets")),
+        template_xml,
+        project_file_xml,
+        existing_asset_ids,
     })
 }
 
@@ -2031,20 +2190,28 @@ fn save_project_asset(
     let target_path = assets_dir.join(&target_file_name);
     let project_filepath = path_to_xml_filepath(target_path.clone());
     let project_file_path = project_dir.join("projectFile.xml");
+    let project_template_path = project_dir.join("template.xml");
     let project_file_xml =
         fs::read_to_string(&project_file_path).map_err(|error| error.to_string())?;
     let updated_project_file_xml =
         update_project_asset_filepath(&project_file_xml, &asset_id, &project_filepath)?;
+    let project_template_xml =
+        fs::read_to_string(&project_template_path).map_err(|error| error.to_string())?;
+    let updated_project_template_xml =
+        update_project_asset_filepath(&project_template_xml, &asset_id, &project_filepath)?;
 
     fs::create_dir_all(&assets_dir).map_err(|error| error.to_string())?;
     if !target_path.is_file() {
         fs::copy(&source_path, &target_path).map_err(|error| error.to_string())?;
     }
     fs::write(&project_file_path, updated_project_file_xml).map_err(|error| error.to_string())?;
+    fs::write(&project_template_path, &updated_project_template_xml)
+        .map_err(|error| error.to_string())?;
 
     Ok(ProjectAssetImport {
         copied_path: target_path.to_string_lossy().to_string(),
         project_filepath,
+        project_xml: updated_project_template_xml,
     })
 }
 
@@ -2084,18 +2251,12 @@ fn update_project_asset_offset(
 }
 
 #[tauri::command]
-fn apply_project_subtitle(
-    project_dir: String,
-    template_xml: String,
-    text: String,
-) -> Result<(), String> {
+fn apply_project_subtitle(project_dir: String, text: String) -> Result<String, String> {
     let text = text.trim();
     if text.is_empty() {
         return Err("请输入内容".to_string());
     }
 
-    let subtitle = find_first_template_subtitle(&template_xml)
-        .ok_or_else(|| "模板 XML 中未找到 subtitle".to_string())?;
     let (_, project_root) = ensure_aicut_dirs()?;
     let project_root = fs::canonicalize(project_root).map_err(|error| error.to_string())?;
     let project_dir =
@@ -2106,13 +2267,22 @@ fn apply_project_subtitle(
     }
 
     let project_file_path = project_dir.join("projectFile.xml");
+    let project_template_path = project_dir.join("template.xml");
+    let project_template_xml =
+        fs::read_to_string(&project_template_path).map_err(|error| error.to_string())?;
+    let subtitle = find_first_template_subtitle(&project_template_xml)
+        .ok_or_else(|| "工程 template.xml 中未找到 subtitle".to_string())?;
     let project_file_xml =
         fs::read_to_string(&project_file_path).map_err(|error| error.to_string())?;
     let updated_project_file_xml = update_project_subtitle(&project_file_xml, &subtitle, text)?;
+    let updated_project_template_xml =
+        update_template_subtitle_default(&project_template_xml, &subtitle, text)?;
 
     fs::write(&project_file_path, updated_project_file_xml).map_err(|error| error.to_string())?;
+    fs::write(&project_template_path, &updated_project_template_xml)
+        .map_err(|error| error.to_string())?;
 
-    Ok(())
+    Ok(updated_project_template_xml)
 }
 
 #[tauri::command]
@@ -2256,6 +2426,50 @@ fn delete_project_asset_files(project_dir: String, asset_paths: Vec<String>) -> 
 }
 
 #[tauri::command]
+fn delete_project_workspaces(project_ids: Vec<String>) -> Result<(), String> {
+    let (_, project_root) = ensure_aicut_dirs()?;
+    let project_root = fs::canonicalize(project_root).map_err(|error| error.to_string())?;
+    let project_ids = project_ids
+        .into_iter()
+        .map(|project_id| project_id.trim().to_string())
+        .filter(|project_id| {
+            !project_id.is_empty()
+                && project_id
+                    .chars()
+                    .all(|character| character.is_ascii_digit())
+        })
+        .collect::<HashSet<_>>();
+
+    if project_ids.is_empty() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(&project_root).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let folder_name = entry.file_name().to_string_lossy().to_string();
+        let Some((_, project_id)) = folder_name.rsplit_once('-') else {
+            continue;
+        };
+        if !project_ids.contains(project_id) {
+            continue;
+        }
+
+        let workspace = fs::canonicalize(&path).map_err(|error| error.to_string())?;
+        if !workspace.starts_with(&project_root) || workspace == project_root {
+            return Err("本地工程目录无效".to_string());
+        }
+        fs::remove_dir_all(workspace).map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
 fn get_machine_code() -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {
@@ -2350,11 +2564,13 @@ pub fn run() {
             cancel_template_download,
             ensure_default_output_dir,
             create_project_workspace,
+            read_project_workspace,
             save_project_asset,
             update_project_asset_offset,
             apply_project_subtitle,
             compose_project_video,
             delete_project_asset_files,
+            delete_project_workspaces,
             get_machine_code
         ])
         .run(tauri::generate_context!())
@@ -2486,6 +2702,22 @@ mod tests {
     }
 
     #[test]
+    fn removes_windows_verbatim_prefix_from_xml_filepaths() {
+        if !cfg!(windows) {
+            return;
+        }
+
+        assert_eq!(
+            path_to_xml_filepath(PathBuf::from(r"\\?\C:\aicut\project\1-80\assets\video.mp4")),
+            r"C:\aicut\project\1-80\assets\video.mp4"
+        );
+        assert_eq!(
+            path_to_xml_filepath(PathBuf::from(r"\\?\UNC\server\share\video.mp4")),
+            r"\\server\share\video.mp4"
+        );
+    }
+
+    #[test]
     fn updates_project_asset_filepath_by_asset_id() {
         let project_xml = r#"<project>
         <media-asset id="group-a">
@@ -2598,5 +2830,53 @@ mod tests {
         assert!(!updated_xml.contains("old-a"));
         assert!(!updated_xml.contains("old-b"));
         assert!(!updated_xml.contains("subtitle-b"));
+    }
+
+    #[test]
+    fn updates_project_template_subtitle_default_text() {
+        let template_xml = r#"<template>
+        <clips id="clips" target-track="clips">
+            <clip id="clip-a">
+                <subtitle id="subtitle-a">
+                    <default>默认标题</default>
+                </subtitle>
+            </clip>
+            <clip id="clip-b">
+                <subtitle id="subtitle-b">
+                    <default>其他标题</default>
+                </subtitle>
+            </clip>
+        </clips>
+    </template>"#;
+        let subtitle = TemplateSubtitle {
+            clip_id: "clip-a".to_string(),
+            id: "subtitle-a".to_string(),
+        };
+        let updated_xml =
+            update_template_subtitle_default(template_xml, &subtitle, "新标题 & 内容")
+                .expect("updated template xml");
+
+        assert!(updated_xml.contains("<default>新标题 &amp; 内容</default>"));
+        assert!(updated_xml.contains("<default>其他标题</default>"));
+        assert!(!updated_xml.contains("<default>默认标题</default>"));
+    }
+
+    #[test]
+    fn updates_self_closing_project_template_subtitle_text() {
+        let template_xml = r#"<template>
+        <clips id="clips">
+            <clip id="clip-a">
+                <subtitle id="subtitle-a" text="" />
+            </clip>
+        </clips>
+    </template>"#;
+        let subtitle = TemplateSubtitle {
+            clip_id: "clip-a".to_string(),
+            id: "subtitle-a".to_string(),
+        };
+        let updated_xml = update_template_subtitle_default(template_xml, &subtitle, "新标题")
+            .expect("updated template xml");
+
+        assert!(updated_xml.contains(r#"<subtitle id="subtitle-a" text="新标题" />"#));
     }
 }

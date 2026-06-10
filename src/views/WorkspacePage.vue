@@ -11,7 +11,15 @@ import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener';
-import { createProject, deleteProjects, getMyProjects } from '../api/project';
+import {
+  createProject,
+  deleteProjects,
+  getProjectDetail,
+  getMyProjects,
+  recordProjectExport,
+  renameProject,
+  updateProject,
+} from '../api/project';
 import {
   favoriteTemplate,
   getFavoriteTemplates,
@@ -71,10 +79,13 @@ const templateDownloadProgress = ref(0);
 const templateDownloadCancelRequested = ref(false);
 const activeDownloadId = ref('');
 const activeTemplateId = ref('');
+const activeTemplateExportCredit = ref(0);
 const activeTemplateLocalInfo = ref(null);
 const activeTemplateDemoSource = ref('');
 const activeProjectDir = ref('');
 const activeBackendProjectId = ref('');
+const activeProjectExported = ref(false);
+const editingFromDraftLibrary = ref(false);
 const favoriteTemplateIds = ref(new Set());
 const favoriteUpdatingIds = ref(new Set());
 const timelineCollapsed = ref(true);
@@ -95,10 +106,13 @@ const draftFilter = ref('all');
 const activeFavoriteFilter = ref('all');
 const editingDraftId = ref('');
 const draftEditTitle = ref('');
+const draftRenamingId = ref('');
 const draftBatchDeleteMode = ref(false);
 const draftDeleteConfirmVisible = ref(false);
 const draftDeleting = ref(false);
+const draftOpeningId = ref('');
 const selectedDraftProjectIds = ref(new Set());
+const draftTitleInputRefs = new Map();
 const passwordForm = reactive({
   oldPassword: '',
   newPassword: '',
@@ -113,6 +127,7 @@ const exportStatus = ref('正在渲染视频文件...');
 const exportRunning = ref(false);
 const exportSelectedDir = ref('');
 const exportOutputPath = ref('');
+const defaultTemplateExportConfirmVisible = ref(false);
 const importOverwriteConfirmVisible = ref(false);
 const pendingImportSegment = ref(null);
 let exportInterval = null;
@@ -125,9 +140,9 @@ let modalPreviewProgressUpHandler = null;
 let playerResizeFrame = null;
 let playerResizeTimer = null;
 let playerResizeObserver = null;
-let timelineSeekFrame = null;
-let pendingTimelineSeekTime = null;
 let offsetPersistTimer = null;
+let projectUpdateTimer = null;
+let pendingProjectUpdate = null;
 const canceledTemplateDownloadIds = new Set();
 const VIDEO_FRAME_REVEAL_TIME = 0.001;
 
@@ -137,6 +152,9 @@ const modalVideoRef = ref(null);
 const playerStageRef = ref(null);
 const playerWrapperRef = ref(null);
 const timelineTrackRef = ref(null);
+const timelineTrackWidth = ref(0);
+const timelineRulerRef = ref(null);
+const timelineRulerWidth = ref(600);
 const timelineDragging = ref(false);
 const timelinePlayheadDragging = ref(false);
 const playerPaused = ref(true);
@@ -144,6 +162,8 @@ const playerMuted = ref(false);
 const playerSpeed = ref(1);
 const playerProgress = ref(0);
 const playerCurrentTime = ref(0);
+const timelinePlayheadTime = ref(0);
+const timelinePreviewSeeking = ref(false);
 const playerTimeLabel = ref('00:00 / 00:00');
 const modalPaused = ref(true);
 const modalProgress = ref(0);
@@ -188,7 +208,11 @@ const previewFavorited = computed(
     Boolean(activeFavoriteKey.value) &&
     favoriteTemplateIds.value.has(activeFavoriteKey.value),
 );
-const storedUserProfile = computed(() => getStoredUserProfile());
+const userInfoRevision = ref(0);
+const storedUserProfile = computed(() => {
+  userInfoRevision.value;
+  return getStoredUserProfile();
+});
 const accountDisplayName = computed(() => {
   const profile = storedUserProfile.value;
   return profile.phone || '--';
@@ -203,15 +227,7 @@ const accountTenantName = computed(() => {
 });
 const accountBalance = computed(() => {
   const profile = storedUserProfile.value;
-  return formatAccountBalance(
-    profile.points ??
-      profile.point ??
-      profile.kaCoin ??
-      profile.kaCoins ??
-      profile.coinBalance ??
-      profile.balance ??
-      999,
-  );
+  return formatAccountBalance(profile.creditBalance);
 });
 const canExport = computed(
   () =>
@@ -288,34 +304,43 @@ const favoriteCategoryFilters = computed(() => {
     ...Array.from(map.values()),
   ];
 });
-const timelineWidthPercent = computed(() => {
+const timelineSelectionStyle = computed(() => {
   const totalDuration = Math.max(1, Number(timeline.totalDuration) || 1);
   const selectedDuration = Math.min(
     totalDuration,
-    Math.max(0, Number(timeline.selectedDuration) || 0),
-  );
-
-  return `${(selectedDuration / totalDuration) * 100}%`;
-});
-const timelineLeftPercent = computed(() => {
-  const totalDuration = Math.max(1, Number(timeline.totalDuration) || 1);
-  const selectedDuration = Math.min(
-    totalDuration,
-    Math.max(0, Number(timeline.selectedDuration) || 0),
+    Math.max(0, Math.floor(Number(timeline.selectedDuration) || 0)),
   );
   const maxStart = Math.max(0, totalDuration - selectedDuration);
   const startTime = Math.min(
     maxStart,
     Math.max(0, Number(timeline.startTime) || 0),
   );
+  const trackWidth = Math.max(0, timelineTrackWidth.value);
+  if (!trackWidth) {
+    return {
+      left: '0px',
+      width: `${(selectedDuration / totalDuration) * 100}%`,
+    };
+  }
 
-  return `${(startTime / totalDuration) * 100}%`;
+  const width = Math.min(
+    trackWidth,
+    trackWidth * (selectedDuration / totalDuration),
+  );
+  const maxLeft = Math.max(0, trackWidth - width);
+  const left = maxStart > 0 ? maxLeft * (startTime / maxStart) : 0;
+
+  return {
+    left: `${left}px`,
+    width: `${width}px`,
+    transform: 'translateY(-50%)',
+  };
 });
 const timelinePlayheadPercent = computed(() => {
   const totalDuration = Math.max(1, Number(timeline.totalDuration) || 1);
   const currentTime = Math.min(
     totalDuration,
-    Math.max(0, Number(playerCurrentTime.value) || 0),
+    Math.max(0, Number(timelinePlayheadTime.value) || 0),
   );
 
   return `${(currentTime / totalDuration) * 100}%`;
@@ -327,26 +352,68 @@ const timelineRangeLabel = computed(() => {
 const timelineSelectedDurationLabel = computed(() =>
   formatPlayerTime(timeline.selectedDuration),
 );
-const timelineRulerTicks = computed(() => {
-  const totalDuration = Math.max(1, Number(timeline.totalDuration) || 1);
-  const targetTickCount = 5;
-  const rawStep = totalDuration / targetTickCount;
-  const step = Math.max(1, Math.ceil(rawStep));
+function getNiceTickStep(start, stop, count) {
+  const rawStep = Math.abs(stop - start) / Math.max(1, count);
+  if (!Number.isFinite(rawStep) || rawStep <= 0) return 1;
+
+  const power = Math.floor(Math.log10(rawStep));
+  const magnitude = 10 ** power;
+  const error = rawStep / magnitude;
+  const factor =
+    error >= Math.sqrt(50)
+      ? 10
+      : error >= Math.sqrt(10)
+        ? 5
+        : error >= Math.sqrt(2)
+          ? 2
+          : 1;
+
+  return factor * magnitude;
+}
+
+function buildTimelineTicks(totalDuration, step, majorStep, includeMajor) {
+  const epsilon = step / 1000;
   const ticks = [];
+  const count = Math.floor((totalDuration + epsilon) / step);
 
-  for (let value = 0; value < totalDuration; value += step) {
-    ticks.push(value);
-  }
-
-  if (ticks[ticks.length - 1] !== totalDuration) {
-    ticks.push(totalDuration);
+  for (let index = 0; index <= count; index += 1) {
+    const value = index * step;
+    const majorRatio = value / majorStep;
+    const isMajor = Math.abs(majorRatio - Math.round(majorRatio)) < 0.0001;
+    if (includeMajor === isMajor) {
+      ticks.push({
+        value,
+        left: `${(value / totalDuration) * 100}%`,
+      });
+    }
   }
 
   return ticks;
+}
+
+const timelineRulerScale = computed(() => {
+  const totalDuration = Math.max(1, Number(timeline.totalDuration) || 1);
+  const targetMajorCount = Math.max(
+    2,
+    Math.min(12, Math.floor(timelineRulerWidth.value / 84)),
+  );
+  const majorStep = getNiceTickStep(0, totalDuration, targetMajorCount);
+
+  return {
+    totalDuration,
+    majorStep,
+    minorStep: majorStep / 5,
+  };
 });
-const selectedClipTitle = computed(
-  () => `${selectedVideoName.value} - 主体内容`,
-);
+const timelineRulerMajorTicks = computed(() => {
+  const { totalDuration, majorStep } = timelineRulerScale.value;
+  return buildTimelineTicks(totalDuration, majorStep, majorStep, true);
+});
+const timelineRulerMinorTicks = computed(() => {
+  const { totalDuration, majorStep, minorStep } = timelineRulerScale.value;
+  return buildTimelineTicks(totalDuration, minorStep, majorStep, false);
+});
+const selectedClipTitle = computed(() => `${selectedVideoName.value}`);
 
 // 页面级导航和主视图切换。
 function statusMeta(status) {
@@ -381,15 +448,19 @@ function goHome() {
   helpCenterVisible.value = false;
   accountMenuVisible.value = false;
   exportModalVisible.value = false;
+  defaultTemplateExportConfirmVisible.value = false;
   importOverwriteConfirmVisible.value = false;
 
   activeTemplateName.value = '';
   activeTemplateId.value = '';
+  activeTemplateExportCredit.value = 0;
   activeTemplateLocalInfo.value = null;
   activeTemplateSegments.value = [];
   activeTemplateDemoSource.value = '';
   activeProjectDir.value = '';
   activeBackendProjectId.value = '';
+  activeProjectExported.value = false;
+  editingFromDraftLibrary.value = false;
   selectedVideoSource.value = '';
 
   resetModalPreviewVideo();
@@ -399,6 +470,9 @@ function goHome() {
 }
 
 async function selectCategory(index) {
+  draftLibraryVisible.value = false;
+  finishedLibraryVisible.value = false;
+  resetDraftBatchDelete();
   activeCategory.value = index;
   showFinishedControls.value = false;
   currentViewState.value = 'subtopics';
@@ -420,10 +494,12 @@ function toggleSidebar(show) {
 function openPreview(title, subtitle) {
   showFinishedControls.value = false;
   activeTemplateId.value = '';
+  activeTemplateExportCredit.value = 0;
   activeTemplateLocalInfo.value = null;
   activeTemplateDemoSource.value = '';
   activeProjectDir.value = '';
   activeBackendProjectId.value = '';
+  activeProjectExported.value = false;
   activeTemplateName.value = title;
   previewTitle.value = title;
   previewSubtitle.value = subtitle;
@@ -452,10 +528,16 @@ function enterTemplatePreview(topic, templateId, localInfo) {
   activeTemplateSegments.value = segments;
   openPreview(title, getTemplateMaterialSummary(segments));
   activeTemplateId.value = templateId;
+  const exportCredit = Number(topic.exportCredit);
+  activeTemplateExportCredit.value = Number.isFinite(exportCredit)
+    ? exportCredit
+    : 0;
   activeTemplateLocalInfo.value = localInfo;
   activeTemplateDemoSource.value = resolveTemplateVideoSource(demoPath);
   activeProjectDir.value = '';
   activeBackendProjectId.value = '';
+  activeProjectExported.value = false;
+  editingFromDraftLibrary.value = false;
   nextTick(resetModalPreviewVideo);
 }
 
@@ -809,6 +891,57 @@ function normalizeBackendId(value) {
   return Number.isFinite(numericValue) ? numericValue : value;
 }
 
+async function syncProjectTemplateUpdate(payload) {
+  try {
+    const response = await updateProject(payload);
+    if (response?.code !== undefined && Number(response.code) !== 0) {
+      throw new Error(response?.msg || '工程信息同步失败');
+    }
+  } catch (error) {
+    console.error('[project] template update sync failed:', error);
+    systemMessage.error(error?.message || '工程信息同步失败');
+  }
+}
+
+function scheduleProjectTemplateUpdate(projectXml) {
+  if (!projectXml || !activeBackendProjectId.value || !activeTemplateId.value) {
+    return;
+  }
+
+  pendingProjectUpdate = {
+    projectId: normalizeBackendId(activeBackendProjectId.value),
+    projectName: activeTemplateName.value || previewTitle.value || '未命名工程',
+    projectXml,
+    templateId: normalizeBackendId(activeTemplateId.value),
+  };
+
+  if (projectUpdateTimer) {
+    window.clearTimeout(projectUpdateTimer);
+  }
+
+  projectUpdateTimer = window.setTimeout(() => {
+    const payload = pendingProjectUpdate;
+    projectUpdateTimer = null;
+    pendingProjectUpdate = null;
+    if (payload) {
+      syncProjectTemplateUpdate(payload);
+    }
+  }, 5000);
+}
+
+function flushPendingProjectTemplateUpdate() {
+  if (projectUpdateTimer) {
+    window.clearTimeout(projectUpdateTimer);
+    projectUpdateTimer = null;
+  }
+
+  const payload = pendingProjectUpdate;
+  pendingProjectUpdate = null;
+  if (payload) {
+    syncProjectTemplateUpdate(payload);
+  }
+}
+
 async function createBackendProjectIfNeeded() {
   if (activeBackendProjectId.value) {
     return true;
@@ -845,6 +978,10 @@ async function createBackendProjectIfNeeded() {
 
     const payload = getResponsePayload(response) || {};
     activeBackendProjectId.value = payload.projectId || payload.id || '';
+    if (!activeBackendProjectId.value) {
+      throw new Error('创建工程成功，但未返回工程 ID');
+    }
+    activeProjectExported.value = false;
     console.log('[project] backend project created', {
       projectId: activeBackendProjectId.value,
     });
@@ -857,25 +994,37 @@ async function createBackendProjectIfNeeded() {
 }
 
 async function startEditing() {
+  editingFromDraftLibrary.value = false;
+  const backendProjectCreated = await createBackendProjectIfNeeded();
+  if (!backendProjectCreated) {
+    return false;
+  }
+
   if (activeTemplateId.value && !activeProjectDir.value) {
     try {
       const workspace = await invoke('create_project_workspace', {
+        projectId: String(activeBackendProjectId.value),
         templateId: activeTemplateId.value,
       });
       activeProjectDir.value = workspace.projectDir;
+      scheduleProjectTemplateUpdate(workspace.projectXml);
     } catch (error) {
       systemMessage.error(error?.message || '项目目录创建失败');
       return false;
     }
   }
 
-  const backendProjectCreated = await createBackendProjectIfNeeded();
-  if (!backendProjectCreated) {
-    return false;
-  }
   loadMyProjects();
 
+  clearProjectEditingState();
+  subtitleText.value = parseTemplateSubtitleText(getActiveTemplateXmlContent());
   await initializeDefaultTemplateAssets();
+  try {
+    await initializeProjectAssetOffsets();
+  } catch (error) {
+    systemMessage.error(error?.message || '工程素材位置初始化失败');
+    return false;
+  }
   currentViewState.value = 'import';
   mainMode.value = 'player';
   timelineCollapsed.value = false;
@@ -890,7 +1039,6 @@ async function startEditing() {
       firstSegmentWithVideo.videos[0],
       firstSegmentWithVideo.name,
     );
-    await flushSelectedVideoOffsetPersist();
   } else {
     selectVideoForTimeline('视频 1', '视频轨道 V1');
   }
@@ -901,6 +1049,12 @@ async function startEditing() {
 
 function handleSidebarBack() {
   if (currentViewState.value === 'import') {
+    flushPendingProjectTemplateUpdate();
+    activeProjectDir.value = '';
+    activeBackendProjectId.value = '';
+    activeProjectExported.value = false;
+    editingFromDraftLibrary.value = false;
+    clearProjectEditingState();
     showFinishedControls.value = false;
     currentViewState.value = 'segments';
     mainMode.value = 'grid';
@@ -953,6 +1107,14 @@ function hasImportedVideoInSegment(segment) {
   return (segment?.videos || []).some(isProjectImportedVideo);
 }
 
+function hasDefaultTemplateVideos() {
+  return importSegments.value.some((segment) =>
+    segment.videos.some(
+      (video) => Boolean(video?.localPath) && !isProjectImportedVideo(video),
+    ),
+  );
+}
+
 function getFileNameFromPath(filePath) {
   return (
     String(filePath || '')
@@ -961,6 +1123,10 @@ function getFileNameFromPath(filePath) {
       .filter(Boolean)
       .pop() || '视频素材'
   );
+}
+
+function getDisplayVideoName(filePath) {
+  return getFileNameFromPath(filePath).replace(/^[0-9a-f]{16}_/i, '');
 }
 
 function joinLocalPath(basePath, relativePath) {
@@ -1160,8 +1326,8 @@ function getTimelineSelectionDuration(videoInfo, videoDuration) {
   const templateDuration = findTemplateAreaDurationSeconds(videoInfo.assetId);
 
   return Number.isFinite(templateDuration) && templateDuration > 0
-    ? templateDuration
-    : videoDuration;
+    ? Math.max(1, Math.floor(templateDuration))
+    : Math.max(1, Math.floor(videoDuration));
 }
 
 function logTemplateAssetDurationMatch(videoInfo) {
@@ -1203,20 +1369,27 @@ function getVideoTimelineState(key) {
 }
 
 async function createTemplateAssetVideo(asset, index) {
-  const localPath = resolveTemplateAssetPath(asset.filepath);
-  const source = resolveTemplateVideoSource(asset.filepath);
+  const existingAssetIds = activeTemplateLocalInfo.value?.existingAssetIds;
+  const hasExistenceSnapshot = Array.isArray(existingAssetIds);
+  const exists =
+    !hasExistenceSnapshot || existingAssetIds.includes(String(asset.id || ''));
+  const localPath = exists ? resolveTemplateAssetPath(asset.filepath) : '';
+  const source = exists ? resolveTemplateVideoSource(asset.filepath) : '';
   const metadata = source
     ? await getVideoMetadata(source)
     : { durationSeconds: 0, duration: '--' };
 
   return {
     id: `template-${asset.id || index}-${asset.filepath || index}`,
-    name: getFileNameFromPath(asset.filepath) || `素材 ${index + 1}`,
+    name: exists
+      ? getDisplayVideoName(asset.filepath) || `素材 ${index + 1}`
+      : `待导入视频 ${index + 1}`,
     duration: metadata.duration,
     durationSeconds: metadata.durationSeconds,
     source,
     localPath,
     assetId: asset.id || '',
+    missing: !exists,
   };
 }
 
@@ -1238,6 +1411,47 @@ async function initializeDefaultTemplateAssets() {
       imported: videos.length >= (Number(segment.count) || 0),
       videos,
     };
+  }
+}
+
+function clearProjectEditingState() {
+  if (offsetPersistTimer) {
+    window.clearTimeout(offsetPersistTimer);
+    offsetPersistTimer = null;
+  }
+  for (const key of Object.keys(segmentImportState)) {
+    delete segmentImportState[key];
+  }
+  for (const key of Object.keys(videoTimelineStateCache)) {
+    delete videoTimelineStateCache[key];
+  }
+  selectedVideoName.value = '';
+  selectedVideoKey.value = '';
+  selectedVideoAssetId.value = '';
+  selectedVideoSource.value = '';
+  selectedVideoDuration.value = '00:00';
+  selectedStyleName.value = '';
+  subtitleText.value = defaultSubtitleText;
+  timeline.totalDuration = 50;
+  timeline.selectedDuration = 20;
+  timeline.startTime = 0;
+  pendingImportSegment.value = null;
+  importOverwriteConfirmVisible.value = false;
+  resetMainPlayer();
+}
+
+function restoreProjectVideoOffsets(projectFileXml) {
+  const maxOffsets = parseProjectMaxOffsets(projectFileXml);
+
+  for (const segment of importSegments.value) {
+    for (const video of segment.videos) {
+      const offsetMs = maxOffsets.get(String(video.assetId || ''));
+      if (Number.isFinite(offsetMs)) {
+        videoTimelineStateCache[video.id] = {
+          startTime: Math.max(0, offsetMs / 1000),
+        };
+      }
+    }
   }
 }
 
@@ -1295,13 +1509,13 @@ async function createImportedVideoFromPath(
 
     localPath = savedAsset.copiedPath || filePath;
     projectFilepath = savedAsset.projectFilepath || '';
+    scheduleProjectTemplateUpdate(savedAsset.projectXml);
   }
 
   const source = convertFileSrc(localPath);
   const metadata = await getVideoMetadata(source);
   const suffix = keySuffix || Math.random().toString(36).slice(2);
-
-  return {
+  const importedVideo = {
     id: `imported-${Date.now()}-${suffix}`,
     name: getFileNameFromPath(filePath),
     duration: metadata.duration,
@@ -1311,6 +1525,9 @@ async function createImportedVideoFromPath(
     assetId,
     projectFilepath,
   };
+
+  await initializeVideoDefaultOffset(importedVideo);
+  return importedVideo;
 }
 
 function revokeImportedVideo(video) {
@@ -1472,7 +1689,7 @@ async function openReplaceFilePicker(segment, videoIndex) {
   selectVideoForTimeline(replacementVideo, segment.name);
 }
 
-// 选择素材后恢复其时间线状态，并同步主播放器。
+// 选择素材后恢复其时间线状态，播放指针始终从 0 秒开始。
 function selectVideoForTimeline(video, styleName = '') {
   cacheCurrentVideoTimelineState();
 
@@ -1487,6 +1704,10 @@ function selectVideoForTimeline(video, styleName = '') {
   selectedVideoKey.value = nextVideoKey;
   selectedVideoDuration.value = videoInfo.duration || '00:00';
   selectedVideoSource.value = videoInfo.source || '';
+  playerCurrentTime.value = 0;
+  timelinePlayheadTime.value = 0;
+  timelinePreviewSeeking.value = false;
+  playerProgress.value = 0;
   if (
     Number.isFinite(videoInfo.durationSeconds) &&
     videoInfo.durationSeconds > 0
@@ -1534,18 +1755,6 @@ function clampTimelineStart(startTime) {
   return Math.min(Math.max(startTime, 0), maxStart);
 }
 
-function syncMainPlayerToTimelineStart() {
-  pendingTimelineSeekTime = timeline.startTime;
-  if (timelineSeekFrame) return;
-
-  timelineSeekFrame = requestAnimationFrame(() => {
-    timelineSeekFrame = null;
-    const targetTime = pendingTimelineSeekTime;
-    pendingTimelineSeekTime = null;
-    seekMainPlayerToTimelineTime(targetTime);
-  });
-}
-
 function seekMainPlayerToTimelineTime(targetTime) {
   const video = mainVideoRef.value;
   if (!video) return;
@@ -1579,6 +1788,7 @@ function startTimelinePlayheadDrag(event) {
   event.preventDefault();
   event.stopPropagation();
   event.currentTarget.setPointerCapture?.(event.pointerId);
+  timelinePreviewSeeking.value = false;
   timelinePlayheadDragging.value = true;
   seekMainPlayerByTimelineClientX(event.clientX);
 
@@ -1630,6 +1840,48 @@ function getTemplateAreaOffsetPayload(assetId, baseOffsetMs) {
       offsetMs: Math.max(0, Math.round(baseOffsetMs + centeredOffsetMs)),
     };
   });
+}
+
+async function initializeVideoDefaultOffset(video) {
+  const assetId = String(video?.assetId || '').trim();
+  if (!activeProjectDir.value || !assetId) return;
+
+  const areaMatches = findTemplateAreaMatches(assetId);
+  if (areaMatches.length === 0) return;
+
+  const videoDurationSeconds = Number(video.durationSeconds) || 0;
+  const templateDurationSeconds =
+    findTemplateAreaDurationSeconds(assetId) || videoDurationSeconds;
+  const baseOffsetMs = Math.max(
+    0,
+    Math.round(((videoDurationSeconds - templateDurationSeconds) * 1000) / 2),
+  );
+  const areaOffsets = getTemplateAreaOffsetPayload(assetId, baseOffsetMs);
+
+  await invoke('update_project_asset_offset', {
+    projectDir: activeProjectDir.value,
+    assetId,
+    offsetMs: baseOffsetMs,
+    areaOffsets,
+  });
+  videoTimelineStateCache[video.id] = {
+    startTime: baseOffsetMs / 1000,
+  };
+}
+
+// 新工程创建后立即为全部模板视频写入默认居中偏移，避免未操作素材保持 offset=0。
+async function initializeProjectAssetOffsets() {
+  const initializedAssetIds = new Set();
+
+  for (const segment of importSegments.value) {
+    for (const video of segment.videos) {
+      const assetId = String(video.assetId || '').trim();
+      if (!assetId || initializedAssetIds.has(assetId)) continue;
+
+      initializedAssetIds.add(assetId);
+      await initializeVideoDefaultOffset(video);
+    }
+  }
 }
 
 // 暂停状态 seek 后短暂推进一帧，确保 WebView 能刷新视频画面。
@@ -1756,11 +2008,11 @@ async function applySubtitleChange() {
 
   subtitleApplying.value = true;
   try {
-    await invoke('apply_project_subtitle', {
+    const projectXml = await invoke('apply_project_subtitle', {
       projectDir: activeProjectDir.value,
-      templateXml: getActiveTemplateXmlContent(),
       text,
     });
+    scheduleProjectTemplateUpdate(projectXml);
     subtitleText.value = text;
     systemMessage.success('标题已更新');
   } catch (error) {
@@ -1776,15 +2028,16 @@ function startTimelineDrag(event) {
   if (!track) return;
 
   const trackRect = track.getBoundingClientRect();
-  if (!trackRect.width) return;
+  const trackWidth = track.clientWidth;
+  const trackLeft = trackRect.left + track.clientLeft;
+  if (!trackWidth) return;
 
   const selectionRect = event.currentTarget.getBoundingClientRect();
   const offset = event.clientX - selectionRect.left;
-  const maxLeft =
-    trackRect.width *
-    ((timeline.totalDuration - timeline.selectedDuration) /
-      timeline.totalDuration);
+  const maxLeft = Math.max(0, trackWidth - selectionRect.width);
   event.currentTarget.setPointerCapture?.(event.pointerId);
+  timelinePreviewSeeking.value = true;
+  seekMainPlayerToTimelineTime(timeline.startTime);
 
   if (timelineMoveHandler) {
     window.removeEventListener('pointermove', timelineMoveHandler);
@@ -1794,13 +2047,15 @@ function startTimelineDrag(event) {
   }
 
   timelineMoveHandler = (moveEvent) => {
-    const rawLeft = moveEvent.clientX - trackRect.left - offset;
+    const rawLeft = moveEvent.clientX - trackLeft - offset;
     const clampedLeft = Math.min(Math.max(rawLeft, 0), Math.max(0, maxLeft));
-    timeline.startTime = clampTimelineStart(
-      (clampedLeft / trackRect.width) * timeline.totalDuration,
+    const maxStart = Math.max(
+      0,
+      timeline.totalDuration - timeline.selectedDuration,
     );
+    timeline.startTime = maxLeft ? (clampedLeft / maxLeft) * maxStart : 0;
     cacheCurrentVideoTimelineState();
-    syncMainPlayerToTimelineStart();
+    seekMainPlayerToTimelineTime(timeline.startTime);
   };
   timelineUpHandler = () => {
     timelineDragging.value = false;
@@ -1808,7 +2063,6 @@ function startTimelineDrag(event) {
     window.removeEventListener('pointerup', timelineUpHandler);
     timelineMoveHandler = null;
     timelineUpHandler = null;
-    syncMainPlayerToTimelineStart();
     scheduleSelectedVideoOffsetPersist();
   };
 
@@ -1818,28 +2072,89 @@ function startTimelineDrag(event) {
 }
 
 // 工程库浏览、编辑标题和删除操作。
-function toggleDraftLibrary() {
+function showDraftLibrary() {
+  if (draftLibraryVisible.value) return;
+
+  resetDraftTitleEdit();
   finishedLibraryVisible.value = false;
-  draftLibraryVisible.value = !draftLibraryVisible.value;
-  if (draftLibraryVisible.value) {
-    draftFilter.value = 'all';
-    loadMyProjects();
+  draftLibraryVisible.value = true;
+  draftFilter.value = 'all';
+  loadMyProjects();
+}
+
+function hideDraftLibrary() {
+  resetDraftTitleEdit();
+  goHome();
+}
+
+function resetDraftTitleEdit() {
+  editingDraftId.value = '';
+  draftEditTitle.value = '';
+}
+
+function setDraftTitleInputRef(projectId, element) {
+  const key = String(projectId || '');
+  if (!key) return;
+
+  if (element) {
+    draftTitleInputRefs.set(key, element);
   } else {
-    resetDraftBatchDelete();
+    draftTitleInputRefs.delete(key);
   }
 }
 
 function startDraftTitleEdit(project) {
+  if (draftBatchDeleteMode.value) return;
+
   editingDraftId.value = project.id;
   draftEditTitle.value = project.title;
+  nextTick(() => {
+    const input = draftTitleInputRefs.get(String(project.id));
+    input?.focus();
+    input?.select();
+  });
 }
 
-function saveDraftTitle(project) {
+async function saveDraftTitle(project) {
+  if (editingDraftId.value !== project.id || draftRenamingId.value) return;
+
   const nextTitle = draftEditTitle.value.trim();
-  if (nextTitle) {
-    project.title = nextTitle;
+  const projectId = getDraftProjectDeleteId(project);
+  if (!nextTitle) {
+    systemMessage.error('工程名称不能为空');
+    resetDraftTitleEdit();
+    return;
   }
-  editingDraftId.value = '';
+  if (!projectId) {
+    systemMessage.error('工程 ID 不存在');
+    resetDraftTitleEdit();
+    return;
+  }
+  if (nextTitle === project.title) {
+    resetDraftTitleEdit();
+    return;
+  }
+
+  draftRenamingId.value = String(projectId);
+  try {
+    const response = await renameProject({
+      projectId,
+      projectName: nextTitle,
+    });
+
+    if (response?.code !== undefined && Number(response.code) !== 0) {
+      throw new Error(response?.msg || '工程名称修改失败');
+    }
+
+    project.title = nextTitle;
+    project.projectName = nextTitle;
+    systemMessage.success(response?.msg || '工程名称修改成功');
+  } catch (error) {
+    systemMessage.error(error?.message || '工程名称修改失败');
+  } finally {
+    draftRenamingId.value = '';
+    resetDraftTitleEdit();
+  }
 }
 
 function getDraftProjectDeleteId(project) {
@@ -1847,6 +2162,7 @@ function getDraftProjectDeleteId(project) {
 }
 
 function resetDraftBatchDelete() {
+  resetDraftTitleEdit();
   draftBatchDeleteMode.value = false;
   draftDeleteConfirmVisible.value = false;
   selectedDraftProjectIds.value = new Set();
@@ -1854,6 +2170,7 @@ function resetDraftBatchDelete() {
 
 function toggleDraftBatchDeleteMode() {
   if (!draftBatchDeleteMode.value) {
+    resetDraftTitleEdit();
     draftBatchDeleteMode.value = true;
     selectedDraftProjectIds.value = new Set();
     return;
@@ -1916,9 +2233,17 @@ async function confirmDraftBatchDelete() {
       throw new Error(response?.msg || '工程删除失败');
     }
 
-    systemMessage.success(response?.msg || '工程删除成功');
+    try {
+      await invoke('delete_project_workspaces', {
+        projectIds: ids.map(String),
+      });
+    } catch (error) {
+      console.error('[project] local workspace delete failed:', error);
+    }
+
     resetDraftBatchDelete();
     await loadMyProjects();
+    systemMessage.success(response?.msg || '工程删除成功');
   } catch (error) {
     systemMessage.error(error?.message || '工程删除失败');
   } finally {
@@ -1926,12 +2251,84 @@ async function confirmDraftBatchDelete() {
   }
 }
 
-function openDraftProject(projectId) {
-  const project = draftProjects.value.find((item) => item.id === projectId);
-  const displayName = project?.title || projectId;
-  draftLibraryVisible.value = false;
-  resetDraftBatchDelete();
-  openPlayerFromLibrary(displayName);
+async function openDraftProject(projectId) {
+  if (!projectId || draftOpeningId.value) return;
+
+  draftOpeningId.value = String(projectId);
+  try {
+    const response = await getProjectDetail({
+      projectId: normalizeBackendId(projectId),
+    });
+    if (response?.code !== undefined && Number(response.code) !== 0) {
+      throw new Error(response?.msg || '工程详情查询失败');
+    }
+
+    const detail = getResponsePayload(response) || {};
+    const detailProjectId = detail.projectId || projectId;
+    const templateId = detail.templateId;
+    if (!detailProjectId || !templateId) {
+      throw new Error('工程详情缺少工程 ID 或模板 ID');
+    }
+
+    const workspace = await invoke('read_project_workspace', {
+      projectId: String(detailProjectId),
+      templateId: String(templateId),
+    });
+    const templateXml = workspace.templateXml || '';
+    const projectFileXml = workspace.projectFileXml || '';
+    if (!templateXml || !projectFileXml) {
+      throw new Error('本地工程 XML 内容为空');
+    }
+
+    clearProjectEditingState();
+    activeBackendProjectId.value = detailProjectId;
+    activeProjectExported.value =
+      String(detail.statusName || '').trim() === '已导出';
+    editingFromDraftLibrary.value = true;
+    activeTemplateId.value = String(templateId);
+    activeTemplateExportCredit.value = Number(detail.exportCredit) || 0;
+    activeTemplateName.value = detail.projectName || '未命名工程';
+    previewTitle.value = activeTemplateName.value;
+    activeProjectDir.value = workspace.projectDir || '';
+    activeTemplateLocalInfo.value = {
+      templateDir: workspace.projectDir || '',
+      templateFilePath: workspace.templateFilePath || '',
+      assetsDir: workspace.assetsDir || '',
+      xmlContent: templateXml,
+      existingAssetIds: workspace.existingAssetIds || [],
+    };
+    activeTemplateSegments.value = parseTemplateSegments(templateXml);
+    activeTemplateDemoSource.value = resolveTemplateVideoSource(
+      parseTemplateDemoPath(templateXml),
+    );
+    subtitleText.value = parseTemplateSubtitleText(templateXml);
+
+    await initializeDefaultTemplateAssets();
+    restoreProjectVideoOffsets(projectFileXml);
+
+    draftLibraryVisible.value = false;
+    resetDraftBatchDelete();
+    sidebarHidden.value = false;
+    mainMode.value = 'player';
+    timelineCollapsed.value = false;
+    currentViewState.value = 'import';
+    showFinishedControls.value = false;
+
+    const videos = importSegments.value.flatMap((segment) =>
+      segment.videos.map((video) => ({ video, styleName: segment.name })),
+    );
+    const firstVideo = videos.find(({ video }) => video.source) || videos[0];
+    if (firstVideo) {
+      selectVideoForTimeline(firstVideo.video, firstVideo.styleName);
+    } else {
+      selectVideoForTimeline('视频 1', '视频轨道 V1');
+    }
+    nextTick(schedulePlayerResize);
+  } catch (error) {
+    systemMessage.error(error?.message || '工程打开失败');
+  } finally {
+    draftOpeningId.value = '';
+  }
 }
 
 function showFinishedLibrary() {
@@ -1944,7 +2341,7 @@ function showFinishedLibrary() {
 }
 
 function hideFinishedLibrary() {
-  finishedLibraryVisible.value = false;
+  goHome();
 }
 
 function filterFavorites(filterKey) {
@@ -1976,6 +2373,58 @@ function resetExportProgress() {
   exportOutputPath.value = '';
 }
 
+function markProjectExportRecorded() {
+  activeProjectExported.value = true;
+}
+
+function syncStoredCreditBalance(creditBalance) {
+  if (creditBalance === undefined || creditBalance === null) return;
+
+  const userInfo = getStoredUserInfo();
+  const nextUserInfo = { ...userInfo, creditBalance };
+
+  for (const key of ['user', 'profile', 'sysUser']) {
+    if (userInfo[key] && typeof userInfo[key] === 'object') {
+      nextUserInfo[key] = { ...userInfo[key], creditBalance };
+    }
+  }
+
+  localStorage.setItem('userInfo', JSON.stringify(nextUserInfo));
+  userInfoRevision.value += 1;
+}
+
+async function ensureProjectExportRecorded(exportPath) {
+  const projectId = activeBackendProjectId.value;
+  if (!projectId) {
+    systemMessage.error('工程 ID 不存在，无法导出');
+    return false;
+  }
+
+  if (activeProjectExported.value) {
+    return true;
+  }
+
+  const response = await recordProjectExport({
+    exportPath,
+    projectId: normalizeBackendId(projectId),
+  });
+
+  if (response?.code !== undefined && Number(response.code) !== 0) {
+    throw new Error(response?.msg || '导出记录失败');
+  }
+
+  const payload = getResponsePayload(response) || {};
+
+  if (Number(payload.result) !== 0) {
+    systemMessage.error(payload.resultDesc || response?.msg || '无法导出');
+    return false;
+  }
+
+  syncStoredCreditBalance(payload.creditBalance);
+  markProjectExportRecorded();
+  return true;
+}
+
 async function showExportConfirmation() {
   console.log('[export] export button clicked');
   if (exportRunning.value) return;
@@ -1997,6 +2446,24 @@ async function showExportConfirmation() {
     return;
   }
 
+  if (hasDefaultTemplateVideos()) {
+    defaultTemplateExportConfirmVisible.value = true;
+    return;
+  }
+
+  await selectExportDirectory();
+}
+
+function cancelDefaultTemplateExport() {
+  defaultTemplateExportConfirmVisible.value = false;
+}
+
+async function confirmDefaultTemplateExport() {
+  defaultTemplateExportConfirmVisible.value = false;
+  await selectExportDirectory();
+}
+
+async function selectExportDirectory() {
   if (exportInterval) clearInterval(exportInterval);
   resetExportProgress();
 
@@ -2090,14 +2557,23 @@ async function startExportProgress() {
   console.log('[export] confirm export clicked');
   if (exportRunning.value) return;
 
-  exportState.value = 'progress';
-  resetExportProgress();
   exportRunning.value = true;
 
   const exportId = `composer-export-${Date.now()}`;
   let unlistenProgress = null;
 
   try {
+    console.log('[export] recording project export before compose');
+    const exportAllowed = await ensureProjectExportRecorded(
+      exportSelectedDir.value,
+    );
+    if (!exportAllowed) {
+      return;
+    }
+
+    exportState.value = 'progress';
+    resetExportProgress();
+
     console.log('[export] flushing timeline offset before compose');
     await flushSelectedVideoOffsetPersist();
 
@@ -2168,6 +2644,21 @@ function formatTimelineTick(value) {
   return formatPlayerTime(seconds);
 }
 
+function formatTimelineRulerTick(value) {
+  const majorStep = timelineRulerScale.value.majorStep;
+  const decimals =
+    majorStep >= 1 ? 0 : Math.min(3, Math.ceil(-Math.log10(majorStep)));
+  const seconds = Math.max(0, Number(value.toFixed(decimals)));
+
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = Number((seconds % 60).toFixed(decimals));
+  return `${minutes}:${String(remainingSeconds).padStart(2, '0')}`;
+}
+
 function updatePlayerControls() {
   const video = mainVideoRef.value;
   if (!video) return;
@@ -2179,6 +2670,9 @@ function updatePlayerControls() {
   playerCurrentTime.value = Number.isFinite(video.currentTime)
     ? Math.max(0, video.currentTime)
     : 0;
+  if (!timelinePreviewSeeking.value) {
+    timelinePlayheadTime.value = playerCurrentTime.value;
+  }
   playerTimeLabel.value = `${formatPlayerTime(video.currentTime)} / ${formatPlayerTime(duration)}`;
   playerPaused.value = video.paused;
   playerMuted.value = video.muted || video.volume === 0;
@@ -2188,6 +2682,7 @@ function updatePlayerControls() {
 function resetMainPlayer() {
   const video = mainVideoRef.value;
   if (!video) return;
+  timelinePreviewSeeking.value = false;
   video.pause();
   video.currentTime = 0;
   updatePlayerControls();
@@ -2196,6 +2691,7 @@ function resetMainPlayer() {
 function togglePlayerPlayback() {
   const video = mainVideoRef.value;
   if (!video) return;
+  timelinePreviewSeeking.value = false;
   if (video.paused) {
     video.play().catch(updatePlayerControls);
   } else {
@@ -2207,6 +2703,7 @@ function togglePlayerPlayback() {
 function seekPlayerBy(seconds) {
   const video = mainVideoRef.value;
   if (!video) return;
+  timelinePreviewSeeking.value = false;
   const duration = video.duration || 0;
   video.currentTime = Math.max(
     0,
@@ -2218,6 +2715,7 @@ function seekPlayerBy(seconds) {
 function seekPlayerTo(event) {
   const video = mainVideoRef.value;
   if (!video || !video.duration) return;
+  timelinePreviewSeeking.value = false;
   const rect = event.currentTarget.getBoundingClientRect();
   const ratio = (event.clientX - rect.left) / rect.width;
   video.currentTime = Math.max(
@@ -2367,6 +2865,18 @@ function resizePlayerToStage() {
   wrapper.style.height = `${targetWidth * (9 / 16)}px`;
 }
 
+function updateTimelineRulerWidth() {
+  const width = timelineRulerRef.value?.getBoundingClientRect().width;
+  if (Number.isFinite(width) && width > 0) {
+    timelineRulerWidth.value = width;
+  }
+
+  const trackWidth = timelineTrackRef.value?.clientWidth;
+  if (Number.isFinite(trackWidth) && trackWidth > 0) {
+    timelineTrackWidth.value = trackWidth;
+  }
+}
+
 function schedulePlayerResize() {
   if (playerResizeFrame) {
     cancelAnimationFrame(playerResizeFrame);
@@ -2374,13 +2884,17 @@ function schedulePlayerResize() {
 
   playerResizeFrame = requestAnimationFrame(() => {
     resizePlayerToStage();
+    updateTimelineRulerWidth();
     requestAnimationFrame(resizePlayerToStage);
   });
 
   if (playerResizeTimer) {
     window.clearTimeout(playerResizeTimer);
   }
-  playerResizeTimer = window.setTimeout(resizePlayerToStage, 340);
+  playerResizeTimer = window.setTimeout(() => {
+    resizePlayerToStage();
+    updateTimelineRulerWidth();
+  }, 340);
 }
 
 // 登录缓存、通用格式化和接口响应兼容工具。
@@ -2498,6 +3012,51 @@ function parseTemplateDemoPath(xmlContent) {
   }
 
   return getElementText(xmlContent, 'demo-path');
+}
+
+function parseTemplateSubtitleText(xmlContent) {
+  const xml = new DOMParser().parseFromString(xmlContent, 'text/xml');
+
+  if (!xml.querySelector('parsererror')) {
+    const subtitle = xml.querySelector('subtitle');
+    return (
+      subtitle?.querySelector('default')?.textContent?.trim() ||
+      subtitle?.getAttribute('text') ||
+      ''
+    );
+  }
+
+  const subtitleBody = getElementText(xmlContent, 'subtitle');
+  return getElementText(subtitleBody, 'default');
+}
+
+function parseProjectMaxOffsets(projectFileXml) {
+  const maxOffsets = new Map();
+  const recordOffset = (assetId, offsetValue) => {
+    const offset = Number(offsetValue);
+    if (!assetId || !Number.isFinite(offset)) return;
+    maxOffsets.set(assetId, Math.max(maxOffsets.get(assetId) || 0, offset));
+  };
+  const xml = new DOMParser().parseFromString(projectFileXml, 'text/xml');
+
+  if (!xml.querySelector('parsererror')) {
+    xml.querySelectorAll('area').forEach((area) => {
+      recordOffset(
+        area.getAttribute('asset-id') || '',
+        area.getAttribute('offset') || 0,
+      );
+    });
+    return maxOffsets;
+  }
+
+  for (const match of projectFileXml.matchAll(/<area\b([^>]*)\/?>/gi)) {
+    recordOffset(
+      getAttributeValue(match[1] || '', 'asset-id'),
+      getAttributeValue(match[1] || '', 'offset'),
+    );
+  }
+
+  return maxOffsets;
 }
 
 function parseTemplateSegments(xmlContent) {
@@ -2994,15 +3553,16 @@ onBeforeUnmount(() => {
   if (playerResizeFrame) {
     cancelAnimationFrame(playerResizeFrame);
   }
-  if (timelineSeekFrame) {
-    cancelAnimationFrame(timelineSeekFrame);
-  }
   if (playerResizeTimer) {
     window.clearTimeout(playerResizeTimer);
   }
   if (offsetPersistTimer) {
     window.clearTimeout(offsetPersistTimer);
   }
+  if (projectUpdateTimer) {
+    window.clearTimeout(projectUpdateTimer);
+  }
+  pendingProjectUpdate = null;
   playerResizeObserver?.disconnect();
   importedVideoObjectUrls.forEach((objectUrl) => {
     URL.revokeObjectURL(objectUrl);
@@ -3056,7 +3616,7 @@ onBeforeUnmount(() => {
         <div class="flex-1"></div>
         <button
           class="h-9 w-24 text-on-surface-variant hover:text-electric-blue shrink-0 flex items-center justify-center gap-1.5 bg-surface-container-low/50 shadow-sm rounded-lg transition-all active:scale-95 hover:bg-surface-container-high border border-outline-variant/20"
-          @click="toggleDraftLibrary"
+          @click="showDraftLibrary"
         >
           <span class="text-[13px] font-bold whitespace-nowrap">工程库</span>
         </button>
@@ -3217,7 +3777,7 @@ onBeforeUnmount(() => {
               <button
                 v-if="
                   currentViewState === 'segments' ||
-                  currentViewState === 'import'
+                  (currentViewState === 'import' && !editingFromDraftLibrary)
                 "
                 class="flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-electric-blue text-[12px] text-white font-bold shrink-0 hover:brightness-110 active:scale-95 transition-all"
                 @click="handleSidebarBack"
@@ -3244,7 +3804,9 @@ onBeforeUnmount(() => {
                 模板加载中...
               </div>
               <div
-                v-else-if="!selectedTemplateThemeName && !hasTemplateSearchKeyword"
+                v-else-if="
+                  !selectedTemplateThemeName && !hasTemplateSearchKeyword
+                "
                 class="px-2 py-6 text-center text-[12px] text-on-surface-variant/70"
               >
                 请选择模板主题
@@ -3666,13 +4228,38 @@ onBeforeUnmount(() => {
                     {{ selectedStyleName }}
                   </div>
                   <div class="timeline-overview">
-                    <div class="timeline-ruler" aria-label="时间刻度">
-                      <div class="timeline-ruler-major"></div>
-                      <div class="timeline-ruler-labels">
-                        <span v-for="tick in timelineRulerTicks" :key="tick">{{
-                          formatTimelineTick(tick)
-                        }}</span>
-                      </div>
+                    <div
+                      ref="timelineRulerRef"
+                      class="timeline-ruler"
+                      aria-label="时间刻度"
+                    >
+                      <span
+                        v-for="tick in timelineRulerMinorTicks"
+                        :key="`minor-${tick.value}`"
+                        class="timeline-ruler-tick is-minor"
+                        :style="{ left: tick.left }"
+                      ></span>
+                      <span
+                        v-for="tick in timelineRulerMajorTicks"
+                        :key="`major-${tick.value}`"
+                        class="timeline-ruler-tick is-major"
+                        :style="{ left: tick.left }"
+                      ></span>
+                      <span
+                        v-for="tick in timelineRulerMajorTicks"
+                        :key="`label-${tick.value}`"
+                        class="timeline-ruler-label"
+                        :class="{
+                          'is-start': tick.value === 0,
+                          'is-end':
+                            Math.abs(
+                              tick.value - timelineRulerScale.totalDuration,
+                            ) < 0.0001,
+                        }"
+                        :style="{ left: tick.left }"
+                      >
+                        {{ formatTimelineRulerTick(tick.value) }}
+                      </span>
                     </div>
                     <button
                       class="timeline-playhead"
@@ -3691,9 +4278,7 @@ onBeforeUnmount(() => {
                           class="duration-selection bg-electric-blue/20 border-2 border-electric-blue rounded-md flex items-center px-3 shadow-[0_0_15px_rgba(74,142,255,0.25)]"
                           :class="{ 'is-dragging': timelineDragging }"
                           :style="{
-                            left: timelineLeftPercent,
-                            width: timelineWidthPercent,
-                            transform: `translateY(-50%) scale(${timelinePulse && !timelineDragging ? 1.02 : 1})`,
+                            ...timelineSelectionStyle,
                             boxShadow:
                               timelinePulse && !timelineDragging
                                 ? '0 0 20px rgba(74,142,255,0.45)'
@@ -4366,6 +4951,49 @@ onBeforeUnmount(() => {
           </div>
 
           <div
+            class="fixed inset-0 z-[410] flex items-center justify-center"
+            :class="{ hidden: !defaultTemplateExportConfirmVisible }"
+          >
+            <div class="absolute inset-0 bg-black/60 backdrop-blur-2xl"></div>
+            <div
+              class="relative w-full max-w-sm bg-surface-container-highest rounded-2xl p-8 border border-white/10 shadow-2xl modal-pop-in"
+            >
+              <div class="flex flex-col items-center text-center space-y-6">
+                <div
+                  class="w-16 h-16 bg-electric-blue/10 rounded-full flex items-center justify-center"
+                >
+                  <span
+                    class="material-symbols-outlined text-electric-blue text-3xl"
+                    >warning</span
+                  >
+                </div>
+                <div>
+                  <h3 class="text-xl font-black text-white mb-2">确认导出</h3>
+                  <p class="text-on-surface-variant text-sm">
+                    当前工程存在未替换的默认模板视频，是否导出？
+                  </p>
+                </div>
+                <div class="flex w-full gap-3">
+                  <button
+                    class="flex-1 py-3 bg-transparent text-on-surface-variant font-bold rounded-xl hover:text-white transition-colors"
+                    type="button"
+                    @click="cancelDefaultTemplateExport"
+                  >
+                    取消
+                  </button>
+                  <button
+                    class="flex-1 py-3 bg-electric-blue text-white font-bold rounded-xl hover:brightness-110 transition-all active:scale-95 shadow-lg shadow-electric-blue/20"
+                    type="button"
+                    @click="confirmDefaultTemplateExport"
+                  >
+                    确定
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div
             class="fixed inset-0 z-[400] flex items-center justify-center"
             :class="{ hidden: !exportModalVisible }"
           >
@@ -4387,9 +5015,14 @@ onBeforeUnmount(() => {
                   <h3 class="text-xl font-black text-white mb-2">
                     确认导出工程
                   </h3>
-                  <p class="text-on-surface-variant text-sm">
+                  <p
+                    v-if="!activeProjectExported"
+                    class="text-on-surface-variant text-sm"
+                  >
                     本次导出将扣除
-                    <span class="text-electric-blue font-bold">10 积分</span>
+                    <span class="text-electric-blue font-bold">
+                      {{ activeTemplateExportCredit }} 积分
+                    </span>
                   </p>
                   <p
                     class="mt-2 text-[11px] text-on-surface-variant/70 break-all"
@@ -4492,7 +5125,7 @@ onBeforeUnmount(() => {
         <div class="flex items-center gap-4">
           <button
             class="flex items-center gap-2 text-on-surface-variant hover:text-electric-blue bg-surface-container-lowest px-3 py-1.5 rounded-lg border border-white/5 transition-all"
-            @click="toggleDraftLibrary"
+            @click="hideDraftLibrary"
           >
             <span class="material-symbols-outlined text-[20px]">arrow_back</span
             ><span class="text-[12px] font-bold">返回</span>
@@ -4553,6 +5186,11 @@ onBeforeUnmount(() => {
             v-for="project in visibleDraftProjects"
             :key="project.id"
             class="draft-project-card group relative aspect-[16/9] bg-surface-container-high rounded-xl overflow-hidden border border-white/5 hover:border-electric-blue/60 transition-all cursor-pointer shadow-lg hover:shadow-electric-blue/10"
+            @click="
+              draftBatchDeleteMode
+                ? toggleDraftProjectSelection(project)
+                : openDraftProject(project.id)
+            "
           >
             <label
               v-if="draftBatchDeleteMode && getDraftProjectDeleteId(project)"
@@ -4584,27 +5222,24 @@ onBeforeUnmount(() => {
               alt="draft preview"
               class="w-full h-full object-cover opacity-70 group-hover:scale-105 transition-transform duration-500 cursor-pointer"
               :src="project.image"
-              @click="
-                draftBatchDeleteMode
-                  ? toggleDraftProjectSelection(project)
-                  : openDraftProject(project.id)
-              "
             />
             <div
               class="absolute inset-0 flex flex-col justify-end p-4 pointer-events-none"
             >
               <input
-                v-if="editingDraftId === project.id"
+                v-if="!draftBatchDeleteMode && editingDraftId === project.id"
+                :ref="(element) => setDraftTitleInputRef(project.id, element)"
                 v-model="draftEditTitle"
-                class="pointer-events-auto max-w-[180px] rounded bg-surface-container-lowest/80 border border-electric-blue/60 px-1.5 py-0.5 text-[12px] font-bold text-white outline-none"
+                class="pointer-events-auto max-w-[180px] rounded bg-surface-container-lowest/80 border border-electric-blue/60 px-1.5 py-0.5 text-[12px] font-bold text-white outline-none disabled:opacity-60"
+                :disabled="Boolean(draftRenamingId)"
                 aria-label="编辑工程名称"
                 @click.stop
                 @keydown.enter.prevent="saveDraftTitle(project)"
-                @keydown.esc.prevent="editingDraftId = ''"
-                @blur="saveDraftTitle(project)"
+                @keydown.esc.prevent="resetDraftTitleEdit"
+                @blur="resetDraftTitleEdit"
               />
               <button
-                v-else
+                v-else-if="!draftBatchDeleteMode"
                 class="draft-title-btn pointer-events-auto text-left text-[14px] font-black text-white truncate hover:text-electric-blue transition-colors"
                 type="button"
                 title="点击编辑工程名称"
@@ -4612,6 +5247,12 @@ onBeforeUnmount(() => {
               >
                 {{ project.title }}
               </button>
+              <div
+                v-else
+                class="text-left text-[14px] font-black text-white truncate"
+              >
+                {{ project.title }}
+              </div>
               <div class="text-[10px] text-white/60">
                 {{ statusMeta(project.status).detail }} ·
                 {{ project.duration }} · {{ project.time }}
@@ -4976,46 +5617,42 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
-.timeline-ruler::before {
-  content: '';
+.timeline-ruler-tick {
   position: absolute;
-  inset: 0 0 auto;
-  height: 8px;
-  background: repeating-linear-gradient(
-    to right,
-    rgba(217, 226, 255, 0.28) 0,
-    rgba(217, 226, 255, 0.28) 1px,
-    transparent 1px,
-    transparent 2%
-  );
+  top: 0;
+  width: 1px;
+  background: rgba(217, 226, 255, 0.3);
   pointer-events: none;
 }
 
-.timeline-ruler-labels {
+.timeline-ruler-tick.is-minor {
+  height: 8px;
+}
+
+.timeline-ruler-tick.is-major {
+  height: 15px;
+  background: rgba(217, 226, 255, 0.62);
+}
+
+.timeline-ruler-label {
   position: absolute;
-  inset: 0 10px;
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  padding-top: 5px;
+  top: 16px;
+  transform: translateX(-50%);
   color: rgba(217, 226, 255, 0.72);
   font-family: 'JetBrains Mono', monospace;
   font-size: 10px;
   font-weight: 700;
+  line-height: 12px;
+  white-space: nowrap;
   pointer-events: none;
 }
 
-.timeline-ruler-major {
-  position: absolute;
-  inset: 0;
-  background: repeating-linear-gradient(
-    to right,
-    rgba(217, 226, 255, 0.55) 0,
-    rgba(217, 226, 255, 0.55) 1px,
-    transparent 1px,
-    transparent 20%
-  );
-  pointer-events: none;
+.timeline-ruler-label.is-start {
+  transform: none;
+}
+
+.timeline-ruler-label.is-end {
+  transform: translateX(-100%);
 }
 
 .finished-playback-controls {
