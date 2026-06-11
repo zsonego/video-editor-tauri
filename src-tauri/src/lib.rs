@@ -1776,6 +1776,7 @@ fn download_bytes(
     app: &AppHandle,
     download_id: &str,
     url: &str,
+    authorization_token: &str,
     cancel_flag: &AtomicBool,
     start_progress: u8,
     end_progress: u8,
@@ -1784,7 +1785,12 @@ fn download_bytes(
     ensure_not_cancelled(cancel_flag)?;
     emit_progress(app, download_id, start_progress, status);
 
-    let mut response = reqwest::blocking::get(url).map_err(|error| error.to_string())?;
+    let client = reqwest::blocking::Client::new();
+    let mut request = client.get(url);
+    if !authorization_token.trim().is_empty() {
+        request = request.bearer_auth(authorization_token.trim());
+    }
+    let mut response = request.send().map_err(|error| error.to_string())?;
     let response_status = response.status();
 
     if !response_status.is_success() {
@@ -1906,6 +1912,7 @@ fn prepare_template_assets_blocking(
     template_file_url: String,
     material_package_url: String,
     api_base_url: String,
+    authorization_token: String,
     download_id: String,
     cancel_flag: Arc<AtomicBool>,
 ) -> Result<PreparedTemplate, String> {
@@ -1947,6 +1954,7 @@ fn prepare_template_assets_blocking(
                 &app,
                 &download_id,
                 &template_url,
+                &authorization_token,
                 &cancel_flag,
                 5,
                 20,
@@ -1972,6 +1980,7 @@ fn prepare_template_assets_blocking(
                 &app,
                 &download_id,
                 &package_url,
+                &authorization_token,
                 &cancel_flag,
                 25,
                 80,
@@ -2032,6 +2041,7 @@ async fn prepare_template_assets(
     template_file_url: String,
     material_package_url: String,
     api_base_url: String,
+    authorization_token: String,
     download_id: String,
 ) -> Result<PreparedTemplate, String> {
     let cancel_flag = register_download_task(&download_id)?;
@@ -2045,6 +2055,7 @@ async fn prepare_template_assets(
             template_file_url,
             material_package_url,
             api_base_url,
+            authorization_token,
             download_id,
             cancel_flag,
         )

@@ -19,3 +19,14 @@ export function favoriteTemplate(data = {}) {
 export function getFavoriteTemplates(data = {}) {
   return request("/api/template/favorite/list", { data });
 }
+
+export function downloadTemplateCover(templateId) {
+  return request("/aicut/file/download", {
+    method: "GET",
+    data: {
+      bucket: "template",
+      path: `${templateId}/cover.png`,
+    },
+    responseType: "blob",
+  });
+}

@@ -21,6 +21,7 @@ import {
   updateProject,
 } from '../api/project';
 import {
+  downloadTemplateCover,
   favoriteTemplate,
   getFavoriteTemplates,
   getTemplateCategories,
@@ -29,14 +30,13 @@ import {
 } from '../api/template';
 import { logoutUser, resetPassword } from '../api/user';
 import { systemMessage } from '../utils/message';
+import hotImage from '../assets/hot.png';
 import logoImage from '../assets/logo.png';
 
 // 页面对外事件与远程/本地资源配置。
 const emit = defineEmits(['logout']);
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
-const TEMPLATE_DOWNLOAD_BASE_URL =
-  import.meta.env.VITE_TEMPLATE_DOWNLOAD_BASE_URL || API_BASE_URL;
 
 // 模板列表、收藏列表及请求状态。
 const categories = ref([]);
@@ -51,6 +51,8 @@ const favoritesLoading = ref(false);
 let templateRequestId = 0;
 let recommendationRequestId = 0;
 let templateSearchTimer = null;
+const templateCoverUrls = new Map();
+const templateCoverRequests = new Map();
 
 // 工作区导航、弹窗和当前模板状态。
 const activeCategory = ref(-1);
@@ -566,14 +568,17 @@ async function openTemplatePreview(topic) {
 
   try {
     const detailResponse = await getTemplateDetail({ templateId });
-    const detail = getResponsePayload(detailResponse) || {};
-    const templateFileUrl = detail.xmlPath || detail.templateFileUrl;
-    const materialPackageUrl = detail.assetsPath || detail.materialPackageUrl;
-    const templateVersion = String(detail.version ?? '');
-
-    if (!templateFileUrl || !materialPackageUrl) {
-      throw new Error('模板详情缺少下载地址');
+    if (
+      detailResponse?.code !== undefined &&
+      Number(detailResponse.code) !== 0
+    ) {
+      throw new Error(detailResponse?.msg || '模板详情查询失败');
     }
+    const detail = getResponsePayload(detailResponse) || {};
+    const templateVersion = String(detail.version ?? '');
+    const encodedTemplateId = encodeURIComponent(localTemplateId);
+    const templateFileUrl = `/aicut/file/download?bucket=template&path=${encodedTemplateId}/template.xml`;
+    const materialPackageUrl = `/aicut/file/download?bucket=template&path=${encodedTemplateId}/assets.zip`;
 
     const cachedInfo = await invoke('get_cached_template_assets', {
       templateId: localTemplateId,
@@ -613,7 +618,8 @@ async function openTemplatePreview(topic) {
       templateVersion,
       templateFileUrl,
       materialPackageUrl,
-      apiBaseUrl: TEMPLATE_DOWNLOAD_BASE_URL,
+      apiBaseUrl: API_BASE_URL,
+      authorizationToken: localStorage.getItem('token') || '',
       downloadId,
     });
     if (canceledTemplateDownloadIds.has(downloadId)) {
@@ -801,11 +807,13 @@ async function loadFavoriteTemplates() {
       renter_id: getStoredTenantId(),
       userId: getStoredUserId(),
     });
-    const templates = getResponseList(response).map((template, index) => ({
-      ...mapTemplateTopic(template, index),
-      favorite: 1,
-      favorited: true,
-    }));
+    const templates = await attachTemplateCovers(
+      getResponseList(response).map((template, index) => ({
+        ...mapTemplateTopic(template, index),
+        favorite: 1,
+        favorited: true,
+      })),
+    );
 
     favoriteTemplates.value = templates;
     syncTemplateFavoriteStates(templates);
@@ -3178,6 +3186,41 @@ function parseTemplateSegmentsFromText(xmlContent) {
   });
 }
 
+async function getTemplateCoverUrl(templateId) {
+  const key = String(templateId || '').trim();
+  if (!key) return '';
+  if (templateCoverUrls.has(key)) return templateCoverUrls.get(key);
+  if (templateCoverRequests.has(key)) return templateCoverRequests.get(key);
+
+  const request = downloadTemplateCover(key)
+    .then((blob) => {
+      if (!(blob instanceof Blob) || blob.size === 0) return '';
+
+      const objectUrl = URL.createObjectURL(blob);
+      templateCoverUrls.set(key, objectUrl);
+      return objectUrl;
+    })
+    .catch((error) => {
+      console.error(`[template] cover download failed: ${key}`, error);
+      return '';
+    })
+    .finally(() => {
+      templateCoverRequests.delete(key);
+    });
+
+  templateCoverRequests.set(key, request);
+  return request;
+}
+
+async function attachTemplateCovers(items) {
+  return Promise.all(
+    items.map(async (item) => ({
+      ...item,
+      image: await getTemplateCoverUrl(item.templateId),
+    })),
+  );
+}
+
 // 将后端模板和工程数据转换为页面统一展示模型。
 function mapTemplateTopic(template, index) {
   const clipCount =
@@ -3204,7 +3247,7 @@ function mapTemplateTopic(template, index) {
     material: clipCount,
     duration,
     meta: `${materialTypeCount}类 · ${clipCount}个素材 · ${duration}`,
-    image: template.coverPic || template.thumbnailUrl || template.image || '',
+    image: '',
   };
 }
 
@@ -3230,7 +3273,7 @@ function mapProject(project, index) {
     status,
     duration: project.duration || '--:--',
     time: statusLabel,
-    image: project.coverPic || project.thumbnailUrl || project.image || '',
+    image: '',
   };
 }
 
@@ -3284,7 +3327,9 @@ async function fetchTemplateTopics(categoryId = '', keyword = '') {
   };
 
   const response = await getTemplates(payload);
-  const topics = getResponseList(response).map(mapTemplateTopic);
+  const topics = await attachTemplateCovers(
+    getResponseList(response).map(mapTemplateTopic),
+  );
   syncTemplateFavoriteStates(topics);
 
   return topics;
@@ -3345,7 +3390,7 @@ async function loadMyProjects() {
     });
     const list = getResponseList(response);
 
-    draftProjects.value = list.map(mapProject);
+    draftProjects.value = await attachTemplateCovers(list.map(mapProject));
   } catch (error) {
     systemMessage.error(error?.message || '工程库加载失败');
   }
@@ -3568,6 +3613,11 @@ onBeforeUnmount(() => {
     URL.revokeObjectURL(objectUrl);
   });
   importedVideoObjectUrls.clear();
+  templateCoverUrls.forEach((objectUrl) => {
+    URL.revokeObjectURL(objectUrl);
+  });
+  templateCoverUrls.clear();
+  templateCoverRequests.clear();
 });
 </script>
 
@@ -4022,7 +4072,7 @@ onBeforeUnmount(() => {
               </div>
               <div
                 v-else
-                class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6"
+                class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 recommendationWrapper"
               >
                 <div
                   v-for="card in recommendationCards"
@@ -4058,6 +4108,12 @@ onBeforeUnmount(() => {
                       }}</span
                     >
                   </button>
+                  <img
+                    v-if="Number(card.score || 0) !== 0"
+                    alt="热门推荐"
+                    class="pointer-events-none absolute top-12 right-2 z-20 h-8 w-8 object-contain"
+                    :src="hotImage"
+                  />
                   <img
                     v-if="card.image"
                     :alt="card.title"

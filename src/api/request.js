@@ -32,7 +32,13 @@ function withAuthHeader(headers = {}) {
 }
 
 export async function request(path, options = {}) {
-  const { method = 'POST', data, headers = {}, signal } = options;
+  const {
+    method = 'POST',
+    data,
+    headers = {},
+    signal,
+    responseType = 'json',
+  } = options;
   const normalizedMethod = method.toUpperCase();
 
   try {
@@ -43,6 +49,7 @@ export async function request(path, options = {}) {
       params: normalizedMethod === 'GET' ? data : undefined,
       headers: withAuthHeader(headers),
       signal,
+      responseType,
     });
 
     return response.data;
