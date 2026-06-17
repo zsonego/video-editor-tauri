@@ -28,8 +28,9 @@ import {
   getTemplateDetail,
   getTemplates,
 } from '../api/template';
-import { logoutUser, resetPassword } from '../api/user';
+import { getUserInfo, logoutUser, resetPassword } from '../api/user';
 import { systemMessage } from '../utils/message';
+import dingAudio from '../assets/ding.mp3';
 import hotImage from '../assets/hot.png';
 import logoImage from '../assets/logo.png';
 
@@ -71,6 +72,7 @@ const activeHelpTab = ref('guide');
 const logoutConfirmVisible = ref(false);
 const logoutSubmitting = ref(false);
 const passwordSubmitting = ref(false);
+const profileRefreshing = ref(false);
 const templateDetailLoading = ref(false);
 const startEditingLoading = ref(false);
 const templateDownloadVisible = ref(false);
@@ -2381,6 +2383,13 @@ function resetExportProgress() {
   exportOutputPath.value = '';
 }
 
+function playExportFinishedSound() {
+  const audio = new Audio(dingAudio);
+  audio.play().catch((error) => {
+    console.warn('[export] failed to play finish sound:', error);
+  });
+}
+
 function markProjectExportRecorded() {
   activeProjectExported.value = true;
 }
@@ -2615,6 +2624,7 @@ async function startExportProgress() {
     exportStatus.value = '导出完成！';
     exportOutputPath.value = result?.outputPath || '';
     console.log('[export] compose success:', result);
+    playExportFinishedSound();
     systemMessage.success('视频导出完成');
   } catch (error) {
     exportStatus.value = '导出失败';
@@ -2917,6 +2927,72 @@ function getStoredUserInfo() {
 function getStoredUserProfile() {
   const userInfo = getStoredUserInfo();
   return userInfo.user || userInfo.profile || userInfo.sysUser || userInfo;
+}
+
+function normalizeUserInfoPayload(response) {
+  const payload = getResponsePayload(response) || {};
+  const user =
+    payload.user ||
+    payload.profile ||
+    payload.sysUser ||
+    response?.user ||
+    payload ||
+    {};
+
+  return {
+    ...user,
+    userId: user.userId || payload.userId || '',
+    tenantId: user.tenantId || user.renterId || payload.tenantId || payload.renterId || '',
+    renterId: user.renterId || user.tenantId || payload.renterId || payload.tenantId || '',
+    phone: user.phone || user.phonenumber || payload.phone || '',
+    roles: response?.roles || payload.roles || [],
+    permissions: response?.permissions || payload.permissions || [],
+  };
+}
+
+function syncStoredUserInfo(nextProfile) {
+  if (!nextProfile || typeof nextProfile !== 'object') return;
+
+  const currentUserInfo = getStoredUserInfo();
+  const mergedUserInfo = {
+    ...currentUserInfo,
+    ...nextProfile,
+    userId: nextProfile.userId || currentUserInfo.userId || '',
+    tenantId: nextProfile.tenantId || currentUserInfo.tenantId || '',
+    renterId: nextProfile.renterId || currentUserInfo.renterId || '',
+    tenantName: nextProfile.tenantName || currentUserInfo.tenantName || '',
+    renterName: nextProfile.renterName || currentUserInfo.renterName || '',
+  };
+
+  for (const key of ['user', 'profile', 'sysUser']) {
+    if (currentUserInfo[key] && typeof currentUserInfo[key] === 'object') {
+      mergedUserInfo[key] = {
+        ...currentUserInfo[key],
+        ...nextProfile,
+      };
+    }
+  }
+
+  localStorage.setItem('userInfo', JSON.stringify(mergedUserInfo));
+  userInfoRevision.value += 1;
+}
+
+async function refreshUserInfo() {
+  if (profileRefreshing.value) return;
+
+  profileRefreshing.value = true;
+  try {
+    const response = await getUserInfo();
+    if (response?.code !== undefined && Number(response.code) !== 0) {
+      throw new Error(response?.msg || '用户信息查询失败');
+    }
+
+    syncStoredUserInfo(normalizeUserInfoPayload(response));
+  } catch (error) {
+    systemMessage.error(error?.message || '用户信息刷新失败');
+  } finally {
+    profileRefreshing.value = false;
+  }
 }
 
 function formatAccountBalance(value) {
@@ -3408,6 +3484,7 @@ function closeAccountMenu() {
 function showProfileModal() {
   profileModalVisible.value = true;
   closeAccountMenu();
+  refreshUserInfo();
 }
 
 function hideProfileModal() {
