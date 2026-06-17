@@ -1,5 +1,5 @@
 [package]
-name = "video-editor-tauri"
+name = "aicut"
 version = "0.1.0"
 description = "A Tauri App"
 authors = ["you"]

@@ -100,16 +100,25 @@ function buildLoginPayload(phone, loginPassword, terminalUuid, renterId = '') {
 }
 
 function getUserInfoPayload(response) {
-  const responseData = response?.data && typeof response.data === 'object'
-    ? response.data
-    : {};
+  const responseData =
+    response?.data && typeof response.data === 'object' ? response.data : {};
   const user = response?.user || responseData.user || responseData || {};
 
   return {
     ...user,
     userId: user.userId || responseData.userId || '',
-    tenantId: user.tenantId || user.renterId || responseData.tenantId || responseData.renterId || '',
-    renterId: user.renterId || user.tenantId || responseData.renterId || responseData.tenantId || '',
+    tenantId:
+      user.tenantId ||
+      user.renterId ||
+      responseData.tenantId ||
+      responseData.renterId ||
+      '',
+    renterId:
+      user.renterId ||
+      user.tenantId ||
+      responseData.renterId ||
+      responseData.tenantId ||
+      '',
     phone: user.phone || user.phonenumber || responseData.phone || '',
     roles: response?.roles || responseData.roles || [],
     permissions: response?.permissions || responseData.permissions || [],
@@ -118,6 +127,13 @@ function getUserInfoPayload(response) {
 
 function saveLoginToken(token) {
   localStorage.setItem('token', token);
+}
+
+function buildUserInfoPayload(identity) {
+  return {
+    renterId: identity?.renterId || identity?.tenantId || '',
+    userId: identity?.userId || '',
+  };
 }
 
 function saveUserInfo(userInfo, identity) {
@@ -202,7 +218,8 @@ async function submitLogin(extra = {}) {
   submitting.value = true;
 
   try {
-    const currentTerminalUuid = terminalUuid.value || (await ensureTerminalUuid());
+    const currentTerminalUuid =
+      terminalUuid.value || (await ensureTerminalUuid());
     const payload = buildLoginPayload(
       phone,
       loginPassword,
@@ -230,7 +247,7 @@ async function submitLogin(extra = {}) {
       }
 
       saveLoginToken(token);
-      const userInfoResponse = await getUserInfo();
+      const userInfoResponse = await getUserInfo(buildUserInfoPayload(identity));
       const userInfo = getUserInfoPayload(userInfoResponse);
 
       if (!userInfo.userId || !(userInfo.tenantId || userInfo.renterId)) {
@@ -299,7 +316,7 @@ function confirmTenantSelection() {
 }
 
 onMounted(() => {
-  document.title = '登录 - 鉴音';
+  document.title = '登录 - 艾咔';
   ensureTerminalUuid();
 });
 </script>
@@ -317,49 +334,54 @@ onMounted(() => {
     <div class="login-background-shade"></div>
     <main class="login-container">
       <div class="intro-panel">
-        <img :src="logoImage" alt="鉴音" class="app-logo" />
+        <img :src="logoImage" alt="艾咔" class="app-logo" />
         <div class="brand-copy">
           <h1>艾咔·专业版</h1>
           <p>释放无限创意，成就专业视界。专为高级视频创作者打造的精密工具。</p>
         </div>
 
         <div class="feature-list">
-        <div class="feature-item">
-          <div class="feature-icon">
-            <span class="icon-text">4K</span>
+          <div class="feature-item">
+            <div class="feature-icon">
+              <span class="icon-text">4K</span>
+            </div>
+            <span
+              >走向工业化标准的视频编辑器、零编辑经验也能秒出专业级大片</span
+            >
           </div>
-          <span>走向工业化标准的视频编辑器、零编辑经验也能秒出专业级大片</span>
-        </div>
 
-        <div class="feature-item">
-          <div class="feature-icon">
-            <svg class="feature-svg" viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M12 3 3 8l9 5 9-5-9-5Z" />
-              <path d="m5 12 7 4 7-4" />
-              <path d="m5 16 7 4 7-4" />
-            </svg>
+          <div class="feature-item">
+            <div class="feature-icon">
+              <svg class="feature-svg" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 3 3 8l9 5 9-5-9-5Z" />
+                <path d="m5 12 7 4 7-4" />
+                <path d="m5 16 7 4 7-4" />
+              </svg>
+            </div>
+            <span>模板化工作流 + 智能自动化</span>
           </div>
-          <span>模板化工作流 + 智能自动化</span>
-        </div>
 
-        <div class="feature-item">
-          <div class="feature-icon">
-            <svg class="feature-svg" viewBox="0 0 24 24" aria-hidden="true">
-              <path
-                d="M17.5 18H8a5 5 0 1 1 1-9.9 6 6 0 0 1 11.2 3A3.5 3.5 0 0 1 17.5 18Z"
-              />
-              <path d="m14 14 2 2 2-2" />
-              <path d="M16 12v4" />
-            </svg>
+          <div class="feature-item">
+            <div class="feature-icon">
+              <svg class="feature-svg" viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  d="M17.5 18H8a5 5 0 1 1 1-9.9 6 6 0 0 1 11.2 3A3.5 3.5 0 0 1 17.5 18Z"
+                />
+                <path d="m14 14 2 2 2-2" />
+                <path d="M16 12v4" />
+              </svg>
+            </div>
+            <span>专为“快剪场景”打造的傻瓜型视频编辑器</span>
           </div>
-          <span>专为“快剪场景”打造的傻瓜型视频编辑器</span>
-        </div>
         </div>
       </div>
 
       <div class="login-card-wrap">
         <img :src="logoImage" alt="AICUT" class="login-brand-logo" />
-        <div class="login-card" :style="{ backgroundImage: `url(${boxImage})` }">
+        <div
+          class="login-card"
+          :style="{ backgroundImage: `url(${boxImage})` }"
+        >
           <button
             type="button"
             class="back-button"
@@ -1164,7 +1186,11 @@ onMounted(() => {
   z-index: 1;
   pointer-events: none;
   background:
-    radial-gradient(circle at 75% 42%, rgba(23, 84, 128, 0.14), transparent 28%),
+    radial-gradient(
+      circle at 75% 42%,
+      rgba(23, 84, 128, 0.14),
+      transparent 28%
+    ),
     linear-gradient(90deg, rgba(0, 0, 0, 0.08), rgba(2, 7, 15, 0.18));
 }
 

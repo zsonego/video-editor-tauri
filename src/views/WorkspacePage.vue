@@ -2982,7 +2982,10 @@ async function refreshUserInfo() {
 
   profileRefreshing.value = true;
   try {
-    const response = await getUserInfo();
+    const response = await getUserInfo({
+      renterId: getStoredTenantId(),
+      userId: getStoredUserId(),
+    });
     if (response?.code !== undefined && Number(response.code) !== 0) {
       throw new Error(response?.msg || '用户信息查询失败');
     }
