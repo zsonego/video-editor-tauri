@@ -71,7 +71,7 @@
 
         <clips id="z7x1c4v8b2n5m9q0w3e6r" target-track="clips">
             <clip id="u4p7a0d3f6g9j2k5p8s1t" name="舞蹈片段">
-                <start>0</start> <!-- 片段开始时间（毫秒） -->
+                <starttime>0</starttime> <!-- 片段开始时间（毫秒） -->
                 <duration>1510</duration> <!-- 片段时长（毫秒） -->
                 <area id="e7r0t3y6u1i4o7p9a2s5d" asset-id="t8r1y4u7i0o3p6a9s2d5f">
                     <source>                        
@@ -90,7 +90,7 @@
                 <subtitle id="m9n2b4v6c8x1z3a5s7d0f2" text="" /> 
             </clip>
             <clip id="u4p7a0d3f6g9j2k5p8s2t" name="舞蹈片段">
-                <start>1511</start> <!-- 片段开始时间（毫秒） -->
+                <starttime>1511</starttime> <!-- 片段开始时间（毫秒） -->
                 <duration>2637</duration> <!-- 片段时长（毫秒） -->
                 <area id="e7r0t3y6u1i4o7p9a2s6d" asset-id="k2n5m8q1w4e7r0t3y6uai">
                     <source>                        
@@ -109,7 +109,7 @@
                 <subtitle id="m9n2b4v6c8x6yha5s7d0f2" text="" /> 
             </clip>
             <clip id="u4p7a0d3f6g9j2k5p8s3t" name="舞蹈片段">
-                <start>4146</start> <!-- 片段开始时间（毫秒） -->
+                <starttime>4146</starttime> <!-- 片段开始时间（毫秒） -->
                 <duration>3936</duration> <!-- 片段时长（毫秒） -->
                 <area id="e7r0t3y6u1i4o7p9a2s7d" asset-id="t8r1y4u7i0o3p6a9s2d6f">
                     <source>                        
@@ -142,7 +142,7 @@
                 <subtitle id="m9n2b4v6c8x1z3abh7d0f2" text="" /> 
             </clip>
             <clip id="v4c7x1z5a8s2d6f9g3j7k" name="舞蹈片段">
-                <start>8084</start> <!-- 片段开始时间（毫秒） -->
+                <starttime>8084</starttime> <!-- 片段开始时间（毫秒） -->
                 <duration>7674</duration> <!-- 片段时长（毫秒） -->
                 <area id="h2k5p8s1d4f7g0j3q6w9e" asset-id="k2n5m8q1w4e7r0t3y6u9i">
                     <source>                        
@@ -161,7 +161,7 @@
                 <subtitle id="m9n2b4v45gx1z3a5s7d0f2" text="" /> 
             </clip>
             <clip id="u4p7a0d3f6g9j2k5p8s4t" name="舞蹈片段">
-                <start>15758</start> <!-- 片段开始时间（毫秒） -->
+                <starttime>15758</starttime> <!-- 片段开始时间（毫秒） -->
                 <duration>3235</duration> <!-- 片段时长（毫秒） -->
                 <area id="e7r0t3y6u1i4o7p9a2s9d" asset-id="k2n5m8q1w4e7r0t3y6ubi">
                     <source>                        
@@ -196,7 +196,7 @@
 
 
             <clip id="v4c7x1z5a8s2d6f9g3j8k" name="舞蹈片段">
-                <start>18994</start> <!-- 片段开始时间（毫秒） -->
+                <starttime>18994</starttime> <!-- 片段开始时间（毫秒） -->
                 <duration>4286</duration> <!-- 片段时长（毫秒） -->
                 <area id="h2k5p8s1d4f7g0j3q6wae" asset-id="k2n5m8q1w4e7r0t3y6udi">
                     <source>                        
@@ -215,7 +215,7 @@
                 <subtitle id="m9n2b4v4rgx1z3a5s7d0f2" text="" /> 
             </clip>
             <clip id="v4c7x1z5a8s4thf9g3j8k" name="舞蹈片段">
-                <start>23280</start> <!-- 片段开始时间（毫秒） -->
+                <starttime>23280</starttime> <!-- 片段开始时间（毫秒） -->
                 <duration>13000</duration> <!-- 片段时长（毫秒） -->
                 <area id="h2k5p8s1d4f7nnj3q6wae" asset-id="k2n5m8q16yh7r0t3y6udi">
                     <source>                        
@@ -234,7 +234,7 @@
                 <subtitle id="m9n2b4v4rgx1z3a5s7d0f2" text="" /> 
             </clip>
             <clip id="v4c7x1z5a8s2d6y3g3j8k" name="舞蹈片段">
-                <start>36280</start> <!-- 片段开始时间（毫秒） -->
+                <starttime>36280</starttime> <!-- 片段开始时间（毫秒） -->
                 <duration>11210</duration> <!-- 片段时长（毫秒） -->
                 <area id="h2k5p8s1d4f766j3q6wae" asset-id="k2n5m8q1gh67r0t3y6udi">
                     <source>                        
@@ -255,7 +255,7 @@
 
 
             <clip id="v4c7x1z5a8s2d6f9g3j9k" name="舞蹈片段">
-                <start>47490</start> <!-- 片段开始时间（毫秒） -->
+                <starttime>47490</starttime> <!-- 片段开始时间（毫秒） -->
                 <duration>4603</duration> <!-- 片段时长（毫秒） -->
                 <area id="h2k5p8s1d4f7g0j3q6wbe" asset-id="i3o6p9a2s5d8f1g4j7q0w">
                     <source>                        
@@ -274,7 +274,7 @@
                 <subtitle id="m9n2b4v6c8x4rga5s7d0f2" text="" /> 
             </clip>
             <clip id="u4p7a0d3f6g9j2k5p8s5t" name="舞蹈片段">
-                <start>52094</start> <!-- 片段开始时间（毫秒） -->
+                <starttime>52094</starttime> <!-- 片段开始时间（毫秒） -->
                 <duration>3203</duration> <!-- 片段时长（毫秒） -->
                 <area id="e7r0t3y6u1i4o7p9a2scd" asset-id="y7u1i4o7p0a3s6d9f2g5j">
                     <source>                        
@@ -321,7 +321,7 @@
                 <subtitle id="m9n2b4v6c8x15yh5s7d0f2" text="" /> 
             </clip>
             <clip id="v4c7x1z5a8s2d6f9g3jak" name="舞蹈片段">
-                <start>55297</start> <!-- 片段开始时间（毫秒） -->
+                <starttime>55297</starttime> <!-- 片段开始时间（毫秒） -->
                 <duration>4703</duration> <!-- 片段时长（毫秒） -->
                 <area id="h2k5p8s1d4f7g0j3q6wce" asset-id="c4v7x0z3a6s9d2f5g8j1k">
                      <source>                        

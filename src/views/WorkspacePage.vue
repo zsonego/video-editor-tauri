@@ -1228,6 +1228,16 @@ function getAreaSourceDurationInfoFromElement(area) {
   };
 }
 
+function getDirectChildText(parent, tagNames) {
+  const names = Array.isArray(tagNames) ? tagNames : [tagNames];
+  const lowerNames = names.map((name) => String(name).toLowerCase());
+  const child = Array.from(parent.children).find((element) =>
+    lowerNames.includes(element.tagName.toLowerCase()),
+  );
+
+  return child?.textContent?.trim() || '';
+}
+
 function findTemplateAreaMatchesFromDom(xmlContent, assetId) {
   const xml = new DOMParser().parseFromString(xmlContent, 'text/xml');
   if (xml.querySelector('parsererror')) return null;
@@ -1237,12 +1247,16 @@ function findTemplateAreaMatchesFromDom(xmlContent, assetId) {
   for (const clipsElement of clips) {
     const clipElements = getDirectChildElements(clipsElement, 'clip');
     for (const clip of clipElements) {
+      const clipStarttime = getDirectChildText(clip, ['starttime', 'start']);
+      const clipDuration = getDirectChildText(clip, 'duration');
       const areas = getDirectChildElements(clip, 'area');
       for (const area of areas) {
         if (area.getAttribute('asset-id') === assetId) {
           matches.push({
             clipsId: clipsElement.getAttribute('id') || '',
             clipId: clip.getAttribute('id') || '',
+            clipStarttime,
+            clipDuration,
             areaId: area.getAttribute('id') || '',
             clipsAssetId: area.getAttribute('asset-id') || '',
             ...getAreaSourceDurationInfoFromElement(area),
@@ -1271,6 +1285,9 @@ function findTemplateAreaMatchesFromText(xmlContent, assetId) {
     for (const clipMatch of clipMatches) {
       const clipAttributes = clipMatch[1] || '';
       const clipBody = clipMatch[2] || '';
+      const clipStarttime =
+        getElementText(clipBody, 'starttime') || getElementText(clipBody, 'start');
+      const clipDuration = getElementText(clipBody, 'duration');
       const areaMatches = Array.from(
         clipBody.matchAll(/<area\b([^>]*)>([\s\S]*?)<\/area>/gi),
       );
@@ -1291,6 +1308,8 @@ function findTemplateAreaMatchesFromText(xmlContent, assetId) {
         matches.push({
           clipsId: getAttributeValue(clipsAttributes, 'id'),
           clipId: getAttributeValue(clipAttributes, 'id'),
+          clipStarttime,
+          clipDuration,
           areaId: getAttributeValue(areaAttributes, 'id'),
           clipsAssetId,
           durationRaw,
