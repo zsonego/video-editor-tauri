@@ -325,12 +325,13 @@ onMounted(() => {
   <section class="login-page">
     <video
       class="login-background-video"
-      :src="backgroundVideo"
       autoplay
       muted
       loop
       playsinline
-    ></video>
+    >
+      <source :src="backgroundVideo" type="video/mp4" />
+    </video>
     <div class="login-background-shade"></div>
     <main class="login-container">
       <div class="intro-panel">

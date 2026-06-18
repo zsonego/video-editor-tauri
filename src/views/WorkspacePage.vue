@@ -149,6 +149,15 @@ let projectUpdateTimer = null;
 let pendingProjectUpdate = null;
 const canceledTemplateDownloadIds = new Set();
 const VIDEO_FRAME_REVEAL_TIME = 0.001;
+const VIDEO_SOURCE_TYPES = {
+  mp4: 'video/mp4',
+  m4v: 'video/mp4',
+  mov: 'video/quicktime',
+  qt: 'video/quicktime',
+  webm: 'video/webm',
+  ogv: 'video/ogg',
+  ogg: 'video/ogg',
+};
 
 // 播放器 DOM 引用、播放状态和拖动状态。
 const mainVideoRef = ref(null);
@@ -1188,6 +1197,13 @@ function resolveTemplateAssetPath(filePath) {
 function resolveTemplateVideoSource(filePath) {
   const localPath = resolveTemplateAssetPath(filePath);
   return localPath ? convertFileSrc(localPath) : '';
+}
+
+function getVideoSourceType(source) {
+  const path = String(source || '').split(/[?#]/)[0] || '';
+  const extension = path.split('.').pop()?.toLowerCase() || '';
+
+  return VIDEO_SOURCE_TYPES[extension] || '';
 }
 
 // 从模板 XML 中读取素材区域，后续解析同时提供 DOM 和文本兜底方案。
@@ -4249,18 +4265,24 @@ onBeforeUnmount(() => {
                 class="playerWrapper group relative rounded-xl overflow-hidden shadow-2xl border border-white/10"
               >
                 <video
+                  :key="selectedVideoSource"
                   ref="mainVideoRef"
                   class="w-full h-full object-cover bg-black"
                   playsinline
                   preload="metadata"
-                  :src="selectedVideoSource"
                   @loadedmetadata="handleMainVideoLoadedMetadata"
                   @timeupdate="updatePlayerControls"
                   @play="updatePlayerControls"
                   @pause="updatePlayerControls"
                   @volumechange="updatePlayerControls"
                   @ratechange="updatePlayerControls"
-                ></video>
+                >
+                  <source
+                    v-if="selectedVideoSource"
+                    :src="selectedVideoSource"
+                    :type="getVideoSourceType(selectedVideoSource)"
+                  />
+                </video>
                 <div
                   class="absolute inset-0 flex items-center justify-center opacity-0 pointer-events-none transition-opacity duration-200 group-hover:opacity-100 group-hover:pointer-events-auto"
                 >
@@ -4551,17 +4573,23 @@ onBeforeUnmount(() => {
                   class="aspect-video bg-black flex items-center justify-center relative group cursor-pointer"
                 >
                   <video
+                    :key="activeTemplateDemoSource"
                     ref="modalVideoRef"
                     class="w-full h-full object-cover"
                     playsinline
                     preload="metadata"
-                    :src="activeTemplateDemoSource"
                     @loadedmetadata="handleModalVideoLoadedMetadata"
                     @timeupdate="updateModalPreviewControls"
                     @play="updateModalPreviewControls"
                     @pause="updateModalPreviewControls"
                     @ended="updateModalPreviewControls"
-                  ></video>
+                  >
+                    <source
+                      v-if="activeTemplateDemoSource"
+                      :src="activeTemplateDemoSource"
+                      :type="getVideoSourceType(activeTemplateDemoSource)"
+                    />
+                  </video>
                   <div
                     class="absolute inset-0 flex items-center justify-center opacity-0 pointer-events-none transition-opacity duration-200 group-hover:opacity-100 group-hover:pointer-events-auto"
                   >
