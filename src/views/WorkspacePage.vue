@@ -321,7 +321,7 @@ const timelineSelectionStyle = computed(() => {
   const totalDuration = Math.max(1, Number(timeline.totalDuration) || 1);
   const selectedDuration = Math.min(
     totalDuration,
-    Math.max(0, Math.floor(Number(timeline.selectedDuration) || 0)),
+    Math.max(0, Number(timeline.selectedDuration) || 0),
   );
   const maxStart = Math.max(0, totalDuration - selectedDuration);
   const startTime = Math.min(
@@ -363,7 +363,7 @@ const timelineRangeLabel = computed(() => {
   return `${formatTimelineTick(timeline.startTime)} - ${formatTimelineTick(endTime)}`;
 });
 const timelineSelectedDurationLabel = computed(() =>
-  formatPlayerTime(timeline.selectedDuration),
+  formatTimelineTick(timeline.selectedDuration),
 );
 function getNiceTickStep(start, stop, count) {
   const rawStep = Math.abs(stop - start) / Math.max(1, count);
@@ -1371,8 +1371,8 @@ function getTimelineSelectionDuration(videoInfo, videoDuration) {
   const templateDuration = findTemplateAreaDurationSeconds(videoInfo.assetId);
 
   return Number.isFinite(templateDuration) && templateDuration > 0
-    ? Math.max(1, Math.floor(templateDuration))
-    : Math.max(1, Math.floor(videoDuration));
+    ? Math.max(1, templateDuration)
+    : Math.max(1, videoDuration);
 }
 
 function logTemplateAssetDurationMatch(videoInfo) {
@@ -2686,15 +2686,23 @@ function formatPlayerTime(value) {
   return `${minutes}:${seconds}`;
 }
 
+function formatTimelineSecondValue(value, maxDecimals = 3) {
+  const normalized = Math.max(0, Math.round((Number(value) || 0) * 1000) / 1000);
+  return Number(normalized.toFixed(maxDecimals)).toString();
+}
+
 function formatTimelineTick(value) {
   if (!Number.isFinite(value)) return '0s';
-  const seconds = Math.max(0, Math.round(value));
+  const seconds = Math.max(0, Number(value) || 0);
 
   if (seconds < 60) {
-    return `${seconds}s`;
+    return `${formatTimelineSecondValue(seconds)}s`;
   }
 
-  return formatPlayerTime(seconds);
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds - minutes * 60;
+  const remainingText = formatTimelineSecondValue(remainingSeconds);
+  return `${minutes}:${remainingSeconds < 10 ? '0' : ''}${remainingText}`;
 }
 
 function formatTimelineRulerTick(value) {
@@ -2704,12 +2712,13 @@ function formatTimelineRulerTick(value) {
   const seconds = Math.max(0, Number(value.toFixed(decimals)));
 
   if (seconds < 60) {
-    return `${seconds}s`;
+    return `${formatTimelineSecondValue(seconds, decimals)}s`;
   }
 
   const minutes = Math.floor(seconds / 60);
   const remainingSeconds = Number((seconds % 60).toFixed(decimals));
-  return `${minutes}:${String(remainingSeconds).padStart(2, '0')}`;
+  const remainingText = formatTimelineSecondValue(remainingSeconds, decimals);
+  return `${minutes}:${remainingSeconds < 10 ? '0' : ''}${remainingText}`;
 }
 
 function updatePlayerControls() {
@@ -5692,10 +5701,11 @@ onBeforeUnmount(() => {
 }
 
 .duration-selection {
+  box-sizing: border-box;
   position: absolute;
   top: 50%;
   height: 38px;
-  min-width: 80px;
+  min-width: 0;
   cursor: grab;
   user-select: none;
   touch-action: none;
