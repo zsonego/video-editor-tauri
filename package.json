@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "start": "tauri dev"
+    "start": "tauri dev",
+    "build:dmg": "tauri build"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

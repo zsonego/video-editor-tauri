@@ -135,6 +135,10 @@ const defaultTemplateExportConfirmVisible = ref(false);
 const importOverwriteConfirmVisible = ref(false);
 const pendingImportSegment = ref(null);
 let exportInterval = null;
+let exportFinishedAudio = null;
+let exportFinishedAudioContext = null;
+let exportFinishedAudioBuffer = null;
+let exportFinishedAudioBufferLoading = null;
 let timelineMoveHandler = null;
 let timelineUpHandler = null;
 let timelinePlayheadMoveHandler = null;
@@ -2418,8 +2422,112 @@ function resetExportProgress() {
   exportOutputPath.value = '';
 }
 
+function getExportFinishedAudio() {
+  if (!exportFinishedAudio) {
+    exportFinishedAudio = new Audio(dingAudio);
+    exportFinishedAudio.preload = 'auto';
+  }
+
+  return exportFinishedAudio;
+}
+
+function getExportFinishedAudioContext() {
+  if (exportFinishedAudioContext) return exportFinishedAudioContext;
+
+  const AudioContextConstructor =
+    window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextConstructor) return null;
+
+  exportFinishedAudioContext = new AudioContextConstructor();
+  return exportFinishedAudioContext;
+}
+
+function loadExportFinishedAudioBuffer(audioContext) {
+  if (exportFinishedAudioBuffer) {
+    return Promise.resolve(exportFinishedAudioBuffer);
+  }
+  if (exportFinishedAudioBufferLoading) {
+    return exportFinishedAudioBufferLoading;
+  }
+
+  exportFinishedAudioBufferLoading = fetch(dingAudio)
+    .then((response) => response.arrayBuffer())
+    .then((arrayBuffer) => audioContext.decodeAudioData(arrayBuffer))
+    .then((audioBuffer) => {
+      exportFinishedAudioBuffer = audioBuffer;
+      return audioBuffer;
+    })
+    .catch((error) => {
+      console.warn('[export] failed to load finish sound:', error);
+      return null;
+    })
+    .finally(() => {
+      exportFinishedAudioBufferLoading = null;
+    });
+
+  return exportFinishedAudioBufferLoading;
+}
+
+function unlockExportFinishedSound() {
+  const audioContext = getExportFinishedAudioContext();
+  if (!audioContext) {
+    getExportFinishedAudio().load();
+    return;
+  }
+
+  if (audioContext.state === 'suspended') {
+    audioContext.resume().catch((error) => {
+      console.warn('[export] failed to unlock finish sound:', error);
+    });
+  }
+  loadExportFinishedAudioBuffer(audioContext);
+}
+
 function playExportFinishedSound() {
-  const audio = new Audio(dingAudio);
+  const audioContext = getExportFinishedAudioContext();
+  if (audioContext) {
+    const playBufferedSound = async () => {
+      if (audioContext.state === 'suspended') {
+        await audioContext.resume();
+      }
+
+      const audioBuffer = await loadExportFinishedAudioBuffer(audioContext);
+      if (!audioBuffer) return false;
+
+      const source = audioContext.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(audioContext.destination);
+      source.start(0);
+      return true;
+    };
+
+    playBufferedSound()
+      .then((played) => {
+        if (!played) {
+          getExportFinishedAudio().play().catch((fallbackError) => {
+            console.warn(
+              '[export] failed to play finish sound fallback:',
+              fallbackError,
+            );
+          });
+        }
+      })
+      .catch((error) => {
+        console.warn('[export] failed to play finish sound:', error);
+        getExportFinishedAudio().play().catch((fallbackError) => {
+          console.warn(
+            '[export] failed to play finish sound fallback:',
+            fallbackError,
+          );
+        });
+      });
+    return;
+  }
+
+  const audio = getExportFinishedAudio();
+  audio.pause();
+  audio.currentTime = 0;
+  audio.volume = 1;
   audio.play().catch((error) => {
     console.warn('[export] failed to play finish sound:', error);
   });
@@ -2479,6 +2587,7 @@ async function ensureProjectExportRecorded(exportPath) {
 
 async function showExportConfirmation() {
   console.log('[export] export button clicked');
+  void unlockExportFinishedSound();
   if (exportRunning.value) return;
   if (!canExport.value) {
     console.warn(
@@ -2511,6 +2620,7 @@ function cancelDefaultTemplateExport() {
 }
 
 async function confirmDefaultTemplateExport() {
+  void unlockExportFinishedSound();
   defaultTemplateExportConfirmVisible.value = false;
   await selectExportDirectory();
 }
@@ -2607,6 +2717,7 @@ function closeExportModal() {
 
 async function startExportProgress() {
   console.log('[export] confirm export clicked');
+  void unlockExportFinishedSound();
   if (exportRunning.value) return;
 
   exportRunning.value = true;
