@@ -139,6 +139,7 @@ let exportFinishedAudio = null;
 let exportFinishedAudioContext = null;
 let exportFinishedAudioBuffer = null;
 let exportFinishedAudioBufferLoading = null;
+let exportFinishedSoundKeepAlive = null;
 let timelineMoveHandler = null;
 let timelineUpHandler = null;
 let timelinePlayheadMoveHandler = null;
@@ -2468,7 +2469,55 @@ function loadExportFinishedAudioBuffer(audioContext) {
   return exportFinishedAudioBufferLoading;
 }
 
-function unlockExportFinishedSound() {
+function playSilentExportSoundUnlock(audioContext) {
+  const silentBuffer = audioContext.createBuffer(
+    1,
+    1,
+    audioContext.sampleRate,
+  );
+  const source = audioContext.createBufferSource();
+  const gain = audioContext.createGain();
+  gain.gain.value = 0;
+
+  source.buffer = silentBuffer;
+  source.connect(gain);
+  gain.connect(audioContext.destination);
+  source.onended = () => {
+    source.disconnect();
+    gain.disconnect();
+  };
+  source.start(0);
+}
+
+function startExportFinishedSoundKeepAlive(audioContext) {
+  if (exportFinishedSoundKeepAlive) return;
+
+  const oscillator = audioContext.createOscillator();
+  const gain = audioContext.createGain();
+  gain.gain.value = 0;
+  oscillator.connect(gain);
+  gain.connect(audioContext.destination);
+  oscillator.start();
+
+  exportFinishedSoundKeepAlive = { oscillator, gain };
+}
+
+function stopExportFinishedSoundKeepAlive() {
+  if (!exportFinishedSoundKeepAlive) return;
+
+  const { oscillator, gain } = exportFinishedSoundKeepAlive;
+  exportFinishedSoundKeepAlive = null;
+
+  try {
+    oscillator.stop();
+  } catch (error) {
+    console.warn('[export] failed to stop finish sound keep-alive:', error);
+  }
+  oscillator.disconnect();
+  gain.disconnect();
+}
+
+function unlockExportFinishedSound({ keepAlive = false } = {}) {
   const audioContext = getExportFinishedAudioContext();
   if (!audioContext) {
     getExportFinishedAudio().load();
@@ -2479,6 +2528,10 @@ function unlockExportFinishedSound() {
     audioContext.resume().catch((error) => {
       console.warn('[export] failed to unlock finish sound:', error);
     });
+  }
+  playSilentExportSoundUnlock(audioContext);
+  if (keepAlive) {
+    startExportFinishedSoundKeepAlive(audioContext);
   }
   loadExportFinishedAudioBuffer(audioContext);
 }
@@ -2717,7 +2770,7 @@ function closeExportModal() {
 
 async function startExportProgress() {
   console.log('[export] confirm export clicked');
-  void unlockExportFinishedSound();
+  void unlockExportFinishedSound({ keepAlive: true });
   if (exportRunning.value) return;
 
   exportRunning.value = true;
@@ -2778,6 +2831,7 @@ async function startExportProgress() {
     systemMessage.error(error?.message || '视频导出失败');
   } finally {
     exportRunning.value = false;
+    stopExportFinishedSoundKeepAlive();
     if (unlistenProgress) {
       console.log('[export] removing progress listener:', exportId);
       unlistenProgress();
