@@ -107,6 +107,8 @@ struct ComposerRuntime {
     #[cfg(target_os = "macos")]
     get_last_error: Option<ComposerGetLastErrorFn>,
     #[cfg(target_os = "macos")]
+    get_last_cmd: Option<ComposerGetLastCmdFn>,
+    #[cfg(target_os = "macos")]
     initialized: bool,
 }
 
@@ -126,6 +128,8 @@ type ComposerComposeFn = unsafe extern "C" fn(
 ) -> c_int;
 #[cfg(target_os = "macos")]
 type ComposerGetLastErrorFn = unsafe extern "C" fn(*mut c_void) -> *const c_char;
+#[cfg(target_os = "macos")]
+type ComposerGetLastCmdFn = unsafe extern "C" fn() -> *const c_char;
 
 #[cfg(target_os = "macos")]
 struct ComposerCallbackContext {
@@ -217,6 +221,8 @@ impl ComposerRuntime {
             #[cfg(target_os = "macos")]
             get_last_error: None,
             #[cfg(target_os = "macos")]
+            get_last_cmd: None,
+            #[cfg(target_os = "macos")]
             initialized: false,
         }
     }
@@ -265,6 +271,21 @@ impl ComposerRuntime {
                     }
                 }
             };
+            app_log_info("[composer] resolving composer_get_last_cmd");
+            let get_last_cmd: Option<ComposerGetLastCmdFn> = unsafe {
+                match library.get(b"composer_get_last_cmd\0") {
+                    Ok(symbol) => {
+                        app_log_info("[composer] composer_get_last_cmd resolved");
+                        Some(*symbol)
+                    }
+                    Err(error) => {
+                        app_log_error(format!(
+                            "[composer] composer_get_last_cmd unavailable: {error}"
+                        ));
+                        None
+                    }
+                }
+            };
             app_log_info("[composer] calling composer_init");
             let init_result = unsafe { init() };
 
@@ -283,6 +304,7 @@ impl ComposerRuntime {
                 compose: Some(compose),
                 cleanup: Some(cleanup),
                 get_last_error,
+                get_last_cmd,
                 initialized: true,
             })
         }
@@ -349,9 +371,13 @@ impl ComposerRuntime {
             } else {
                 let error_message = composer_error_message(result);
                 let composer_last_error = self.composer_last_error_text();
+                let composer_last_cmd = self.composer_last_cmd_text();
                 app_log_error(format!("[composer] compose failed: {error_message}"));
                 app_log_error(format!(
                     "[composer] composer_get_last_error(NULL): {composer_last_error}"
+                ));
+                app_log_error(format!(
+                    "[composer] composer_get_last_cmd(): {composer_last_cmd}"
                 ));
                 append_composer_error_log(&format!(
                     "export_id: {export_id_text}\n\
@@ -360,7 +386,8 @@ impl ComposerRuntime {
                      output_path: {output_path_text}\n\
                      error_code: {result}\n\
                      error_message: {error_message}\n\
-                     composer_get_last_error(NULL): {composer_last_error}"
+                     composer_get_last_error(NULL): {composer_last_error}\n\
+                     composer_get_last_cmd(): {composer_last_cmd}"
                 ));
 
                 if composer_last_error.trim().is_empty()
@@ -394,6 +421,23 @@ impl ComposerRuntime {
         }
 
         unsafe { CStr::from_ptr(error) }
+            .to_string_lossy()
+            .trim()
+            .to_string()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn composer_last_cmd_text(&self) -> String {
+        let Some(get_last_cmd) = self.get_last_cmd else {
+            return "composer_get_last_cmd function is not loaded".to_string();
+        };
+
+        let cmd = unsafe { get_last_cmd() };
+        if cmd.is_null() {
+            return "composer_get_last_cmd returned null".to_string();
+        }
+
+        unsafe { CStr::from_ptr(cmd) }
             .to_string_lossy()
             .trim()
             .to_string()
