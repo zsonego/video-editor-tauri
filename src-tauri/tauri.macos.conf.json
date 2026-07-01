@@ -3,8 +3,8 @@
     "targets": ["dmg"],
     "macOS": {
       "frameworks": ["libs/macos/libcomposer.dylib"],
-      "signingIdentity": "-",
-      "hardenedRuntime": false
+      "signingIdentity": "Apple Distribution: Loogear Co., Ltd. (PMBZKYYRRP)",
+      "hardenedRuntime": true
     }
   }
 }

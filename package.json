@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "start": "tauri dev",
-    "build:dmg": "tauri build"
+    "build:dmg": "tauri build --config src-tauri/tauri.macos.conf.json --target aarch64-apple-darwin --bundles dmg"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
