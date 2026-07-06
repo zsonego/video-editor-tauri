@@ -3924,7 +3924,7 @@ onBeforeUnmount(() => {
         <div class="flex items-center gap-4 shrink-0">
           <img
             alt="艾咔"
-            class="h-10 w-auto object-contain cursor-pointer"
+            class="h-10 w-auto object-contain cursor-pointer select-none"
             :src="logoImage"
             @click.stop="goHome"
           />

@@ -1,0 +1,16 @@
+{
+  "bundle": {
+    "targets": ["app"],
+    "category": "Video",
+    "macOS": {
+      "frameworks": ["libs/macos/libcomposer.dylib"],
+      "minimumSystemVersion": "12.0",
+      "signingIdentity": "Apple Distribution: Loogear Co., Ltd. (PMBZKYYRRP)",
+      "entitlements": "./Entitlements.appstore.plist",
+      "infoPlist": "./Info.appstore.plist",
+      "files": {
+        "embedded.provisionprofile": "profiles/aicut-mas.provisionprofile"
+      }
+    }
+  }
+}

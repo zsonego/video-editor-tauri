@@ -1,7 +1,8 @@
 <script setup>
-import { onMounted, ref } from "vue";
-import { useRouter } from "vue-router";
-import SystemMessageHost from "./components/SystemMessageHost.vue";
+import { onMounted, ref } from 'vue';
+import { useRouter } from 'vue-router';
+import SessionExpiredDialogHost from './components/SessionExpiredDialogHost.vue';
+import SystemMessageHost from './components/SystemMessageHost.vue';
 
 const router = useRouter();
 const appBootLoading = ref(true);
@@ -13,17 +14,24 @@ onMounted(() => {
 });
 
 function handleLoginSuccess() {
-  const redirect = typeof router.currentRoute.value.query.redirect === "string"
-    ? router.currentRoute.value.query.redirect
-    : "/home";
+  const redirect =
+    typeof router.currentRoute.value.query.redirect === 'string'
+      ? router.currentRoute.value.query.redirect
+      : '/home';
 
   router.replace(redirect);
 }
 
 function handleLogout() {
-  localStorage.removeItem("token");
-  localStorage.removeItem("userInfo");
-  router.replace("/login");
+  localStorage.removeItem('token');
+  localStorage.removeItem('userInfo');
+  router.replace('/login');
+}
+
+function handleSessionExpiredConfirm() {
+  localStorage.clear();
+  sessionStorage.clear();
+  router.replace('/login');
 }
 </script>
 
@@ -37,8 +45,13 @@ function handleLogout() {
     </div>
   </Transition>
   <RouterView v-slot="{ Component }">
-    <component :is="Component" @login="handleLoginSuccess" @logout="handleLogout" />
+    <component
+      :is="Component"
+      @login="handleLoginSuccess"
+      @logout="handleLogout"
+    />
   </RouterView>
+  <SessionExpiredDialogHost @confirm="handleSessionExpiredConfirm" />
   <SystemMessageHost />
 </template>
 
@@ -79,7 +92,11 @@ input {
   align-items: center;
   justify-content: center;
   background:
-    radial-gradient(circle at 50% 42%, rgba(74, 142, 255, 0.18), transparent 34%),
+    radial-gradient(
+      circle at 50% 42%,
+      rgba(74, 142, 255, 0.18),
+      transparent 34%
+    ),
     #07122a;
   color: #d9e2ff;
 }
@@ -134,5 +151,4 @@ input {
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.2);
 }
-
 </style>

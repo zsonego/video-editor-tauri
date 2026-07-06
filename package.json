@@ -9,7 +9,9 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "start": "tauri dev",
-    "build:dmg": "tauri build --config src-tauri/tauri.macos.conf.json --target aarch64-apple-darwin --bundles dmg"
+    "build:dmg": "tauri build --config src-tauri/tauri.macos.conf.json --target aarch64-apple-darwin --bundles dmg",
+    "build:mas:app": "tauri build --config src-tauri/tauri.appstore.conf.json --target aarch64-apple-darwin --bundles app",
+    "build:mas:pkg": "npm run build:mas:app && node scripts/package-mas-pkg.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
