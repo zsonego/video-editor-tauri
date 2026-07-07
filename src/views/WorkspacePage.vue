@@ -1806,6 +1806,14 @@ function clampTimelineStart(startTime) {
   return Math.min(Math.max(startTime, 0), maxStart);
 }
 
+function syncPlayheadToTimelineStart() {
+  const totalDuration = Math.max(0, Number(timeline.totalDuration) || 0);
+  timelinePlayheadTime.value = Math.min(
+    totalDuration,
+    Math.max(0, Number(timeline.startTime) || 0),
+  );
+}
+
 function seekMainPlayerToTimelineTime(targetTime) {
   const video = mainVideoRef.value;
   if (!video) return;
@@ -2088,6 +2096,7 @@ function startTimelineDrag(event) {
   const maxLeft = Math.max(0, trackWidth - selectionRect.width);
   event.currentTarget.setPointerCapture?.(event.pointerId);
   timelinePreviewSeeking.value = true;
+  syncPlayheadToTimelineStart();
   seekMainPlayerToTimelineTime(timeline.startTime);
 
   if (timelineMoveHandler) {
@@ -2105,6 +2114,7 @@ function startTimelineDrag(event) {
       timeline.totalDuration - timeline.selectedDuration,
     );
     timeline.startTime = maxLeft ? (clampedLeft / maxLeft) * maxStart : 0;
+    syncPlayheadToTimelineStart();
     cacheCurrentVideoTimelineState();
     seekMainPlayerToTimelineTime(timeline.startTime);
   };
