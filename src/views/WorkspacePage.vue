@@ -1307,7 +1307,8 @@ function findTemplateAreaMatchesFromText(xmlContent, assetId) {
       const clipAttributes = clipMatch[1] || '';
       const clipBody = clipMatch[2] || '';
       const clipStarttime =
-        getElementText(clipBody, 'starttime') || getElementText(clipBody, 'start');
+        getElementText(clipBody, 'starttime') ||
+        getElementText(clipBody, 'start');
       const clipDuration = getElementText(clipBody, 'duration');
       const areaMatches = Array.from(
         clipBody.matchAll(/<area\b([^>]*)>([\s\S]*?)<\/area>/gi),
@@ -2470,11 +2471,7 @@ function loadExportFinishedAudioBuffer(audioContext) {
 }
 
 function playSilentExportSoundUnlock(audioContext) {
-  const silentBuffer = audioContext.createBuffer(
-    1,
-    1,
-    audioContext.sampleRate,
-  );
+  const silentBuffer = audioContext.createBuffer(1, 1, audioContext.sampleRate);
   const source = audioContext.createBufferSource();
   const gain = audioContext.createGain();
   gain.gain.value = 0;
@@ -2557,22 +2554,26 @@ function playExportFinishedSound() {
     playBufferedSound()
       .then((played) => {
         if (!played) {
-          getExportFinishedAudio().play().catch((fallbackError) => {
+          getExportFinishedAudio()
+            .play()
+            .catch((fallbackError) => {
+              console.warn(
+                '[export] failed to play finish sound fallback:',
+                fallbackError,
+              );
+            });
+        }
+      })
+      .catch((error) => {
+        console.warn('[export] failed to play finish sound:', error);
+        getExportFinishedAudio()
+          .play()
+          .catch((fallbackError) => {
             console.warn(
               '[export] failed to play finish sound fallback:',
               fallbackError,
             );
           });
-        }
-      })
-      .catch((error) => {
-        console.warn('[export] failed to play finish sound:', error);
-        getExportFinishedAudio().play().catch((fallbackError) => {
-          console.warn(
-            '[export] failed to play finish sound fallback:',
-            fallbackError,
-          );
-        });
       });
     return;
   }
@@ -2852,7 +2853,10 @@ function formatPlayerTime(value) {
 }
 
 function formatTimelineSecondValue(value, maxDecimals = 3) {
-  const normalized = Math.max(0, Math.round((Number(value) || 0) * 1000) / 1000);
+  const normalized = Math.max(
+    0,
+    Math.round((Number(value) || 0) * 1000) / 1000,
+  );
   return Number(normalized.toFixed(maxDecimals)).toString();
 }
 
@@ -3151,8 +3155,18 @@ function normalizeUserInfoPayload(response) {
   return {
     ...user,
     userId: user.userId || payload.userId || '',
-    tenantId: user.tenantId || user.renterId || payload.tenantId || payload.renterId || '',
-    renterId: user.renterId || user.tenantId || payload.renterId || payload.tenantId || '',
+    tenantId:
+      user.tenantId ||
+      user.renterId ||
+      payload.tenantId ||
+      payload.renterId ||
+      '',
+    renterId:
+      user.renterId ||
+      user.tenantId ||
+      payload.renterId ||
+      payload.tenantId ||
+      '',
     phone: user.phone || user.phonenumber || payload.phone || '',
     roles: response?.roles || payload.roles || [],
     permissions: response?.permissions || payload.permissions || [],
@@ -4246,7 +4260,10 @@ onBeforeUnmount(() => {
                       class="flex items-center justify-between gap-3 p-3 bg-white/5"
                     >
                       <div class="min-w-0 flex-1">
-                        <div class="text-[13px] font-bold text-white truncate">
+                        <div
+                          class="text-[13px] font-bold text-white truncate"
+                          :title="style.name"
+                        >
                           {{ style.name }}
                         </div>
                       </div>
@@ -4265,7 +4282,7 @@ onBeforeUnmount(() => {
                     </div>
                     <div
                       v-if="style.videos.length"
-                      class="p-3 space-y-2 border-t border-outline-variant"
+                      class="p-3 space-y-2 border-t border-outline-variant videoContent"
                     >
                       <div
                         v-for="(video, videoIndex) in style.videos"
@@ -4282,6 +4299,12 @@ onBeforeUnmount(() => {
                         @click="selectVideoForTimeline(video, style.name)"
                       >
                         <div class="flex items-center gap-2 min-w-0">
+                          <span
+                            v-if="style.videos.length >= 2"
+                            class="w-5 shrink-0 text-center text-[11px] font-bold text-on-surface-variant"
+                          >
+                            {{ videoIndex + 1 }}
+                          </span>
                           <span
                             class="material-symbols-outlined text-primary text-[18px] shrink-0"
                             >smart_display</span

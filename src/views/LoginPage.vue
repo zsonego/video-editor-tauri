@@ -1,7 +1,7 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, reactive, ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
-import { getUserInfo, loginUser } from '../api/user';
+import { getUserInfo, loginUser, resetPassword } from '../api/user';
 import { systemMessage } from '../utils/message';
 import backgroundVideo from '../assets/background.mp4';
 import boxImage from '../assets/box.png';
@@ -21,6 +21,13 @@ const tenantDialogVisible = ref(false);
 const tenantList = ref([]);
 const selectedTenantId = ref('');
 const terminalUuid = ref('');
+const forcePasswordVisible = ref(false);
+const forcePasswordSubmitting = ref(false);
+const forcePasswordContext = ref(null);
+const forcePasswordForm = reactive({
+  newPassword: '',
+  confirmPassword: '',
+});
 
 const hasTenants = computed(() => tenantList.value.length > 0);
 
@@ -125,6 +132,33 @@ function getUserInfoPayload(response) {
   };
 }
 
+function shouldForceResetPassword(userInfo) {
+  const value = userInfo?.forceResetPwd;
+
+  if (value === undefined || value === null) {
+    return false;
+  }
+
+  const normalized = String(value).trim();
+
+  return normalized !== '' && Number(normalized) !== 0;
+}
+
+function validateUserInfo(userInfo) {
+  return Boolean(userInfo?.userId && (userInfo?.tenantId || userInfo?.renterId));
+}
+
+async function fetchLoginUserInfo(identity) {
+  const userInfoResponse = await getUserInfo(buildUserInfoPayload(identity));
+  const userInfo = getUserInfoPayload(userInfoResponse);
+
+  if (!validateUserInfo(userInfo)) {
+    throw new Error('登录成功，但未获取到用户信息');
+  }
+
+  return userInfo;
+}
+
 function saveLoginToken(token) {
   localStorage.setItem('token', token);
 }
@@ -146,6 +180,32 @@ function saveUserInfo(userInfo, identity) {
     renterName: userInfo?.renterName || identity?.tenantName || '',
   };
   localStorage.setItem('userInfo', JSON.stringify(storedUserInfo));
+}
+
+function resetForcePasswordForm() {
+  forcePasswordForm.newPassword = '';
+  forcePasswordForm.confirmPassword = '';
+}
+
+function finishLogin(loginResponse, userInfo, identity, backendMessage = '') {
+  saveUserInfo(userInfo, identity);
+  systemMessage.success(backendMessage || '登录成功');
+  tenantDialogVisible.value = false;
+  forcePasswordVisible.value = false;
+  forcePasswordContext.value = null;
+  resetForcePasswordForm();
+  emit('login', {
+    login: loginResponse,
+    userInfo,
+    identity,
+  });
+}
+
+function openForcePasswordDialog(context) {
+  forcePasswordContext.value = context;
+  resetForcePasswordForm();
+  tenantDialogVisible.value = false;
+  forcePasswordVisible.value = true;
 }
 
 function togglePasswordVisible() {
@@ -250,6 +310,16 @@ async function submitLogin(extra = {}) {
       const userInfoResponse = await getUserInfo(buildUserInfoPayload(identity));
       const userInfo = getUserInfoPayload(userInfoResponse);
 
+      if (shouldForceResetPassword(userInfo)) {
+        openForcePasswordDialog({
+          loginResponse: response,
+          identity,
+          backendMessage,
+          userInfo,
+        });
+        return;
+      }
+
       if (!userInfo.userId || !(userInfo.tenantId || userInfo.renterId)) {
         localStorage.removeItem('token');
         systemMessage.error('登录成功，但未获取到用户信息');
@@ -290,6 +360,78 @@ async function submitLogin(extra = {}) {
     systemMessage.error(error?.message || '登录请求失败');
   } finally {
     submitting.value = false;
+  }
+}
+
+async function submitForcePasswordReset() {
+  if (forcePasswordSubmitting.value) return;
+
+  const newPassword = forcePasswordForm.newPassword.trim();
+  const confirmPassword = forcePasswordForm.confirmPassword.trim();
+
+  if (!newPassword) {
+    systemMessage.error('请输入新密码');
+    return;
+  }
+
+  if (!confirmPassword) {
+    systemMessage.error('请确认新密码');
+    return;
+  }
+
+  if (newPassword !== confirmPassword) {
+    systemMessage.error('两次输入的新密码不一致');
+    return;
+  }
+
+  const context = forcePasswordContext.value || {};
+  const userInfo = context.userInfo || {};
+  const identity = context.identity || {};
+  const renterId =
+    userInfo.renterId ||
+    userInfo.tenantId ||
+    identity.renterId ||
+    identity.tenantId ||
+    '';
+  const userId = userInfo.userId || identity.userId || '';
+
+  if (!userId || !renterId) {
+    systemMessage.error('用户信息不完整，无法修改密码');
+    return;
+  }
+
+  forcePasswordSubmitting.value = true;
+
+  try {
+    const response = await resetPassword({
+      userId,
+      renterId,
+      newPassword,
+      modifyType: 2,
+    });
+
+    if (response?.code !== undefined && Number(response.code) !== 0) {
+      throw new Error(response?.msg || '修改密码失败');
+    }
+
+    const nextIdentity = {
+      ...identity,
+      userId,
+      renterId,
+      tenantId: renterId,
+    };
+    const refreshedUserInfo = await fetchLoginUserInfo(nextIdentity);
+
+    finishLogin(
+      context.loginResponse,
+      refreshedUserInfo,
+      nextIdentity,
+      response?.msg || context.backendMessage,
+    );
+  } catch (error) {
+    systemMessage.error(error?.message || '修改密码失败');
+  } finally {
+    forcePasswordSubmitting.value = false;
   }
 }
 
@@ -582,6 +724,48 @@ onMounted(() => {
             <button type="button" @click="closeAgreement">关闭</button>
           </footer>
         </section>
+      </div>
+    </transition>
+
+    <transition name="tenant-fade">
+      <div v-if="forcePasswordVisible" class="force-password-mask">
+        <div class="force-password-dialog">
+          <div class="force-password-header">
+            <div>
+              <h3>修改密码</h3>
+              <p>当前账号首次登录，请先设置新密码。</p>
+            </div>
+          </div>
+
+          <div class="force-password-form">
+            <input
+              v-model="forcePasswordForm.newPassword"
+              class="force-password-input"
+              :disabled="forcePasswordSubmitting"
+              placeholder="新密码"
+              type="password"
+              autocomplete="new-password"
+              @keydown.enter.prevent="submitForcePasswordReset"
+            />
+            <input
+              v-model="forcePasswordForm.confirmPassword"
+              class="force-password-input"
+              :disabled="forcePasswordSubmitting"
+              placeholder="确认新密码"
+              type="password"
+              autocomplete="new-password"
+              @keydown.enter.prevent="submitForcePasswordReset"
+            />
+            <button
+              type="button"
+              class="force-password-primary"
+              :disabled="forcePasswordSubmitting"
+              @click="submitForcePasswordReset"
+            >
+              {{ forcePasswordSubmitting ? '正在修改...' : '确认修改' }}
+            </button>
+          </div>
+        </div>
       </div>
     </transition>
 
@@ -1023,6 +1207,95 @@ onMounted(() => {
 .dialog-close svg {
   width: 18px;
   height: 18px;
+}
+
+.force-password-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(2, 6, 23, 0.66);
+  backdrop-filter: blur(8px);
+}
+
+.force-password-dialog {
+  width: min(380px, 100%);
+  padding: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 24px;
+  background: rgba(7, 18, 42, 0.96);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+}
+
+.force-password-header {
+  margin-bottom: 20px;
+}
+
+.force-password-header h3 {
+  margin: 0;
+  color: #fff;
+  font-size: 18px;
+  line-height: 1.35;
+}
+
+.force-password-header p {
+  margin: 8px 0 0;
+  color: rgba(217, 226, 255, 0.62);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.force-password-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.force-password-input {
+  width: 100%;
+  height: 46px;
+  padding: 0 14px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 14px;
+  outline: none;
+  background: rgba(255, 255, 255, 0.05);
+  color: #fff;
+  font-size: 14px;
+}
+
+.force-password-input:focus {
+  border-color: rgba(74, 142, 255, 0.62);
+}
+
+.force-password-input:disabled {
+  opacity: 0.7;
+}
+
+.force-password-primary {
+  width: 100%;
+  height: 46px;
+  border: 0;
+  border-radius: 14px;
+  background: #2f73ff;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 800;
+  cursor: pointer;
+  transition:
+    filter 0.18s ease,
+    opacity 0.18s ease;
+}
+
+.force-password-primary:hover {
+  filter: brightness(1.08);
+}
+
+.force-password-primary:disabled {
+  opacity: 0.62;
+  cursor: not-allowed;
 }
 
 .tenant-list {
