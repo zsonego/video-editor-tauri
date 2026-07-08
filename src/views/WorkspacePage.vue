@@ -1778,6 +1778,8 @@ function selectVideoForTimeline(video, styleName = '') {
         ? cachedState.startTime
         : defaultStartTime,
     );
+    syncPlayheadToTimelineStart();
+    playerCurrentTime.value = timelinePlayheadTime.value;
   }
   selectedVideoAssetId.value = videoInfo.assetId || '';
   logTemplateAssetDurationMatch(videoInfo);
@@ -1785,7 +1787,7 @@ function selectVideoForTimeline(video, styleName = '') {
     selectedStyleName.value = styleName;
   }
   nextTick(() => {
-    resetMainPlayer();
+    resetMainPlayer(timelinePlayheadTime.value);
   });
   timelinePulse.value = true;
   window.setTimeout(() => {
@@ -1994,8 +1996,11 @@ function revealPausedVideoFrame(video, targetTime = 0, updateControls = null) {
 }
 
 function handleMainVideoLoadedMetadata() {
-  updatePlayerControls();
-  revealPausedVideoFrame(mainVideoRef.value, 0, updatePlayerControls);
+  revealPausedVideoFrame(
+    mainVideoRef.value,
+    timelinePlayheadTime.value,
+    updatePlayerControls,
+  );
 }
 
 function handleModalVideoLoadedMetadata() {
@@ -2920,12 +2925,16 @@ function updatePlayerControls() {
   playerSpeed.value = video.playbackRate;
 }
 
-function resetMainPlayer() {
+function resetMainPlayer(targetTime = 0) {
   const video = mainVideoRef.value;
   if (!video) return;
   timelinePreviewSeeking.value = false;
   video.pause();
-  video.currentTime = 0;
+  const duration = Number.isFinite(video.duration) ? video.duration : 0;
+  video.currentTime = Math.max(
+    0,
+    duration ? Math.min(duration, targetTime) : targetTime,
+  );
   updatePlayerControls();
 }
 
