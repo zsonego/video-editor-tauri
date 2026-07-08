@@ -152,6 +152,7 @@ let playerResizeObserver = null;
 let offsetPersistTimer = null;
 let projectUpdateTimer = null;
 let pendingProjectUpdate = null;
+let pendingMainVideoSeekTime = null;
 const canceledTemplateDownloadIds = new Set();
 const VIDEO_FRAME_REVEAL_TIME = 0.001;
 const VIDEO_SOURCE_TYPES = {
@@ -1786,8 +1787,12 @@ function selectVideoForTimeline(video, styleName = '') {
   if (styleName) {
     selectedStyleName.value = styleName;
   }
+  pendingMainVideoSeekTime = timelinePlayheadTime.value;
+  timelinePreviewSeeking.value = true;
   nextTick(() => {
-    resetMainPlayer(timelinePlayheadTime.value);
+    resetMainPlayer(timelinePlayheadTime.value, {
+      preservePreviewSeeking: true,
+    });
   });
   timelinePulse.value = true;
   window.setTimeout(() => {
@@ -1996,10 +2001,17 @@ function revealPausedVideoFrame(video, targetTime = 0, updateControls = null) {
 }
 
 function handleMainVideoLoadedMetadata() {
+  const targetTime = pendingMainVideoSeekTime ?? timelinePlayheadTime.value;
+  timelinePreviewSeeking.value = true;
   revealPausedVideoFrame(
     mainVideoRef.value,
-    timelinePlayheadTime.value,
-    updatePlayerControls,
+    targetTime,
+    () => {
+      updatePlayerControls();
+      timelinePlayheadTime.value = targetTime;
+      pendingMainVideoSeekTime = null;
+      timelinePreviewSeeking.value = false;
+    },
   );
 }
 
@@ -2925,17 +2937,30 @@ function updatePlayerControls() {
   playerSpeed.value = video.playbackRate;
 }
 
-function resetMainPlayer(targetTime = 0) {
+function resetMainPlayer(targetTime = 0, options = {}) {
   const video = mainVideoRef.value;
   if (!video) return;
-  timelinePreviewSeeking.value = false;
+  const preservePreviewSeeking = Boolean(options.preservePreviewSeeking);
+  if (!preservePreviewSeeking) {
+    timelinePreviewSeeking.value = false;
+    pendingMainVideoSeekTime = null;
+  }
   video.pause();
   const duration = Number.isFinite(video.duration) ? video.duration : 0;
-  video.currentTime = Math.max(
+  const nextTime = Math.max(
     0,
     duration ? Math.min(duration, targetTime) : targetTime,
   );
+  try {
+    video.currentTime = nextTime;
+  } catch {
+    // macOS WKWebView may reject seek before metadata is ready.
+  }
   updatePlayerControls();
+  if (preservePreviewSeeking) {
+    timelinePlayheadTime.value = nextTime;
+    playerCurrentTime.value = nextTime;
+  }
 }
 
 function togglePlayerPlayback() {
