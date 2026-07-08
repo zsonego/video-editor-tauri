@@ -1871,6 +1871,69 @@ fn download_bytes(
     Ok(bytes)
 }
 
+fn download_to_file(
+    app: &AppHandle,
+    download_id: &str,
+    url: &str,
+    authorization_token: &str,
+    output_path: &Path,
+    cancel_flag: &AtomicBool,
+    start_progress: u8,
+    end_progress: u8,
+    status: &str,
+) -> Result<(), String> {
+    ensure_not_cancelled(cancel_flag)?;
+    emit_progress(app, download_id, start_progress, status);
+
+    let client = reqwest::blocking::Client::new();
+    let mut request = client.get(url);
+    if !authorization_token.trim().is_empty() {
+        request = request.bearer_auth(authorization_token.trim());
+    }
+    let mut response = request.send().map_err(|error| error.to_string())?;
+    let response_status = response.status();
+
+    if !response_status.is_success() {
+        return Err(format!("Download failed: {url} ({response_status})"));
+    }
+
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+
+    let total = response.content_length();
+    let mut downloaded = 0_u64;
+    let mut output_file = fs::File::create(output_path).map_err(|error| error.to_string())?;
+    let mut buffer = [0_u8; 64 * 1024];
+
+    loop {
+        ensure_not_cancelled(cancel_flag)?;
+
+        let read_count = response
+            .read(&mut buffer)
+            .map_err(|error| error.to_string())?;
+
+        if read_count == 0 {
+            break;
+        }
+
+        output_file
+            .write_all(&buffer[..read_count])
+            .map_err(|error| error.to_string())?;
+        downloaded += read_count as u64;
+        emit_progress(
+            app,
+            download_id,
+            progress_between(start_progress, end_progress, downloaded, total),
+            status,
+        );
+    }
+
+    output_file.flush().map_err(|error| error.to_string())?;
+    emit_progress(app, download_id, end_progress, status);
+    Ok(())
+}
+
 fn extract_zip(
     app: &AppHandle,
     download_id: &str,
@@ -2020,18 +2083,17 @@ fn prepare_template_assets_blocking(
             }
 
             let package_url = resolve_url(&api_base_url, &material_package_url)?;
-            let package_bytes = download_bytes(
+            download_to_file(
                 &app,
                 &download_id,
                 &package_url,
                 &authorization_token,
+                &material_package_path,
                 &cancel_flag,
                 25,
                 80,
                 "正在下载素材包...",
             )?;
-            fs::write(&material_package_path, package_bytes).map_err(|error| error.to_string())?;
-
             extract_zip(
                 &app,
                 &download_id,
