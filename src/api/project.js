@@ -27,3 +27,12 @@ export function updateProject(data) {
 export function recordProjectExport(data) {
   return request("/api/project/export", { data });
 }
+
+export function uploadProjectCover(data) {
+  return request("/api/project/cover", {
+    data,
+    headers: {
+      "Content-Type": "multipart/form-data",
+    },
+  });
+}

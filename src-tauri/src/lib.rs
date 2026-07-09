@@ -2494,6 +2494,30 @@ async fn compose_project_video(
 }
 
 #[tauri::command]
+fn read_project_cover(project_dir: String) -> Result<Vec<u8>, String> {
+    let (_, project_root) = ensure_aicut_dirs()?;
+    let project_root = fs::canonicalize(project_root).map_err(|error| error.to_string())?;
+    let project_dir =
+        fs::canonicalize(PathBuf::from(project_dir)).map_err(|error| error.to_string())?;
+
+    if !project_dir.starts_with(&project_root) {
+        return Err("项目目录无效".to_string());
+    }
+
+    let cover_path = project_dir.join("title.png");
+    if !cover_path.is_file() {
+        return Err("项目封面不存在".to_string());
+    }
+
+    let cover_path = fs::canonicalize(cover_path).map_err(|error| error.to_string())?;
+    if !cover_path.starts_with(&project_dir) {
+        return Err("项目封面路径无效".to_string());
+    }
+
+    fs::read(cover_path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn delete_project_asset_files(project_dir: String, asset_paths: Vec<String>) -> Result<(), String> {
     let (_, project_root) = ensure_aicut_dirs()?;
     let project_root = fs::canonicalize(project_root).map_err(|error| error.to_string())?;
@@ -2686,6 +2710,7 @@ pub fn run() {
             update_project_asset_offset,
             apply_project_subtitle,
             compose_project_video,
+            read_project_cover,
             delete_project_asset_files,
             delete_project_workspaces,
             get_machine_code

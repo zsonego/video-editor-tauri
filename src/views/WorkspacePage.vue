@@ -19,6 +19,7 @@ import {
   recordProjectExport,
   renameProject,
   updateProject,
+  uploadProjectCover,
 } from '../api/project';
 import {
   downloadTemplateCover,
@@ -2666,6 +2667,67 @@ async function ensureProjectExportRecorded(exportPath) {
   return true;
 }
 
+function waitForExportCover(delay = 300) {
+  return new Promise((resolve) => window.setTimeout(resolve, delay));
+}
+
+async function readGeneratedProjectCover() {
+  await waitForExportCover();
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const coverBytes = await invoke('read_project_cover', {
+        projectDir: activeProjectDir.value,
+      });
+
+      if (coverBytes?.length) {
+        return new Uint8Array(coverBytes);
+      }
+
+      console.warn('[export] generated cover is empty');
+    } catch (error) {
+      console.warn(
+        `[export] failed to read generated cover (attempt ${attempt + 1}):`,
+        error,
+      );
+    }
+
+    if (attempt === 0) {
+      await waitForExportCover();
+    }
+  }
+
+  return null;
+}
+
+async function uploadGeneratedProjectCover() {
+  const projectId = activeBackendProjectId.value;
+  if (!projectId || !activeProjectDir.value) return;
+
+  const coverBytes = await readGeneratedProjectCover();
+  if (!coverBytes) return;
+
+  const formData = new FormData();
+  formData.append('projectId', String(normalizeBackendId(projectId)));
+  formData.append(
+    'file',
+    new Blob([coverBytes], { type: 'image/png' }),
+    'title.png',
+  );
+
+  try {
+    const response = await uploadProjectCover(formData);
+    if (response?.code !== undefined && Number(response.code) !== 0) {
+      console.warn('[export] cover upload rejected:', response);
+      return;
+    }
+
+    console.log('[export] cover upload success');
+  } catch (error) {
+    console.warn('[export] cover upload failed:', error);
+  }
+}
+
 async function showExportConfirmation() {
   console.log('[export] export button clicked');
   void unlockExportFinishedSound();
@@ -2851,6 +2913,7 @@ async function startExportProgress() {
     exportStatus.value = '导出完成！';
     exportOutputPath.value = result?.outputPath || '';
     console.log('[export] compose success:', result);
+    await uploadGeneratedProjectCover();
     playExportFinishedSound();
     systemMessage.success('视频导出完成');
   } catch (error) {
