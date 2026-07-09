@@ -2671,20 +2671,49 @@ function waitForExportCover(delay = 300) {
   return new Promise((resolve) => window.setTimeout(resolve, delay));
 }
 
+function normalizeProjectCoverBytes(value) {
+  if (value instanceof ArrayBuffer) {
+    return new Uint8Array(value);
+  }
+
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+
+  if (Array.isArray(value)) {
+    return new Uint8Array(value);
+  }
+
+  return null;
+}
+
 async function readGeneratedProjectCover() {
   await waitForExportCover();
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const coverBytes = await invoke('read_project_cover', {
+      console.log('[export] reading generated cover:', {
+        attempt: attempt + 1,
         projectDir: activeProjectDir.value,
       });
 
-      if (coverBytes?.length) {
-        return new Uint8Array(coverBytes);
+      const response = await invoke('read_project_cover', {
+        projectDir: activeProjectDir.value,
+      });
+      const coverBytes = normalizeProjectCoverBytes(response);
+
+      if (coverBytes?.byteLength) {
+        console.log('[export] generated cover read success:', {
+          attempt: attempt + 1,
+          bytes: coverBytes.byteLength,
+        });
+        return coverBytes;
       }
 
-      console.warn('[export] generated cover is empty');
+      console.warn('[export] generated cover is empty or invalid:', {
+        attempt: attempt + 1,
+        responseType: Object.prototype.toString.call(response),
+      });
     } catch (error) {
       console.warn(
         `[export] failed to read generated cover (attempt ${attempt + 1}):`,
@@ -2702,10 +2731,19 @@ async function readGeneratedProjectCover() {
 
 async function uploadGeneratedProjectCover() {
   const projectId = activeBackendProjectId.value;
-  if (!projectId || !activeProjectDir.value) return;
+  if (!projectId || !activeProjectDir.value) {
+    console.warn('[export] cover upload skipped because project is missing:', {
+      projectId,
+      projectDir: activeProjectDir.value,
+    });
+    return;
+  }
 
   const coverBytes = await readGeneratedProjectCover();
-  if (!coverBytes) return;
+  if (!coverBytes) {
+    console.warn('[export] cover upload skipped because cover was not read');
+    return;
+  }
 
   const formData = new FormData();
   formData.append('projectId', String(normalizeBackendId(projectId)));
@@ -2716,6 +2754,10 @@ async function uploadGeneratedProjectCover() {
   );
 
   try {
+    console.log('[export] uploading project cover:', {
+      projectId,
+      bytes: coverBytes.byteLength,
+    });
     const response = await uploadProjectCover(formData);
     if (response?.code !== undefined && Number(response.code) !== 0) {
       console.warn('[export] cover upload rejected:', response);

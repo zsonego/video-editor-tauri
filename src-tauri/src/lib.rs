@@ -2494,7 +2494,7 @@ async fn compose_project_video(
 }
 
 #[tauri::command]
-fn read_project_cover(project_dir: String) -> Result<Vec<u8>, String> {
+fn read_project_cover(project_dir: String) -> Result<tauri::ipc::Response, String> {
     let (_, project_root) = ensure_aicut_dirs()?;
     let project_root = fs::canonicalize(project_root).map_err(|error| error.to_string())?;
     let project_dir =
@@ -2514,7 +2514,14 @@ fn read_project_cover(project_dir: String) -> Result<Vec<u8>, String> {
         return Err("项目封面路径无效".to_string());
     }
 
-    fs::read(cover_path).map_err(|error| error.to_string())
+    let cover_bytes = fs::read(&cover_path).map_err(|error| error.to_string())?;
+    app_log_info(format!(
+        "[export] project cover read path={} bytes={}",
+        cover_path.display(),
+        cover_bytes.len()
+    ));
+
+    Ok(tauri::ipc::Response::new(cover_bytes))
 }
 
 #[tauri::command]
