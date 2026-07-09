@@ -14,6 +14,7 @@ import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener';
 import {
   createProject,
   deleteProjects,
+  downloadProjectCover,
   getProjectDetail,
   getMyProjects,
   recordProjectExport,
@@ -55,6 +56,8 @@ let recommendationRequestId = 0;
 let templateSearchTimer = null;
 const templateCoverUrls = new Map();
 const templateCoverRequests = new Map();
+const projectCoverUrls = new Map();
+const projectCoverRequests = new Map();
 
 // 工作区导航、弹窗和当前模板状态。
 const activeCategory = ref(-1);
@@ -3672,6 +3675,58 @@ async function attachTemplateCovers(items) {
   );
 }
 
+async function getProjectCoverUrl(project) {
+  const renterId =
+    project.renterId ||
+    project.renter_id ||
+    project.tenantId ||
+    getStoredTenantId();
+  const projectId = project.projectId || project.deleteId;
+  if (!renterId || !projectId) return '';
+
+  const key = `${renterId}/${projectId}`;
+  if (projectCoverUrls.has(key)) return projectCoverUrls.get(key);
+  if (projectCoverRequests.has(key)) return projectCoverRequests.get(key);
+
+  const request = downloadProjectCover(renterId, projectId)
+    .then((blob) => {
+      if (!(blob instanceof Blob) || blob.size === 0) return '';
+
+      const objectUrl = URL.createObjectURL(blob);
+      projectCoverUrls.set(key, objectUrl);
+      return objectUrl;
+    })
+    .catch((error) => {
+      console.error(`[project] cover download failed: ${key}`, error);
+      return '';
+    })
+    .finally(() => {
+      projectCoverRequests.delete(key);
+    });
+
+  projectCoverRequests.set(key, request);
+  return request;
+}
+
+async function attachProjectCovers(items) {
+  return Promise.all(
+    items.map(async (item) => {
+      const useProjectCover = String(item.coverPic || '')
+        .trim()
+        .startsWith('/api');
+      const projectCover = useProjectCover
+        ? await getProjectCoverUrl(item)
+        : '';
+
+      return {
+        ...item,
+        image:
+          projectCover || (await getTemplateCoverUrl(item.templateId)),
+      };
+    }),
+  );
+}
+
 // 将后端模板和工程数据转换为页面统一展示模型。
 function mapTemplateTopic(template, index) {
   const clipCount =
@@ -3841,7 +3896,7 @@ async function loadMyProjects() {
     });
     const list = getResponseList(response);
 
-    draftProjects.value = await attachTemplateCovers(list.map(mapProject));
+    draftProjects.value = await attachProjectCovers(list.map(mapProject));
   } catch (error) {
     systemMessage.error(error?.message || '工程库加载失败');
   }
@@ -4070,6 +4125,11 @@ onBeforeUnmount(() => {
   });
   templateCoverUrls.clear();
   templateCoverRequests.clear();
+  projectCoverUrls.forEach((objectUrl) => {
+    URL.revokeObjectURL(objectUrl);
+  });
+  projectCoverUrls.clear();
+  projectCoverRequests.clear();
 });
 </script>
 

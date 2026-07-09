@@ -12,6 +12,17 @@ export function getMyProjects(data) {
   return request("/api/project/my", { data });
 }
 
+export function downloadProjectCover(renterId, projectId) {
+  return request("/api/aicut/file/download", {
+    method: "GET",
+    data: {
+      bucket: "media-tenants",
+      path: `${renterId}/${projectId}/cover.png`,
+    },
+    responseType: "blob",
+  });
+}
+
 export function deleteProjects(data) {
   return request("/api/project/delete", { data });
 }
