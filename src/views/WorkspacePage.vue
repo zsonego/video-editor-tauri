@@ -174,6 +174,7 @@ const mainVideoRef = ref(null);
 const modalVideoRef = ref(null);
 const playerStageRef = ref(null);
 const playerWrapperRef = ref(null);
+const importVideoListScrollRef = ref(null);
 const timelineTrackRef = ref(null);
 const timelineTrackWidth = ref(0);
 const timelineRulerRef = ref(null);
@@ -206,6 +207,8 @@ const timeline = reactive({
 const draftProjects = ref([]);
 const segmentImportState = reactive({});
 const videoTimelineStateCache = reactive({});
+const invalidDurationVideoKeys = ref(new Set());
+const importVideoItemRefs = new Map();
 
 // 页面展示数据与交互权限的派生状态。
 const sidebarContextLabel = computed(() => {
@@ -1101,6 +1104,24 @@ function getSegmentImportState(segmentId) {
   return segmentImportState[segmentId] || { imported: false, videos: [] };
 }
 
+function getVideoItemKey(segment, video, videoIndex) {
+  return (
+    video?.id ||
+    `${segment?.id || 'segment'}-${videoIndex}-${video?.name || 'video'}`
+  );
+}
+
+function setImportVideoItemRef(key, element) {
+  const normalizedKey = String(key || '');
+  if (!normalizedKey) return;
+
+  if (element) {
+    importVideoItemRefs.set(normalizedKey, element);
+  } else {
+    importVideoItemRefs.delete(normalizedKey);
+  }
+}
+
 function normalizeComparablePath(filePath) {
   return String(filePath || '')
     .replaceAll('\\', '/')
@@ -1141,6 +1162,90 @@ function hasDefaultTemplateVideos() {
     segment.videos.some(
       (video) => Boolean(video?.localPath) && !isProjectImportedVideo(video),
     ),
+  );
+}
+
+function getVideoRequiredDurationSeconds(video) {
+  const templateDuration = findTemplateAreaDurationSeconds(video?.assetId);
+
+  return Number.isFinite(templateDuration) && templateDuration > 0
+    ? templateDuration
+    : 0;
+}
+
+function isVideoDurationTooShort(video) {
+  const requiredDuration = getVideoRequiredDurationSeconds(video);
+  if (!requiredDuration) return false;
+
+  const videoDuration = Number(video?.durationSeconds) || 0;
+  return videoDuration + 0.05 < requiredDuration;
+}
+
+function collectInvalidDurationVideoKeys() {
+  const invalidKeys = new Set();
+
+  for (const segment of importSegments.value) {
+    segment.videos.forEach((video, videoIndex) => {
+      if (isVideoDurationTooShort(video)) {
+        invalidKeys.add(getVideoItemKey(segment, video, videoIndex));
+      }
+    });
+  }
+
+  return invalidKeys;
+}
+
+function refreshInvalidDurationVideoState() {
+  invalidDurationVideoKeys.value = collectInvalidDurationVideoKeys();
+  return invalidDurationVideoKeys.value.size === 0;
+}
+
+function scrollToFirstInvalidDurationVideo() {
+  const [firstInvalidKey] = invalidDurationVideoKeys.value;
+  if (!firstInvalidKey) return;
+
+  nextTick(() => {
+    const target = importVideoItemRefs.get(firstInvalidKey);
+    if (!target) return;
+
+    const scrollContainer = importVideoListScrollRef.value;
+    if (scrollContainer?.contains(target)) {
+      const containerRect = scrollContainer.getBoundingClientRect();
+      const targetRect = target.getBoundingClientRect();
+      const nextScrollTop =
+        scrollContainer.scrollTop +
+        targetRect.top -
+        containerRect.top -
+        (scrollContainer.clientHeight - targetRect.height) / 2;
+
+      scrollContainer.scrollTo({
+        top: Math.max(0, nextScrollTop),
+        behavior: 'smooth',
+      });
+      return;
+    }
+
+    target.scrollIntoView({
+      behavior: 'smooth',
+      block: 'center',
+      inline: 'nearest',
+    });
+  });
+}
+
+function validateExportVideoDurations() {
+  const valid = refreshInvalidDurationVideoState();
+  if (!valid) {
+    systemMessage.error('选择的素材时长太短，请重新选择');
+    scrollToFirstInvalidDurationVideo();
+  }
+
+  return valid;
+}
+
+function isVideoDurationInvalid(segment, video, videoIndex) {
+  return invalidDurationVideoKeys.value.has(
+    getVideoItemKey(segment, video, videoIndex),
   );
 }
 
@@ -1481,6 +1586,7 @@ function clearProjectEditingState() {
   for (const key of Object.keys(videoTimelineStateCache)) {
     delete videoTimelineStateCache[key];
   }
+  invalidDurationVideoKeys.value = new Set();
   selectedVideoName.value = '';
   selectedVideoKey.value = '';
   selectedVideoAssetId.value = '';
@@ -1666,6 +1772,7 @@ async function openImportFilePicker(segment) {
     imported: importedVideos.length >= targetCount,
     videos: importedVideos,
   };
+  refreshInvalidDurationVideoState();
 
   if (importedVideos[0]) {
     selectVideoForTimeline(importedVideos[0], segment.name);
@@ -1741,6 +1848,7 @@ async function openReplaceFilePicker(segment, videoIndex) {
     imported: previousState.imported,
     videos,
   };
+  refreshInvalidDurationVideoState();
 
   selectVideoForTimeline(replacementVideo, segment.name);
 }
@@ -2794,6 +2902,9 @@ async function showExportConfirmation() {
     systemMessage.error('模板文件不存在');
     return;
   }
+  if (!validateExportVideoDurations()) {
+    return;
+  }
 
   if (hasDefaultTemplateVideos()) {
     defaultTemplateExportConfirmVisible.value = true;
@@ -2907,6 +3018,10 @@ async function startExportProgress() {
   console.log('[export] confirm export clicked');
   void unlockExportFinishedSound({ keepAlive: true });
   if (exportRunning.value) return;
+  if (!validateExportVideoDurations()) {
+    exportModalVisible.value = false;
+    return;
+  }
 
   exportRunning.value = true;
 
@@ -4450,6 +4565,7 @@ onBeforeUnmount(() => {
             </div>
             <div v-else class="p-4 space-y-4 flex flex-col h-full">
               <div
+                ref="importVideoListScrollRef"
                 class="flex-1 overflow-y-auto custom-scrollbar space-y-3 p-1"
               >
                 <template v-if="currentViewState === 'finished'">
@@ -4496,14 +4612,25 @@ onBeforeUnmount(() => {
                       <div
                         v-for="(video, videoIndex) in style.videos"
                         :key="
-                          video.id || `${style.id}-${videoIndex}-${video.name}`
+                          getVideoItemKey(style, video, videoIndex)
+                        "
+                        :ref="
+                          (element) =>
+                            setImportVideoItemRef(
+                              getVideoItemKey(style, video, videoIndex),
+                              element,
+                            )
                         "
                         class="flex items-center justify-between p-2 rounded bg-surface-container-lowest/50 border border-white/5 hover:border-electric-blue/40 transition-all cursor-pointer group"
                         :class="{
                           'is-selected':
                             selectedVideoKey ===
-                            (video.id ||
-                              `${style.id}-${videoIndex}-${video.name}`),
+                            getVideoItemKey(style, video, videoIndex),
+                          'is-duration-invalid': isVideoDurationInvalid(
+                            style,
+                            video,
+                            videoIndex,
+                          ),
                         }"
                         @click="selectVideoForTimeline(video, style.name)"
                       >
@@ -6298,6 +6425,11 @@ onBeforeUnmount(() => {
 
 .videoList .is-selected {
   border-color: #4a8eff !important;
+}
+
+.videoContent .is-duration-invalid {
+  border-color: #ef4444 !important;
+  box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.45);
 }
 
 .playerWrapper {

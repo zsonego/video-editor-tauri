@@ -1,5 +1,19 @@
-import { chmodSync, copyFileSync, existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from 'node:fs';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+} from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const rootDir = process.cwd();
@@ -17,7 +31,9 @@ const systemPrefixes = [
 ];
 
 if (process.platform !== 'darwin') {
-  console.error('prepare:macos:dylibs can only run on macOS because it requires otool, lipo, and install_name_tool.');
+  console.error(
+    'prepare:macos:dylibs can only run on macOS because it requires otool, lipo, and install_name_tool.',
+  );
   process.exit(1);
 }
 
@@ -37,8 +53,13 @@ function run(command, args, options = {}) {
   }
 
   if (result.status !== 0) {
-    const output = [result.stdout, result.stderr].filter(Boolean).join('\n').trim();
-    throw new Error(`${command} ${args.join(' ')} failed${output ? `\n${output}` : ''}`);
+    const output = [result.stdout, result.stderr]
+      .filter(Boolean)
+      .join('\n')
+      .trim();
+    throw new Error(
+      `${command} ${args.join(' ')} failed${output ? `\n${output}` : ''}`,
+    );
   }
 
   return result.stdout ?? '';
@@ -118,7 +139,9 @@ function resolveDependency(ref, consumerPath) {
     const relativePath = ref.slice('@rpath/'.length);
     const rpaths = getRpaths(consumerPath);
     const candidates = [
-      ...rpaths.map((rpath) => join(resolveTokenPath(rpath, consumerPath), relativePath)),
+      ...rpaths.map((rpath) =>
+        join(resolveTokenPath(rpath, consumerPath), relativePath),
+      ),
       join(dirname(consumerPath), relativePath),
       join(libsDir, relativePath),
     ];
@@ -135,13 +158,18 @@ function toFrameworkPath(filePath) {
 
 function ensureInsideLibsDir(filePath) {
   const relativePath = relative(libsDir, filePath);
-  return relativePath === '' || (!relativePath.startsWith('..') && !isAbsolute(relativePath));
+  return (
+    relativePath === '' ||
+    (!relativePath.startsWith('..') && !isAbsolute(relativePath))
+  );
 }
 
 function assertArm64(filePath) {
   const output = run('lipo', ['-info', filePath]);
   if (!output.includes('arm64')) {
-    throw new Error(`${filePath} is missing arm64 architecture: ${output.trim()}`);
+    throw new Error(
+      `${filePath} is missing arm64 architecture: ${output.trim()}`,
+    );
   }
 }
 
@@ -171,7 +199,9 @@ function discoverDependencies() {
           `Existing: ${existing.sourcePath}`,
           `New: ${sourcePath}`,
           requestedBy ? `Referenced by: ${requestedBy}` : '',
-        ].filter(Boolean).join('\n'),
+        ]
+          .filter(Boolean)
+          .join('\n'),
       );
     }
 
@@ -226,7 +256,9 @@ function discoverDependencies() {
     const detail = unresolved
       .map(({ ref, consumer }) => `- ${ref}\n  Referenced by: ${consumer}`)
       .join('\n');
-    throw new Error(`Found unresolved non-system dependencies. Check local paths or rpaths first:\n${detail}`);
+    throw new Error(
+      `Found unresolved non-system dependencies. Check local paths or rpaths first:\n${detail}`,
+    );
   }
 
   return [...itemsByDest.values()];
@@ -262,7 +294,12 @@ function rewriteInstallNames(items) {
       if (dep.originalRef === dep.replacementRef) {
         continue;
       }
-      run('install_name_tool', ['-change', dep.originalRef, dep.replacementRef, item.destPath]);
+      run('install_name_tool', [
+        '-change',
+        dep.originalRef,
+        dep.replacementRef,
+        item.destPath,
+      ]);
     }
   }
 }
