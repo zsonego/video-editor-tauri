@@ -24,7 +24,7 @@ const sourceLibsDir = join(tauriDir, 'libs', 'macos');
 const bundleLibsDir = join(tauriDir, 'libs', 'macos-bundle');
 const entrySourceDylib = join(sourceLibsDir, 'libcomposer.dylib');
 const tauriConfigPaths = [
-  join(tauriDir, 'tauri.macos.conf.json'),
+  join(tauriDir, 'tauri.dmg.conf.json'),
   join(tauriDir, 'tauri.appstore.conf.json'),
 ];
 const systemPrefixes = [

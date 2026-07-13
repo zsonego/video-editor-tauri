@@ -10,7 +10,7 @@
     "tauri": "tauri",
     "start": "tauri dev",
     "prepare:macos:dylibs": "node scripts/prepare-macos-dylibs.mjs",
-    "build:dmg": "npm run prepare:macos:dylibs && tauri build --config src-tauri/tauri.macos.conf.json --target aarch64-apple-darwin --bundles dmg",
+    "build:dmg": "npm run prepare:macos:dylibs && tauri build --config src-tauri/tauri.dmg.conf.json --target aarch64-apple-darwin --bundles dmg",
     "build:mas:app": "npm run prepare:macos:dylibs && tauri build --config src-tauri/tauri.appstore.conf.json --target aarch64-apple-darwin --bundles app",
     "build:mas:pkg": "npm run build:mas:app && node scripts/package-mas-pkg.mjs"
   },
