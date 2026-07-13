@@ -3,7 +3,7 @@
     "targets": ["app"],
     "category": "Video",
     "macOS": {
-      "frameworks": ["libs/macos/libcomposer.dylib"],
+      "frameworks": ["libs/macos-bundle/libcomposer.dylib"],
       "minimumSystemVersion": "12.0",
       "signingIdentity": "Apple Distribution: Loogear Co., Ltd. (PMBZKYYRRP)",
       "entitlements": "./Entitlements.appstore.plist",

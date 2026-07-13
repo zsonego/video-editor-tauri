@@ -2,8 +2,10 @@ import {
   chmodSync,
   copyFileSync,
   existsSync,
+  mkdirSync,
   readFileSync,
   realpathSync,
+  rmSync,
   writeFileSync,
 } from 'node:fs';
 import {
@@ -18,8 +20,9 @@ import { spawnSync } from 'node:child_process';
 
 const rootDir = process.cwd();
 const tauriDir = join(rootDir, 'src-tauri');
-const libsDir = join(tauriDir, 'libs', 'macos');
-const entryDylib = join(libsDir, 'libcomposer.dylib');
+const sourceLibsDir = join(tauriDir, 'libs', 'macos');
+const bundleLibsDir = join(tauriDir, 'libs', 'macos-bundle');
+const entrySourceDylib = join(sourceLibsDir, 'libcomposer.dylib');
 const tauriConfigPaths = [
   join(tauriDir, 'tauri.macos.conf.json'),
   join(tauriDir, 'tauri.appstore.conf.json'),
@@ -37,8 +40,8 @@ if (process.platform !== 'darwin') {
   process.exit(1);
 }
 
-if (!existsSync(entryDylib)) {
-  console.error(`Entry dylib not found: ${entryDylib}`);
+if (!existsSync(entrySourceDylib)) {
+  console.error(`Entry dylib not found: ${entrySourceDylib}`);
   process.exit(1);
 }
 
@@ -117,9 +120,9 @@ function resolveTokenPath(value, consumerPath) {
   if (value.startsWith('@executable_path/')) {
     const suffix = value.slice('@executable_path/'.length);
     if (suffix.startsWith('../Frameworks/')) {
-      return resolve(libsDir, suffix.slice('../Frameworks/'.length));
+      return resolve(sourceLibsDir, suffix.slice('../Frameworks/'.length));
     }
-    return resolve(libsDir, suffix);
+    return resolve(sourceLibsDir, suffix);
   }
 
   return value;
@@ -143,7 +146,7 @@ function resolveDependency(ref, consumerPath) {
         join(resolveTokenPath(rpath, consumerPath), relativePath),
       ),
       join(dirname(consumerPath), relativePath),
-      join(libsDir, relativePath),
+      join(sourceLibsDir, relativePath),
     ];
 
     return candidates.find((candidate) => existsSync(candidate)) ?? null;
@@ -156,8 +159,8 @@ function toFrameworkPath(filePath) {
   return relative(tauriDir, filePath).replaceAll('\\', '/');
 }
 
-function ensureInsideLibsDir(filePath) {
-  const relativePath = relative(libsDir, filePath);
+function ensureInsideBundleLibsDir(filePath) {
+  const relativePath = relative(bundleLibsDir, filePath);
   return (
     relativePath === '' ||
     (!relativePath.startsWith('..') && !isAbsolute(relativePath))
@@ -188,7 +191,7 @@ function discoverDependencies() {
 
   function addItem(sourcePath, requestedBy = null) {
     const sourceRealPath = realpathSync(sourcePath);
-    const destPath = join(libsDir, basename(sourcePath));
+    const destPath = join(bundleLibsDir, basename(sourcePath));
     const destKey = basename(destPath);
     const existing = itemsByDest.get(destKey);
 
@@ -222,7 +225,7 @@ function discoverDependencies() {
     return item;
   }
 
-  addItem(entryDylib);
+  addItem(entrySourceDylib);
 
   while (pending.length > 0) {
     const item = pending.shift();
@@ -241,6 +244,11 @@ function discoverDependencies() {
       const resolved = resolveDependency(ref, item.sourcePath);
       if (!resolved) {
         unresolved.push({ ref, consumer: item.sourcePath });
+        continue;
+      }
+
+      const resolvedRealPath = realpathSync(resolved);
+      if (resolvedRealPath === item.sourceRealPath) {
         continue;
       }
 
@@ -264,18 +272,17 @@ function discoverDependencies() {
   return [...itemsByDest.values()];
 }
 
+function resetBundleLibsDir() {
+  rmSync(bundleLibsDir, { recursive: true, force: true });
+  mkdirSync(bundleLibsDir, { recursive: true });
+}
+
 function copyDylibs(items) {
   for (const item of items) {
-    if (!ensureInsideLibsDir(item.destPath)) {
-      throw new Error(`Destination is outside libs/macos: ${item.destPath}`);
-    }
-
-    const sourceRealPath = realpathSync(item.sourcePath);
-    const destExists = existsSync(item.destPath);
-    const destRealPath = destExists ? realpathSync(item.destPath) : null;
-
-    if (destRealPath && destRealPath === sourceRealPath) {
-      continue;
+    if (!ensureInsideBundleLibsDir(item.destPath)) {
+      throw new Error(
+        `Destination is outside libs/macos-bundle: ${item.destPath}`,
+      );
     }
 
     copyFileSync(item.sourcePath, item.destPath);
@@ -305,7 +312,7 @@ function rewriteInstallNames(items) {
 }
 
 function main() {
-  console.log(`Scanning entry dylib: ${entryDylib}`);
+  console.log(`Scanning entry dylib: ${entrySourceDylib}`);
   const items = discoverDependencies();
   const frameworks = items
     .map((item) => item.destPath)
@@ -315,6 +322,7 @@ function main() {
       return basename(a).localeCompare(basename(b));
     });
 
+  resetBundleLibsDir();
   copyDylibs(items);
   rewriteInstallNames(items);
 

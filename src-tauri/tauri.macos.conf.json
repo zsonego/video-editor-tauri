@@ -2,7 +2,7 @@
   "bundle": {
     "targets": ["dmg"],
     "macOS": {
-      "frameworks": ["libs/macos/libcomposer.dylib"],
+      "frameworks": ["libs/macos-bundle/libcomposer.dylib"],
       "signingIdentity": "Developer ID Application: Loogear Co., Ltd. (PMBZKYYRRP)",
       "hardenedRuntime": true
     }
