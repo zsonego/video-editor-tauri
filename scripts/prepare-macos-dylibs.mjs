@@ -27,6 +27,9 @@ const tauriConfigPaths = [
   join(tauriDir, 'tauri.dmg.conf.json'),
   join(tauriDir, 'tauri.appstore.conf.json'),
 ];
+const dependencySigningIdentity =
+  process.env.APPLE_DYLIB_SIGNING_IDENTITY ||
+  'Apple Distribution: Loogear Co., Ltd. (PMBZKYYRRP)';
 const systemPrefixes = [
   '/usr/lib/',
   '/System/Library/',
@@ -311,6 +314,22 @@ function rewriteInstallNames(items) {
   }
 }
 
+function signBundledDependencyDylibs(items) {
+  for (const item of items) {
+    if (basename(item.destPath) === 'libcomposer.dylib') {
+      continue;
+    }
+
+    run('codesign', [
+      '--force',
+      '--sign',
+      dependencySigningIdentity,
+      item.destPath,
+    ]);
+    console.log(`Signed dependency dylib: ${item.destPath}`);
+  }
+}
+
 function main() {
   console.log(`Scanning entry dylib: ${entrySourceDylib}`);
   const items = discoverDependencies();
@@ -329,6 +348,7 @@ function main() {
   for (const filePath of frameworks) {
     assertArm64(filePath);
   }
+  signBundledDependencyDylibs(items);
 
   const frameworkPaths = frameworks.map(toFrameworkPath);
   for (const configPath of tauriConfigPaths) {
