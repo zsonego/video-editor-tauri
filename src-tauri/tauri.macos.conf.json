@@ -3,7 +3,6 @@
     "targets": ["dmg"],
     "macOS": {
       "frameworks": ["libs/macos/libcomposer.dylib"],
-      "signingIdentity": "Developer ID Application: Loogear Co., Ltd. (PMBZKYYRRP)",
       "hardenedRuntime": true
     }
   }
