@@ -21,6 +21,8 @@ const tenantDialogVisible = ref(false);
 const tenantList = ref([]);
 const selectedTenantId = ref('');
 const terminalUuid = ref('');
+const terminalType = ref('');
+const terminalName = ref('');
 const forcePasswordVisible = ref(false);
 const forcePasswordSubmitting = ref(false);
 const forcePasswordContext = ref(null);
@@ -97,12 +99,20 @@ function isSuccessResponse(response) {
   return response?.code === undefined || Number(response.code) === 0;
 }
 
-function buildLoginPayload(phone, loginPassword, terminalUuid, renterId = '') {
+function buildLoginPayload(
+  phone,
+  loginPassword,
+  terminalUuid,
+  terminalInfo = {},
+  renterId = '',
+) {
   return {
     phone,
     password: loginPassword,
     renterId,
     terminalUuid,
+    terminalType: terminalInfo.terminalType || '',
+    terminalName: terminalInfo.terminalName || '',
   };
 }
 
@@ -261,6 +271,53 @@ async function ensureTerminalUuid() {
   return machineCode;
 }
 
+function normalizeTerminalInfo(info = {}) {
+  return {
+    terminalType: Number(info.terminalType) || '',
+    terminalName: String(info.terminalName || '').trim(),
+  };
+}
+
+function getBrowserTerminalType() {
+  const userAgent = window.navigator?.userAgent || '';
+
+  if (/Mac/i.test(userAgent)) {
+    return 1;
+  }
+
+  if (/Win/i.test(userAgent)) {
+    return 2;
+  }
+
+  return '';
+}
+
+async function getTerminalInfo() {
+  try {
+    return normalizeTerminalInfo(await invoke('get_terminal_info'));
+  } catch {
+    return {
+      terminalType: getBrowserTerminalType(),
+      terminalName: '',
+    };
+  }
+}
+
+async function ensureTerminalInfo() {
+  if (terminalType.value) {
+    return {
+      terminalType: terminalType.value,
+      terminalName: terminalName.value,
+    };
+  }
+
+  const info = await getTerminalInfo();
+  terminalType.value = info.terminalType;
+  terminalName.value = info.terminalName;
+
+  return info;
+}
+
 async function submitLogin(extra = {}) {
   const phone = account.value.trim();
   const loginPassword = password.value;
@@ -280,10 +337,12 @@ async function submitLogin(extra = {}) {
   try {
     const currentTerminalUuid =
       terminalUuid.value || (await ensureTerminalUuid());
+    const currentTerminalInfo = await ensureTerminalInfo();
     const payload = buildLoginPayload(
       phone,
       loginPassword,
       currentTerminalUuid,
+      currentTerminalInfo,
       extra.renterId || extra.tenantId || '',
     );
 
@@ -460,6 +519,7 @@ function confirmTenantSelection() {
 onMounted(() => {
   document.title = '登录 - 艾咔';
   ensureTerminalUuid();
+  ensureTerminalInfo();
 });
 </script>
 

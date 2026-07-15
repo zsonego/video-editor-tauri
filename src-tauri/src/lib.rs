@@ -94,6 +94,13 @@ struct ComposerExportResult {
     output_path: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TerminalInfo {
+    terminal_type: u8,
+    terminal_name: String,
+}
+
 type ComposerState = Arc<Mutex<ComposerRuntime>>;
 
 struct ComposerRuntime {
@@ -2671,6 +2678,48 @@ fn get_machine_code() -> Result<String, String> {
     }
 }
 
+#[tauri::command]
+fn get_terminal_info() -> Result<TerminalInfo, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let output = Command::new("cmd")
+            .args(["/C", "echo %COMPUTERNAME%"])
+            .output()
+            .map_err(|error| error.to_string())?;
+
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
+
+        return Ok(TerminalInfo {
+            terminal_type: 2,
+            terminal_name: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new("scutil")
+            .args(["--get", "ComputerName"])
+            .output()
+            .map_err(|error| error.to_string())?;
+
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
+
+        return Ok(TerminalInfo {
+            terminal_type: 1,
+            terminal_name: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        });
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        Err("Unsupported platform".to_string())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -2720,7 +2769,8 @@ pub fn run() {
             read_project_cover,
             delete_project_asset_files,
             delete_project_workspaces,
-            get_machine_code
+            get_machine_code,
+            get_terminal_info
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
