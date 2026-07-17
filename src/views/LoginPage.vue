@@ -53,7 +53,9 @@ function getLoginRenters(loginData) {
       ? loginData.tenantList
       : [];
 
-  return list.map(normalizeRenterItem);
+  return list
+    .map(normalizeRenterItem)
+    .filter((tenant) => String(tenant.renterId).trim() !== '-1');
 }
 
 function getLoginIdentity(loginData, payload) {
