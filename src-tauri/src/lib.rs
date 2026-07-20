@@ -877,6 +877,8 @@ struct TemplateClips {
 struct TemplateSubtitle {
     clip_id: String,
     id: String,
+    absolute_start_time: Option<String>,
+    duration: Option<String>,
 }
 
 fn is_xml_name_boundary(ch: Option<char>) -> bool {
@@ -1463,8 +1465,16 @@ fn find_first_template_subtitle(xml_content: &str) -> Option<TemplateSubtitle> {
                         .into_iter()
                         .next()?;
                     let id = xml_attribute_value(&subtitle_tag, "id")?;
+                    let absolute_start_time =
+                        xml_attribute_value(&subtitle_tag, "absoluteStartTime");
+                    let duration = xml_attribute_value(&subtitle_tag, "duration");
 
-                    Some(TemplateSubtitle { clip_id, id })
+                    Some(TemplateSubtitle {
+                        clip_id,
+                        id,
+                        absolute_start_time,
+                        duration,
+                    })
                 })
         })
 }
@@ -1516,10 +1526,22 @@ fn update_project_subtitle(
             .map(|value| value == subtitle.clip_id)
             .unwrap_or(false)
         {
+            let absolute_start_time = subtitle
+                .absolute_start_time
+                .as_ref()
+                .map(|value| format!(" absoluteStartTime=\"{}\"", escape_xml_attribute(value)))
+                .unwrap_or_default();
+            let duration = subtitle
+                .duration
+                .as_ref()
+                .map(|value| format!(" duration=\"{}\"", escape_xml_attribute(value)))
+                .unwrap_or_default();
             output.push_str(&format!(
-                "                <subtitle id=\"{}\" text=\"{}\" />\n",
+                "                <subtitle id=\"{}\" text=\"{}\"{}{} />\n",
                 escape_xml_attribute(&subtitle.id),
-                escape_xml_attribute(text)
+                escape_xml_attribute(text),
+                absolute_start_time,
+                duration
             ));
             updated = true;
         }
@@ -3001,7 +3023,7 @@ mod tests {
         let template_xml = r#"<template>
         <clips id="clips" target-track="clips">
             <clip id="clip-a">
-                <subtitle id="subtitle-a" startTime="0" duration="3000">
+                <subtitle id="subtitle-a" absoluteStartTime="1000" duration="3000">
                     <default>默认标题</default>
                 </subtitle>
             </clip>
@@ -3025,7 +3047,9 @@ mod tests {
         let updated_xml =
             update_project_subtitle(project_xml, &subtitle, "新标题").expect("updated xml");
 
-        assert!(updated_xml.contains(r#"<subtitle id="subtitle-a" text="新标题" />"#));
+        assert!(updated_xml.contains(
+            r#"<subtitle id="subtitle-a" text="新标题" absoluteStartTime="1000" duration="3000" />"#
+        ));
         assert!(!updated_xml.contains("old-a"));
         assert!(!updated_xml.contains("old-b"));
         assert!(!updated_xml.contains("subtitle-b"));
@@ -3050,6 +3074,8 @@ mod tests {
         let subtitle = TemplateSubtitle {
             clip_id: "clip-a".to_string(),
             id: "subtitle-a".to_string(),
+            absolute_start_time: None,
+            duration: None,
         };
         let updated_xml =
             update_template_subtitle_default(template_xml, &subtitle, "新标题 & 内容")
@@ -3072,6 +3098,8 @@ mod tests {
         let subtitle = TemplateSubtitle {
             clip_id: "clip-a".to_string(),
             id: "subtitle-a".to_string(),
+            absolute_start_time: None,
+            duration: None,
         };
         let updated_xml = update_template_subtitle_default(template_xml, &subtitle, "新标题")
             .expect("updated template xml");

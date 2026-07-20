@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "start": "tauri dev",
+    "build:icon": "tauri icon ./app-icon.png",
     "build:dylibs": "node scripts/prepare-macos-dylibs.mjs",
     "build:dmg": "tauri build --config src-tauri/tauri.dmg.conf.json --target aarch64-apple-darwin --bundles dmg",
     "build:mas:app": "tauri build --config src-tauri/tauri.appstore.conf.json --target aarch64-apple-darwin --bundles app",

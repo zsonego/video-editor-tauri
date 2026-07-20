@@ -1049,7 +1049,6 @@ async function startEditing() {
   loadMyProjects();
 
   clearProjectEditingState();
-  subtitleText.value = parseTemplateSubtitleText(getActiveTemplateXmlContent());
   await initializeDefaultTemplateAssets();
   try {
     await initializeProjectAssetOffsets();
@@ -2491,7 +2490,6 @@ async function openDraftProject(projectId) {
     activeTemplateDemoSource.value = resolveTemplateVideoSource(
       parseTemplateDemoPath(templateXml),
     );
-    subtitleText.value = parseTemplateSubtitleText(templateXml);
 
     await initializeDefaultTemplateAssets();
     restoreProjectVideoOffsets(projectFileXml);
@@ -3589,22 +3587,6 @@ function parseTemplateDemoPath(xmlContent) {
   }
 
   return getElementText(xmlContent, 'demo-path');
-}
-
-function parseTemplateSubtitleText(xmlContent) {
-  const xml = new DOMParser().parseFromString(xmlContent, 'text/xml');
-
-  if (!xml.querySelector('parsererror')) {
-    const subtitle = xml.querySelector('subtitle');
-    return (
-      subtitle?.querySelector('default')?.textContent?.trim() ||
-      subtitle?.getAttribute('text') ||
-      ''
-    );
-  }
-
-  const subtitleBody = getElementText(xmlContent, 'subtitle');
-  return getElementText(subtitleBody, 'default');
 }
 
 function parseProjectMaxOffsets(projectFileXml) {
