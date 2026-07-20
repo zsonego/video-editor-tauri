@@ -124,7 +124,7 @@ type ComposerInitFn = unsafe extern "C" fn() -> c_int;
 #[cfg(target_os = "macos")]
 type ComposerCleanupFn = unsafe extern "C" fn();
 #[cfg(target_os = "macos")]
-type ComposerProgressCallback = extern "C" fn(c_int, *const c_char, *mut c_void);
+type ComposerProgressCallback = extern "C" fn(c_int, c_int, *const c_char, *mut c_void);
 #[cfg(target_os = "macos")]
 type ComposerComposeFn = unsafe extern "C" fn(
     *const c_char,
@@ -480,10 +480,26 @@ impl Drop for ComposerRuntime {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn composer_step_status(step: i32) -> &'static str {
+    match step {
+        0 => "初始化",
+        1 => "预处理片段",
+        2 => "合成画中画",
+        3 => "合并转场",
+        4 => "构建最终视频",
+        5 => "混流音频",
+        6 => "添加字幕",
+        7 => "合成完成",
+        _ => "正在合成视频...",
+    }
+}
+
 #[cfg(target_os = "macos")]
 extern "C" fn composer_progress_callback(
     percent: c_int,
-    message: *const c_char,
+    step: c_int,
+    _message: *const c_char,
     userdata: *mut c_void,
 ) {
     if userdata.is_null() {
@@ -492,22 +508,10 @@ extern "C" fn composer_progress_callback(
     }
 
     let context = unsafe { &*(userdata.cast::<ComposerCallbackContext>()) };
-    let status = if message.is_null() {
-        "正在合成视频...".to_string()
-    } else {
-        unsafe { CStr::from_ptr(message) }
-            .to_string_lossy()
-            .trim()
-            .to_string()
-    };
-    let status = if status.is_empty() {
-        "正在合成视频...".to_string()
-    } else {
-        status
-    };
+    let status = composer_step_status(step);
     let progress = percent.clamp(0, 100) as u8;
 
-    emit_composer_progress(&context.app, &context.export_id, progress, &status);
+    emit_composer_progress(&context.app, &context.export_id, progress, status);
 }
 
 #[cfg(target_os = "macos")]
@@ -3105,5 +3109,25 @@ mod tests {
             .expect("updated template xml");
 
         assert!(updated_xml.contains(r#"<subtitle id="subtitle-a" text="新标题" />"#));
+    }
+
+    #[test]
+    fn maps_composer_steps_to_display_statuses() {
+        let expected = [
+            "初始化",
+            "预处理片段",
+            "合成画中画",
+            "合并转场",
+            "构建最终视频",
+            "混流音频",
+            "添加字幕",
+            "合成完成",
+        ];
+
+        for (step, status) in expected.into_iter().enumerate() {
+            assert_eq!(composer_step_status(step as i32), status);
+        }
+        assert_eq!(composer_step_status(-1), "正在合成视频...");
+        assert_eq!(composer_step_status(8), "正在合成视频...");
     }
 }
