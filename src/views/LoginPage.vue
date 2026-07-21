@@ -155,7 +155,9 @@ function shouldForceResetPassword(userInfo) {
 }
 
 function validateUserInfo(userInfo) {
-  return Boolean(userInfo?.userId && (userInfo?.tenantId || userInfo?.renterId));
+  return Boolean(
+    userInfo?.userId && (userInfo?.tenantId || userInfo?.renterId),
+  );
 }
 
 async function fetchLoginUserInfo(identity) {
@@ -366,7 +368,9 @@ async function submitLogin(extra = {}) {
       }
 
       saveLoginToken(token);
-      const userInfoResponse = await getUserInfo(buildUserInfoPayload(identity));
+      const userInfoResponse = await getUserInfo(
+        buildUserInfoPayload(identity),
+      );
       const userInfo = getUserInfoPayload(userInfoResponse);
 
       if (shouldForceResetPassword(userInfo)) {
@@ -525,13 +529,7 @@ onMounted(() => {
 
 <template>
   <section class="login-page">
-    <video
-      class="login-background-video"
-      autoplay
-      muted
-      loop
-      playsinline
-    >
+    <video class="login-background-video" autoplay muted loop playsinline>
       <source :src="backgroundVideo" type="video/mp4" />
     </video>
     <div class="login-background-shade"></div>
@@ -712,9 +710,9 @@ onMounted(() => {
                 </button>
               </div>
 
-              <div class="login-links">
+              <!-- <div class="login-links">
                 <button type="button">忘记密码?</button>
-              </div>
+              </div> -->
 
               <div class="agreement-consent">
                 <input

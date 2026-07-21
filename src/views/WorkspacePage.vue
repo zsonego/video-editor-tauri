@@ -2114,16 +2114,12 @@ function revealPausedVideoFrame(video, targetTime = 0, updateControls = null) {
 function handleMainVideoLoadedMetadata() {
   const targetTime = pendingMainVideoSeekTime ?? timelinePlayheadTime.value;
   timelinePreviewSeeking.value = true;
-  revealPausedVideoFrame(
-    mainVideoRef.value,
-    targetTime,
-    () => {
-      updatePlayerControls();
-      timelinePlayheadTime.value = targetTime;
-      pendingMainVideoSeekTime = null;
-      timelinePreviewSeeking.value = false;
-    },
-  );
+  revealPausedVideoFrame(mainVideoRef.value, targetTime, () => {
+    updatePlayerControls();
+    timelinePlayheadTime.value = targetTime;
+    pendingMainVideoSeekTime = null;
+    timelinePreviewSeeking.value = false;
+  });
 }
 
 function handleModalVideoLoadedMetadata() {
@@ -3817,8 +3813,7 @@ async function attachProjectCovers(items) {
 
       return {
         ...item,
-        image:
-          projectCover || (await getTemplateCoverUrl(item.templateId)),
+        image: projectCover || (await getTemplateCoverUrl(item.templateId)),
       };
     }),
   );
@@ -4593,9 +4588,7 @@ onBeforeUnmount(() => {
                     >
                       <div
                         v-for="(video, videoIndex) in style.videos"
-                        :key="
-                          getVideoItemKey(style, video, videoIndex)
-                        "
+                        :key="getVideoItemKey(style, video, videoIndex)"
                         :ref="
                           (element) =>
                             setImportVideoItemRef(
