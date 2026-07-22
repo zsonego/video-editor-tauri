@@ -14,7 +14,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, OnceLock,
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri::{utils::config::Color, AppHandle, Emitter, Manager, WindowEvent};
 
@@ -689,6 +689,145 @@ fn resolve_url(base_url: &str, url: &str) -> Result<String, String> {
     }
 
     Ok(format!("{base}/{}", url.trim_start_matches('/')))
+}
+
+fn decode_percent_encoded(value: &str) -> String {
+    fn hex_value(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    let source = value.as_bytes();
+    let mut decoded = Vec::with_capacity(source.len());
+    let mut index = 0;
+
+    while index < source.len() {
+        if source[index] == b'%' && index + 2 < source.len() {
+            if let (Some(high), Some(low)) =
+                (hex_value(source[index + 1]), hex_value(source[index + 2]))
+            {
+                decoded.push((high << 4) | low);
+                index += 3;
+                continue;
+            }
+        }
+
+        decoded.push(source[index]);
+        index += 1;
+    }
+
+    String::from_utf8_lossy(&decoded).to_string()
+}
+
+fn sanitize_manual_filename(encoded_name: &str) -> String {
+    let decoded = decode_percent_encoded(encoded_name);
+    let file_name = decoded
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default()
+        .trim();
+    let sanitized: String = file_name
+        .chars()
+        .map(|ch| {
+            if ch.is_control() || matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+            {
+                '_'
+            } else {
+                ch
+            }
+        })
+        .collect();
+    let sanitized = sanitized.trim_matches([' ', '.']);
+
+    if sanitized.is_empty() {
+        "AICut使用手册.docx".to_string()
+    } else {
+        sanitized.to_string()
+    }
+}
+
+fn available_download_path(directory: &Path, file_name: &str) -> PathBuf {
+    let requested_path = directory.join(file_name);
+    if !requested_path.exists() {
+        return requested_path;
+    }
+
+    let file_path = Path::new(file_name);
+    let stem = file_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("AICut使用手册");
+    let extension = file_path.extension().and_then(|value| value.to_str());
+
+    for index in 1..10_000 {
+        let candidate_name = match extension {
+            Some(extension) if !extension.is_empty() => format!("{stem} ({index}).{extension}"),
+            _ => format!("{stem} ({index})"),
+        };
+        let candidate_path = directory.join(candidate_name);
+        if !candidate_path.exists() {
+            return candidate_path;
+        }
+    }
+
+    directory.join(format!(
+        "AICut使用手册-{}.docx",
+        Local::now().format("%Y%m%d%H%M%S")
+    ))
+}
+
+fn download_help_guide_blocking(
+    api_base_url: String,
+    authorization_token: String,
+    output_dir: String,
+) -> Result<String, String> {
+    if authorization_token.trim().is_empty() {
+        return Err("未登录或 Token 已失效".to_string());
+    }
+
+    let output_dir = PathBuf::from(output_dir);
+    if !output_dir.is_dir() {
+        return Err("选择的保存目录无效".to_string());
+    }
+
+    let url = resolve_url(&api_base_url, "/aicut/manual/download")?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|error| format!("指南下载失败：{error}"))?;
+    let response = client
+        .get(&url)
+        .bearer_auth(authorization_token.trim())
+        .send()
+        .map_err(|error| format!("指南下载失败：{error}"))?;
+    let status = response.status();
+
+    if !status.is_success() {
+        return Err(match status.as_u16() {
+            401 => "未登录或 Token 已失效".to_string(),
+            404 => "当前登录端对应的使用手册尚未配置".to_string(),
+            500 => "使用手册文件读取或下载异常".to_string(),
+            _ => format!("指南下载失败（HTTP {}）", status.as_u16()),
+        });
+    }
+
+    let encoded_name = response
+        .headers()
+        .get("download-filename")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("AICut%E4%BD%BF%E7%94%A8%E6%89%8B%E5%86%8C.docx");
+    let file_name = sanitize_manual_filename(encoded_name);
+    let output_path = available_download_path(&output_dir, &file_name);
+    let bytes = response
+        .bytes()
+        .map_err(|error| format!("指南下载失败：{error}"))?;
+
+    fs::write(&output_path, bytes).map_err(|error| format!("指南保存失败：{error}"))?;
+    Ok(output_path.to_string_lossy().to_string())
 }
 
 fn progress_between(start: u8, end: u8, completed: u64, total: Option<u64>) -> u8 {
@@ -2220,6 +2359,19 @@ fn ensure_default_output_dir() -> Result<String, String> {
 }
 
 #[tauri::command]
+async fn download_help_guide(
+    api_base_url: String,
+    authorization_token: String,
+    output_dir: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        download_help_guide_blocking(api_base_url, authorization_token, output_dir)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 fn create_project_workspace(
     template_id: String,
     project_id: String,
@@ -2786,6 +2938,7 @@ pub fn run() {
             prepare_template_assets,
             cancel_template_download,
             ensure_default_output_dir,
+            download_help_guide,
             create_project_workspace,
             read_project_workspace,
             save_project_asset,
@@ -3129,5 +3282,20 @@ mod tests {
         }
         assert_eq!(composer_step_status(-1), "正在合成视频...");
         assert_eq!(composer_step_status(8), "正在合成视频...");
+    }
+
+    #[test]
+    fn decodes_and_sanitizes_manual_download_filename() {
+        assert_eq!(
+            sanitize_manual_filename(
+                "AICut%E5%AE%A2%E6%88%B7%E7%AB%AF%E4%BD%BF%E7%94%A8%E6%89%8B%E5%86%8C.docx"
+            ),
+            "AICut客户端使用手册.docx"
+        );
+        assert_eq!(
+            sanitize_manual_filename("../unsafe%2Fmanual.docx"),
+            "manual.docx"
+        );
+        assert_eq!(sanitize_manual_filename("..."), "AICut使用手册.docx");
     }
 }

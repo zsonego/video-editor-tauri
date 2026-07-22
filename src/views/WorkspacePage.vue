@@ -73,6 +73,7 @@ const profileModalVisible = ref(false);
 const passwordModalVisible = ref(false);
 const helpCenterVisible = ref(false);
 const activeHelpTab = ref('guide');
+const helpGuideDownloading = ref(false);
 const logoutConfirmVisible = ref(false);
 const logoutSubmitting = ref(false);
 const passwordSubmitting = ref(false);
@@ -4107,8 +4108,34 @@ function switchHelpTab(tab) {
   activeHelpTab.value = tab;
 }
 
-function downloadHelpGuide() {
-  systemMessage.info('离线指南暂未开放下载');
+async function downloadHelpGuide() {
+  if (helpGuideDownloading.value) return;
+
+  helpGuideDownloading.value = true;
+  try {
+    const selectedDirectory = await openDialog({
+      directory: true,
+      multiple: false,
+      title: '选择指南保存目录',
+    });
+    if (!selectedDirectory) return;
+
+    const outputDir = Array.isArray(selectedDirectory)
+      ? selectedDirectory[0]
+      : selectedDirectory;
+    if (!outputDir) return;
+
+    await invoke('download_help_guide', {
+      apiBaseUrl: API_BASE_URL,
+      authorizationToken: localStorage.getItem('token') || '',
+      outputDir,
+    });
+    systemMessage.success('指南下载成功');
+  } catch (error) {
+    systemMessage.error(error?.message || String(error || '指南下载失败'));
+  } finally {
+    helpGuideDownloading.value = false;
+  }
 }
 
 function showLogoutConfirm() {
@@ -5354,12 +5381,23 @@ onBeforeUnmount(() => {
                   </div>
                   <div class="absolute bottom-12 right-12">
                     <button
-                      class="flex items-center gap-2 px-6 py-3 bg-electric-blue text-white rounded-full font-black shadow-2xl shadow-electric-blue/40 hover:scale-105 active:scale-95 transition-all"
+                      class="flex items-center gap-2 px-6 py-3 bg-electric-blue text-white rounded-full font-black shadow-2xl shadow-electric-blue/40 hover:scale-105 active:scale-95 transition-all disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:scale-100 disabled:active:scale-100"
                       type="button"
+                      :disabled="helpGuideDownloading"
                       @click="downloadHelpGuide"
                     >
-                      <span class="material-symbols-outlined">download</span>
-                      <span>下载离线指南</span>
+                      <span
+                        class="material-symbols-outlined"
+                        :class="{
+                          'start-editing-spinner': helpGuideDownloading,
+                        }"
+                        >{{
+                          helpGuideDownloading ? 'progress_activity' : 'download'
+                        }}</span
+                      >
+                      <span>{{
+                        helpGuideDownloading ? '下载中...' : '下载离线指南'
+                      }}</span>
                     </button>
                   </div>
                 </main>
