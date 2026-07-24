@@ -3,7 +3,7 @@
     "targets": ["app"],
     "category": "Video",
     "resources": {
-      "infoplist/**": "./"
+      "infoplist/": ""
     },
     "macOS": {
       "frameworks": ["libs/macos-bundle/libcomposer.dylib"],

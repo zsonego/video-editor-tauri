@@ -2,7 +2,7 @@
   "bundle": {
     "targets": ["dmg"],
     "resources": {
-      "infoplist/**": "./"
+      "infoplist/": ""
     },
     "macOS": {
       "frameworks": ["libs/macos-bundle/libcomposer.dylib"],
