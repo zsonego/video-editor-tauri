@@ -2898,11 +2898,221 @@ fn get_terminal_info() -> Result<TerminalInfo, String> {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+enum MacMenuLanguage {
+    SimplifiedChinese,
+    TraditionalChinese,
+    English,
+}
+
+#[cfg(target_os = "macos")]
+struct MacMenuLabels {
+    about: &'static str,
+    services: &'static str,
+    hide: &'static str,
+    hide_others: &'static str,
+    quit: &'static str,
+    file: &'static str,
+    close_window: &'static str,
+    edit: &'static str,
+    undo: &'static str,
+    redo: &'static str,
+    cut: &'static str,
+    copy: &'static str,
+    paste: &'static str,
+    select_all: &'static str,
+    view: &'static str,
+    fullscreen: &'static str,
+    window: &'static str,
+    minimize: &'static str,
+    zoom: &'static str,
+    help: &'static str,
+}
+
+#[cfg(target_os = "macos")]
+fn preferred_macos_menu_language() -> MacMenuLanguage {
+    use objc2_foundation::NSLocale;
+
+    let primary_language = NSLocale::preferredLanguages()
+        .firstObject()
+        .map(|language| language.to_string())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    if primary_language.starts_with("zh-hant")
+        || primary_language.starts_with("zh-tw")
+        || primary_language.starts_with("zh-hk")
+        || primary_language.starts_with("zh-mo")
+    {
+        MacMenuLanguage::TraditionalChinese
+    } else if primary_language.starts_with("zh") {
+        MacMenuLanguage::SimplifiedChinese
+    } else {
+        MacMenuLanguage::English
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn mac_menu_labels(language: MacMenuLanguage) -> Option<MacMenuLabels> {
+    match language {
+        MacMenuLanguage::SimplifiedChinese => Some(MacMenuLabels {
+            about: "关于",
+            services: "服务",
+            hide: "隐藏",
+            hide_others: "隐藏其他",
+            quit: "退出",
+            file: "文件",
+            close_window: "关闭窗口",
+            edit: "编辑",
+            undo: "撤销",
+            redo: "重做",
+            cut: "剪切",
+            copy: "拷贝",
+            paste: "粘贴",
+            select_all: "全选",
+            view: "视图",
+            fullscreen: "进入全屏幕",
+            window: "窗口",
+            minimize: "最小化",
+            zoom: "缩放",
+            help: "帮助",
+        }),
+        MacMenuLanguage::TraditionalChinese => Some(MacMenuLabels {
+            about: "關於",
+            services: "服務",
+            hide: "隱藏",
+            hide_others: "隱藏其他",
+            quit: "結束",
+            file: "檔案",
+            close_window: "關閉視窗",
+            edit: "編輯",
+            undo: "還原",
+            redo: "重做",
+            cut: "剪下",
+            copy: "拷貝",
+            paste: "貼上",
+            select_all: "全選",
+            view: "顯示方式",
+            fullscreen: "進入全螢幕",
+            window: "視窗",
+            minimize: "縮到最小",
+            zoom: "縮放",
+            help: "輔助說明",
+        }),
+        MacMenuLanguage::English => None,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn build_macos_menu<R: tauri::Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri::menu::Menu<R>> {
+    use tauri::menu::{
+        AboutMetadata, Menu, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID, WINDOW_SUBMENU_ID,
+    };
+
+    let Some(labels) = mac_menu_labels(preferred_macos_menu_language()) else {
+        return Menu::default(app);
+    };
+
+    let package_info = app.package_info();
+    let app_name = package_info.name.clone();
+    let about_metadata = AboutMetadata {
+        name: Some(app_name.clone()),
+        version: Some(package_info.version.to_string()),
+        copyright: app.config().bundle.copyright.clone(),
+        authors: app
+            .config()
+            .bundle
+            .publisher
+            .clone()
+            .map(|publisher| vec![publisher]),
+        ..Default::default()
+    };
+
+    let app_menu = Submenu::with_items(
+        app,
+        app_name,
+        true,
+        &[
+            &PredefinedMenuItem::about(app, Some(labels.about), Some(about_metadata))?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::services(app, Some(labels.services))?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::hide(app, Some(labels.hide))?,
+            &PredefinedMenuItem::hide_others(app, Some(labels.hide_others))?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::quit(app, Some(labels.quit))?,
+        ],
+    )?;
+    let file_menu = Submenu::with_items(
+        app,
+        labels.file,
+        true,
+        &[&PredefinedMenuItem::close_window(
+            app,
+            Some(labels.close_window),
+        )?],
+    )?;
+    let edit_menu = Submenu::with_items(
+        app,
+        labels.edit,
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, Some(labels.undo))?,
+            &PredefinedMenuItem::redo(app, Some(labels.redo))?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, Some(labels.cut))?,
+            &PredefinedMenuItem::copy(app, Some(labels.copy))?,
+            &PredefinedMenuItem::paste(app, Some(labels.paste))?,
+            &PredefinedMenuItem::select_all(app, Some(labels.select_all))?,
+        ],
+    )?;
+    let view_menu = Submenu::with_items(
+        app,
+        labels.view,
+        true,
+        &[&PredefinedMenuItem::fullscreen(
+            app,
+            Some(labels.fullscreen),
+        )?],
+    )?;
+    let window_menu = Submenu::with_id_and_items(
+        app,
+        WINDOW_SUBMENU_ID,
+        labels.window,
+        true,
+        &[
+            &PredefinedMenuItem::minimize(app, Some(labels.minimize))?,
+            &PredefinedMenuItem::maximize(app, Some(labels.zoom))?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::close_window(app, Some(labels.close_window))?,
+        ],
+    )?;
+    let help_menu = Submenu::with_id_and_items(app, HELP_SUBMENU_ID, labels.help, true, &[])?;
+
+    Menu::with_items(
+        app,
+        &[
+            &app_menu,
+            &file_menu,
+            &edit_menu,
+            &view_menu,
+            &window_menu,
+            &help_menu,
+        ],
+    )
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_opener::init());
+
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(build_macos_menu);
+
+    builder
         .setup(|app| {
             if let Err(error) = ensure_aicut_dirs() {
                 eprintln!("[app] failed to ensure aicut dirs: {error}");
