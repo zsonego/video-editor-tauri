@@ -1,6 +1,9 @@
 {
   "bundle": {
     "targets": ["dmg"],
+    "resources": {
+      "infoplist/**": "./"
+    },
     "macOS": {
       "frameworks": ["libs/macos-bundle/libcomposer.dylib"],
       "signingIdentity": "Developer ID Application: Loogear Co., Ltd. (PMBZKYYRRP)",

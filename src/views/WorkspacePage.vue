@@ -160,6 +160,7 @@ let pendingProjectUpdate = null;
 let pendingMainVideoSeekTime = null;
 const canceledTemplateDownloadIds = new Set();
 const VIDEO_FRAME_REVEAL_TIME = 0.001;
+const VIDEO_FRAME_REVEAL_TIMEOUT = 2000;
 const VIDEO_SOURCE_TYPES = {
   mp4: 'video/mp4',
   m4v: 'video/mp4',
@@ -2078,44 +2079,96 @@ function revealPausedVideoFrame(video, targetTime = 0, updateControls = null) {
       ? normalizedTarget
       : Math.min(duration || VIDEO_FRAME_REVEAL_TIME, VIDEO_FRAME_REVEAL_TIME);
 
-  const finish = () => {
-    video.pause();
-    updateControls?.();
-  };
-
+  let finished = false;
   let fallbackTimer = null;
-  const onSeeked = () => {
+  let frameCallbackId = null;
+  let seekCompleted = false;
+  let targetFramePresented = false;
+
+  const cleanup = () => {
     video.removeEventListener('seeked', onSeeked);
     if (fallbackTimer) {
       window.clearTimeout(fallbackTimer);
       fallbackTimer = null;
     }
-    finish();
+    if (
+      frameCallbackId !== null &&
+      typeof video.cancelVideoFrameCallback === 'function'
+    ) {
+      video.cancelVideoFrameCallback(frameCallbackId);
+      frameCallbackId = null;
+    }
+  };
+
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    cleanup();
+    updateControls?.();
+  };
+
+  const finishWhenReady = () => {
+    if (seekCompleted && targetFramePresented) {
+      finish();
+    }
+  };
+
+  const watchTargetFrame = () => {
+    if (typeof video.requestVideoFrameCallback !== 'function') return;
+
+    frameCallbackId = video.requestVideoFrameCallback((_now, metadata) => {
+      frameCallbackId = null;
+      const mediaTime = Number(metadata?.mediaTime);
+      if (
+        !Number.isFinite(mediaTime) ||
+        Math.abs(mediaTime - revealTime) <= 0.15
+      ) {
+        targetFramePresented = true;
+        finishWhenReady();
+        return;
+      }
+
+      if (!finished) {
+        watchTargetFrame();
+      }
+    });
+  };
+
+  const onSeeked = () => {
+    seekCompleted = true;
+    if (typeof video.requestVideoFrameCallback !== 'function') {
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          targetFramePresented = true;
+          finishWhenReady();
+        });
+      });
+      return;
+    }
+
+    finishWhenReady();
   };
 
   video.addEventListener('seeked', onSeeked, { once: true });
 
   try {
+    watchTargetFrame();
     video.currentTime = revealTime;
     fallbackTimer = window.setTimeout(() => {
-      video.removeEventListener('seeked', onSeeked);
       fallbackTimer = null;
       finish();
-    }, 300);
+    }, VIDEO_FRAME_REVEAL_TIMEOUT);
   } catch (error) {
-    video.removeEventListener('seeked', onSeeked);
-    if (fallbackTimer) {
-      window.clearTimeout(fallbackTimer);
-      fallbackTimer = null;
-    }
     finish();
   }
 }
 
-function handleMainVideoLoadedMetadata() {
+function handleMainVideoLoadedData() {
+  const video = mainVideoRef.value;
   const targetTime = pendingMainVideoSeekTime ?? timelinePlayheadTime.value;
   timelinePreviewSeeking.value = true;
-  revealPausedVideoFrame(mainVideoRef.value, targetTime, () => {
+  revealPausedVideoFrame(video, targetTime, () => {
+    if (video !== mainVideoRef.value) return;
     updatePlayerControls();
     timelinePlayheadTime.value = targetTime;
     pendingMainVideoSeekTime = null;
@@ -4804,8 +4857,8 @@ onBeforeUnmount(() => {
                   ref="mainVideoRef"
                   class="w-full h-full object-cover bg-black"
                   playsinline
-                  preload="metadata"
-                  @loadedmetadata="handleMainVideoLoadedMetadata"
+                  preload="auto"
+                  @loadeddata="handleMainVideoLoadedData"
                   @timeupdate="updatePlayerControls"
                   @play="updatePlayerControls"
                   @pause="updatePlayerControls"

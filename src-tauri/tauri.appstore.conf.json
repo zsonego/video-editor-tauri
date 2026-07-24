@@ -2,6 +2,9 @@
   "bundle": {
     "targets": ["app"],
     "category": "Video",
+    "resources": {
+      "infoplist/**": "./"
+    },
     "macOS": {
       "frameworks": ["libs/macos-bundle/libcomposer.dylib"],
       "minimumSystemVersion": "12.0",
