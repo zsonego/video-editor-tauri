@@ -78,6 +78,10 @@ struct TemplateDownloadProgress {
     download_id: String,
     progress: u8,
     status: String,
+    phase: String,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    resumed_bytes: u64,
 }
 
 #[derive(Clone, Serialize)]
@@ -170,10 +174,28 @@ fn ensure_not_cancelled(cancel_flag: &AtomicBool) -> Result<(), String> {
 }
 
 fn emit_progress(app: &AppHandle, download_id: &str, progress: u8, status: &str) {
+    emit_transfer_progress(app, download_id, progress, status, "", 0, None, 0);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_transfer_progress(
+    app: &AppHandle,
+    download_id: &str,
+    progress: u8,
+    status: &str,
+    phase: &str,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    resumed_bytes: u64,
+) {
     let payload = TemplateDownloadProgress {
         download_id: download_id.to_string(),
         progress: progress.min(100),
         status: status.to_string(),
+        phase: phase.to_string(),
+        downloaded_bytes,
+        total_bytes,
+        resumed_bytes,
     };
     let _ = app.emit("template-download-progress", payload);
 }
@@ -1992,25 +2014,23 @@ fn download_bytes(
     app: &AppHandle,
     download_id: &str,
     url: &str,
-    authorization_token: &str,
     cancel_flag: &AtomicBool,
     start_progress: u8,
     end_progress: u8,
     status: &str,
 ) -> Result<Vec<u8>, String> {
     ensure_not_cancelled(cancel_flag)?;
-    emit_progress(app, download_id, start_progress, status);
+    emit_transfer_progress(app, download_id, start_progress, status, "xml", 0, None, 0);
 
     let client = reqwest::blocking::Client::new();
-    let mut request = client.get(url);
-    if !authorization_token.trim().is_empty() {
-        request = request.bearer_auth(authorization_token.trim());
-    }
-    let mut response = request.send().map_err(|error| error.to_string())?;
+    let mut response = client.get(url).send().map_err(bos_request_error)?;
     let response_status = response.status();
 
     if !response_status.is_success() {
-        return Err(format!("Download failed: {url} ({response_status})"));
+        return Err(format!(
+            "BOS download failed (HTTP {})",
+            response_status.as_u16()
+        ));
     }
 
     let total = response.content_length();
@@ -2031,79 +2051,386 @@ fn download_bytes(
 
         downloaded += read_count as u64;
         bytes.extend_from_slice(&buffer[..read_count]);
-        emit_progress(
+        emit_transfer_progress(
             app,
             download_id,
             progress_between(start_progress, end_progress, downloaded, total),
             status,
+            "xml",
+            downloaded,
+            total,
+            0,
         );
     }
 
-    emit_progress(app, download_id, end_progress, status);
+    emit_transfer_progress(
+        app,
+        download_id,
+        end_progress,
+        status,
+        "xml",
+        downloaded,
+        total.or(Some(downloaded)),
+        0,
+    );
     Ok(bytes)
 }
 
-fn download_to_file(
+fn bos_request_error(error: reqwest::Error) -> String {
+    if error.is_timeout() {
+        "BOS request timed out".to_string()
+    } else if error.is_connect() {
+        "BOS connection failed".to_string()
+    } else {
+        "BOS network request failed".to_string()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedContentRange {
+    start: Option<u64>,
+    end: Option<u64>,
+    total: Option<u64>,
+}
+
+fn parse_content_range(value: &str) -> Option<ParsedContentRange> {
+    let value = value.trim();
+    let range_and_total = value.strip_prefix("bytes ")?;
+    let (range, total) = range_and_total.split_once('/')?;
+    let total = if total == "*" {
+        None
+    } else {
+        total.parse::<u64>().ok()
+    };
+
+    if range == "*" {
+        return Some(ParsedContentRange {
+            start: None,
+            end: None,
+            total,
+        });
+    }
+
+    let (start, end) = range.split_once('-')?;
+    Some(ParsedContentRange {
+        start: Some(start.parse::<u64>().ok()?),
+        end: Some(end.parse::<u64>().ok()?),
+        total,
+    })
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PartialDownloadMetadata {
+    template_version: String,
+    etag: Option<String>,
+}
+
+fn read_partial_download_metadata(path: &Path) -> Option<PartialDownloadMetadata> {
+    let content = fs::read(path).ok()?;
+    serde_json::from_slice(&content).ok()
+}
+
+fn write_partial_download_metadata(
+    path: &Path,
+    metadata: &PartialDownloadMetadata,
+) -> Result<(), String> {
+    let content = serde_json::to_vec(metadata).map_err(|error| error.to_string())?;
+    fs::write(path, content).map_err(|error| error.to_string())
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<(), String> {
+    if path.exists() {
+        fs::remove_file(path).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn clear_partial_download(
+    output_path: &Path,
+    partial_path: &Path,
+    metadata_path: &Path,
+) -> Result<(), String> {
+    remove_file_if_exists(output_path)?;
+    remove_file_if_exists(partial_path)?;
+    remove_file_if_exists(metadata_path)
+}
+
+fn validate_partial_download_version(
+    output_path: &Path,
+    partial_path: &Path,
+    metadata_path: &Path,
+    template_version: &str,
+) -> Result<Option<PartialDownloadMetadata>, String> {
+    let metadata = read_partial_download_metadata(metadata_path);
+    let has_download_file = output_path.is_file() || partial_path.is_file();
+    let version_matches = metadata
+        .as_ref()
+        .map(|value| value.template_version == template_version)
+        .unwrap_or(false);
+
+    if has_download_file && !version_matches {
+        clear_partial_download(output_path, partial_path, metadata_path)?;
+        return Ok(None);
+    }
+
+    Ok(metadata)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn download_resumable_to_file(
     app: &AppHandle,
     download_id: &str,
     url: &str,
-    authorization_token: &str,
     output_path: &Path,
+    partial_path: &Path,
+    metadata_path: &Path,
+    template_version: &str,
     cancel_flag: &AtomicBool,
     start_progress: u8,
     end_progress: u8,
     status: &str,
 ) -> Result<(), String> {
     ensure_not_cancelled(cancel_flag)?;
-    emit_progress(app, download_id, start_progress, status);
-
-    let client = reqwest::blocking::Client::new();
-    let mut request = client.get(url);
-    if !authorization_token.trim().is_empty() {
-        request = request.bearer_auth(authorization_token.trim());
-    }
-    let mut response = request.send().map_err(|error| error.to_string())?;
-    let response_status = response.status();
-
-    if !response_status.is_success() {
-        return Err(format!("Download failed: {url} ({response_status})"));
-    }
 
     if let Some(parent) = output_path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
 
-    let total = response.content_length();
-    let mut downloaded = 0_u64;
-    let mut output_file = fs::File::create(output_path).map_err(|error| error.to_string())?;
-    let mut buffer = [0_u8; 64 * 1024];
+    let client = reqwest::blocking::Client::new();
+    let mut metadata = validate_partial_download_version(
+        output_path,
+        partial_path,
+        metadata_path,
+        template_version,
+    )?;
 
-    loop {
+    for restart_attempt in 0..2 {
         ensure_not_cancelled(cancel_flag)?;
 
-        let read_count = response
-            .read(&mut buffer)
-            .map_err(|error| error.to_string())?;
+        let resume_offset = if partial_path.is_file() {
+            fs::metadata(partial_path)
+                .map_err(|error| error.to_string())?
+                .len()
+        } else {
+            0
+        };
+        let download_status = if resume_offset > 0 {
+            "正在续传素材包..."
+        } else {
+            status
+        };
+        emit_transfer_progress(
+            app,
+            download_id,
+            start_progress,
+            download_status,
+            "assets",
+            resume_offset,
+            None,
+            resume_offset,
+        );
 
-        if read_count == 0 {
-            break;
+        let mut request = client.get(url);
+        if resume_offset > 0 {
+            request = request.header(reqwest::header::RANGE, format!("bytes={resume_offset}-"));
+            if let Some(etag) = metadata
+                .as_ref()
+                .and_then(|value| value.etag.as_deref())
+                .filter(|value| !value.trim().is_empty())
+            {
+                request = request.header(reqwest::header::IF_MATCH, etag);
+            }
         }
 
-        output_file
-            .write_all(&buffer[..read_count])
+        let mut response = request.send().map_err(bos_request_error)?;
+        let response_status = response.status();
+
+        if response_status == reqwest::StatusCode::PRECONDITION_FAILED {
+            clear_partial_download(output_path, partial_path, metadata_path)?;
+            metadata = None;
+            if restart_attempt == 0 {
+                continue;
+            }
+        }
+
+        if response_status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+            let total = response
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(parse_content_range)
+                .and_then(|value| value.total);
+
+            if resume_offset > 0 && total == Some(resume_offset) {
+                remove_file_if_exists(output_path)?;
+                fs::rename(partial_path, output_path).map_err(|error| error.to_string())?;
+                emit_transfer_progress(
+                    app,
+                    download_id,
+                    end_progress,
+                    download_status,
+                    "assets",
+                    resume_offset,
+                    total,
+                    resume_offset,
+                );
+                return Ok(());
+            }
+
+            clear_partial_download(output_path, partial_path, metadata_path)?;
+            metadata = None;
+            if restart_attempt == 0 {
+                continue;
+            }
+        }
+
+        if !response_status.is_success() {
+            return Err(format!(
+                "BOS download failed (HTTP {})",
+                response_status.as_u16()
+            ));
+        }
+
+        let parsed_content_range = response
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(parse_content_range);
+        let is_partial_response = response_status == reqwest::StatusCode::PARTIAL_CONTENT;
+        let append_to_partial = resume_offset > 0 && is_partial_response;
+
+        if append_to_partial
+            && parsed_content_range.as_ref().and_then(|value| value.start) != Some(resume_offset)
+        {
+            clear_partial_download(output_path, partial_path, metadata_path)?;
+            metadata = None;
+            if restart_attempt == 0 {
+                continue;
+            }
+            return Err("BOS resume response range is invalid".to_string());
+        }
+
+        let response_etag = response
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        if append_to_partial {
+            let previous_etag = metadata.as_ref().and_then(|value| value.etag.as_deref());
+            if previous_etag.is_some()
+                && response_etag.as_deref().is_some()
+                && previous_etag != response_etag.as_deref()
+            {
+                clear_partial_download(output_path, partial_path, metadata_path)?;
+                metadata = None;
+                if restart_attempt == 0 {
+                    continue;
+                }
+                return Err("BOS object changed while resuming download".to_string());
+            }
+        }
+
+        let total = parsed_content_range
+            .as_ref()
+            .and_then(|value| value.total)
+            .or_else(|| {
+                response.content_length().map(|length| {
+                    if append_to_partial {
+                        resume_offset.saturating_add(length)
+                    } else {
+                        length
+                    }
+                })
+            });
+        let active_resume_offset = if append_to_partial { resume_offset } else { 0 };
+        metadata = Some(PartialDownloadMetadata {
+            template_version: template_version.to_string(),
+            etag: response_etag.or_else(|| metadata.as_ref().and_then(|value| value.etag.clone())),
+        });
+        let active_metadata = metadata
+            .as_ref()
+            .ok_or_else(|| "Partial download metadata is missing".to_string())?;
+        write_partial_download_metadata(metadata_path, active_metadata)?;
+
+        let mut options = OpenOptions::new();
+        options.create(true).write(true);
+        if append_to_partial {
+            options.append(true);
+        } else {
+            options.truncate(true);
+        }
+        let mut output_file = options
+            .open(partial_path)
             .map_err(|error| error.to_string())?;
-        downloaded += read_count as u64;
-        emit_progress(
+        let mut downloaded = active_resume_offset;
+        let mut buffer = [0_u8; 64 * 1024];
+        emit_transfer_progress(
             app,
             download_id,
             progress_between(start_progress, end_progress, downloaded, total),
-            status,
+            download_status,
+            "assets",
+            downloaded,
+            total,
+            active_resume_offset,
         );
+
+        loop {
+            ensure_not_cancelled(cancel_flag)?;
+
+            let read_count = response
+                .read(&mut buffer)
+                .map_err(|error| error.to_string())?;
+
+            if read_count == 0 {
+                break;
+            }
+
+            output_file
+                .write_all(&buffer[..read_count])
+                .map_err(|error| error.to_string())?;
+            downloaded += read_count as u64;
+            emit_transfer_progress(
+                app,
+                download_id,
+                progress_between(start_progress, end_progress, downloaded, total),
+                download_status,
+                "assets",
+                downloaded,
+                total,
+                active_resume_offset,
+            );
+        }
+
+        output_file.flush().map_err(|error| error.to_string())?;
+        let final_size = fs::metadata(partial_path)
+            .map_err(|error| error.to_string())?
+            .len();
+        if let Some(total) = total {
+            if final_size != total {
+                return Err(format!(
+                    "BOS download incomplete: received {final_size} of {total} bytes"
+                ));
+            }
+        }
+
+        remove_file_if_exists(output_path)?;
+        fs::rename(partial_path, output_path).map_err(|error| error.to_string())?;
+        emit_transfer_progress(
+            app,
+            download_id,
+            end_progress,
+            download_status,
+            "assets",
+            final_size,
+            total.or(Some(final_size)),
+            active_resume_offset,
+        );
+        return Ok(());
     }
 
-    output_file.flush().map_err(|error| error.to_string())?;
-    emit_progress(app, download_id, end_progress, status);
-    Ok(())
+    Err("BOS resumable download could not be restarted".to_string())
 }
 
 fn extract_zip(
@@ -2123,7 +2450,7 @@ fn extract_zip(
     let mut archive = zip::ZipArchive::new(file).map_err(|error| error.to_string())?;
     let total = archive.len().max(1) as u64;
 
-    emit_progress(app, download_id, 82, "正在解压素材...");
+    emit_progress(app, download_id, 90, "正在解压素材...");
 
     for index in 0..archive.len() {
         ensure_not_cancelled(cancel_flag)?;
@@ -2171,7 +2498,7 @@ fn extract_zip(
         emit_progress(
             app,
             download_id,
-            progress_between(82, 98, (index + 1) as u64, Some(total)),
+            progress_between(90, 99, (index + 1) as u64, Some(total)),
             "正在解压素材...",
         );
     }
@@ -2190,14 +2517,14 @@ fn prepare_template_assets_blocking(
     template_version: String,
     template_file_url: String,
     material_package_url: String,
-    api_base_url: String,
-    authorization_token: String,
     download_id: String,
     cancel_flag: Arc<AtomicBool>,
 ) -> Result<PreparedTemplate, String> {
     let (template_dir, template_file_path, assets_dir) = cached_template_paths(&template_id)?;
     fs::create_dir_all(&template_dir).map_err(|error| error.to_string())?;
     let material_package_path = template_dir.join("materials.zip");
+    let partial_package_path = template_dir.join("materials.zip.part");
+    let partial_metadata_path = template_dir.join("materials.zip.part.json");
 
     let result = (|| {
         ensure_not_cancelled(&cancel_flag)?;
@@ -2221,6 +2548,8 @@ fn prepare_template_assets_blocking(
             if material_package_path.exists() {
                 fs::remove_file(&material_package_path).map_err(|error| error.to_string())?;
             }
+            remove_file_if_exists(&partial_package_path)?;
+            remove_file_if_exists(&partial_metadata_path)?;
             fs::remove_file(&template_file_path).map_err(|error| error.to_string())?;
         }
 
@@ -2228,15 +2557,14 @@ fn prepare_template_assets_blocking(
             emit_progress(&app, &download_id, 15, "已找到本地模板文件...");
             cached_xml_content.unwrap_or_default()
         } else {
-            let template_url = resolve_url(&api_base_url, &template_file_url)?;
+            let template_url = resolve_url("", &template_file_url)?;
             let xml_bytes = download_bytes(
                 &app,
                 &download_id,
                 &template_url,
-                &authorization_token,
                 &cancel_flag,
                 5,
-                20,
+                10,
                 "正在下载模板文件...",
             )?;
             let xml_content =
@@ -2250,30 +2578,48 @@ fn prepare_template_assets_blocking(
         if local_xml_version_matches && assets_dir.is_dir() {
             emit_progress(&app, &download_id, 100, "已加载本地模板资源");
         } else {
-            if material_package_path.exists() {
-                fs::remove_file(&material_package_path).map_err(|error| error.to_string())?;
+            let package_metadata = validate_partial_download_version(
+                &material_package_path,
+                &partial_package_path,
+                &partial_metadata_path,
+                &template_version,
+            )?;
+
+            if !material_package_path.is_file() {
+                let package_url = resolve_url("", &material_package_url)?;
+                download_resumable_to_file(
+                    &app,
+                    &download_id,
+                    &package_url,
+                    &material_package_path,
+                    &partial_package_path,
+                    &partial_metadata_path,
+                    &template_version,
+                    &cancel_flag,
+                    10,
+                    90,
+                    "正在下载素材包...",
+                )?;
+            } else if package_metadata.is_some() {
+                emit_progress(&app, &download_id, 90, "素材包已下载，正在继续解压...");
             }
 
-            let package_url = resolve_url(&api_base_url, &material_package_url)?;
-            download_to_file(
-                &app,
-                &download_id,
-                &package_url,
-                &authorization_token,
-                &material_package_path,
-                &cancel_flag,
-                25,
-                80,
-                "正在下载素材包...",
-            )?;
-            extract_zip(
+            let extract_result = extract_zip(
                 &app,
                 &download_id,
                 &material_package_path,
                 &assets_dir,
                 &cancel_flag,
-            )?;
-            fs::remove_file(&material_package_path).map_err(|error| error.to_string())?;
+            );
+            if let Err(error) = extract_result {
+                if !cancel_flag.load(Ordering::Relaxed) {
+                    let _ = remove_file_if_exists(&material_package_path);
+                    let _ = remove_file_if_exists(&partial_metadata_path);
+                }
+                return Err(error);
+            }
+            remove_file_if_exists(&material_package_path)?;
+            remove_file_if_exists(&partial_metadata_path)?;
             emit_progress(&app, &download_id, 100, "模板资源已准备完成");
         }
 
@@ -2293,12 +2639,7 @@ fn prepare_template_assets_blocking(
         })
     })();
 
-    let cancelled = cancel_flag.load(Ordering::Relaxed);
     let _ = remove_download_task(&download_id);
-
-    if cancelled && result.is_err() {
-        let _ = fs::remove_dir_all(&template_dir);
-    }
 
     result
 }
@@ -2318,8 +2659,6 @@ async fn prepare_template_assets(
     template_version: String,
     template_file_url: String,
     material_package_url: String,
-    api_base_url: String,
-    authorization_token: String,
     download_id: String,
 ) -> Result<PreparedTemplate, String> {
     let cancel_flag = register_download_task(&download_id)?;
@@ -2332,8 +2671,6 @@ async fn prepare_template_assets(
             template_version,
             template_file_url,
             material_package_url,
-            api_base_url,
-            authorization_token,
             download_id,
             cancel_flag,
         )
@@ -3168,6 +3505,36 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_satisfied_content_range() {
+        assert_eq!(
+            parse_content_range("bytes 1024-2047/4096"),
+            Some(ParsedContentRange {
+                start: Some(1024),
+                end: Some(2047),
+                total: Some(4096),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_unsatisfied_content_range() {
+        assert_eq!(
+            parse_content_range("bytes */4096"),
+            Some(ParsedContentRange {
+                start: None,
+                end: None,
+                total: Some(4096),
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_content_range() {
+        assert_eq!(parse_content_range("1024-2047/4096"), None);
+        assert_eq!(parse_content_range("bytes invalid/4096"), None);
+    }
 
     #[test]
     fn generates_project_file_xml_from_template() {

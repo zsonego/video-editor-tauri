@@ -12,6 +12,13 @@ export function getTemplateDetail(data = {}) {
   return request("/api/template/detail", { data });
 }
 
+export function getTemplateBosPresignedUrls(templateId) {
+  return request("/api/aicut/file/bos/presigned-urls", {
+    method: "GET",
+    data: { templateId },
+  });
+}
+
 export function favoriteTemplate(data = {}) {
   return request("/api/template/favorite", { data });
 }

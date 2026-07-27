@@ -26,6 +26,7 @@ import {
   downloadTemplateCover,
   favoriteTemplate,
   getFavoriteTemplates,
+  getTemplateBosPresignedUrls,
   getTemplateCategories,
   getTemplateDetail,
   getTemplates,
@@ -85,6 +86,8 @@ const templateDownloadCanceling = ref(false);
 const templateDownloadTitle = ref('');
 const templateDownloadStatus = ref('');
 const templateDownloadProgress = ref(0);
+const templateDownloadDownloadedBytes = ref(0);
+const templateDownloadTotalBytes = ref(0);
 const templateDownloadCancelRequested = ref(false);
 const activeDownloadId = ref('');
 const activeTemplateId = ref('');
@@ -223,6 +226,12 @@ const sidebarToggleVisible = computed(
   () => activeCategory.value >= 0 || currentViewState.value !== 'subtopics',
 );
 const timelineToggleVisible = computed(() => mainMode.value === 'player');
+const templateDownloadBytesLabel = computed(() => {
+  const downloaded = templateDownloadDownloadedBytes.value;
+  const total = templateDownloadTotalBytes.value;
+  if (!downloaded || !total) return '';
+  return `${formatFileSize(downloaded)} / ${formatFileSize(total)}`;
+});
 const selectedTemplateThemeName = computed(() => {
   const category = categories.value[activeCategory.value] || {};
   return category.categoryName || category.categoryId || '';
@@ -569,6 +578,85 @@ function enterTemplatePreview(topic, templateId, localInfo) {
   nextTick(resetModalPreviewVideo);
 }
 
+function isSuccessfulBosPresignedUrlResponse(response) {
+  if (response?.code === undefined) return true;
+  return [0, 200].includes(Number(response.code));
+}
+
+async function getBosTemplateDownloadUrls(templateId) {
+  const response = await getTemplateBosPresignedUrls(templateId);
+  if (!isSuccessfulBosPresignedUrlResponse(response)) {
+    throw new Error(response?.msg || '模板下载地址获取失败');
+  }
+
+  const payload = getResponsePayload(response) || {};
+  const xmlUrl = String(payload.xmlUrl || '').trim();
+  const assetsUrl = String(payload.assetsUrl || '').trim();
+  if (!xmlUrl || !assetsUrl) {
+    throw new Error('模板下载地址不完整');
+  }
+
+  return { xmlUrl, assetsUrl };
+}
+
+function isBosPresignedUrlExpiredError(error) {
+  const message = error?.message || String(error || '');
+  return /BOS download failed \(HTTP (401|403)\)/i.test(message);
+}
+
+async function prepareTemplateAssetsWithBosUrls({
+  templateId,
+  templateVersion,
+  downloadId,
+}) {
+  let lastError = null;
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (
+      templateDownloadCancelRequested.value ||
+      canceledTemplateDownloadIds.has(downloadId)
+    ) {
+      throw new Error('Download canceled');
+    }
+
+    templateDownloadStatus.value =
+      attempt === 0
+        ? '正在获取模板下载地址...'
+        : '下载地址已失效，正在刷新后续传...';
+    const { xmlUrl, assetsUrl } =
+      await getBosTemplateDownloadUrls(templateId);
+    if (
+      templateDownloadCancelRequested.value ||
+      canceledTemplateDownloadIds.has(downloadId)
+    ) {
+      throw new Error('Download canceled');
+    }
+
+    try {
+      return await invoke('prepare_template_assets', {
+        templateId,
+        templateVersion,
+        templateFileUrl: xmlUrl,
+        materialPackageUrl: assetsUrl,
+        downloadId,
+      });
+    } catch (error) {
+      lastError = error;
+      if (
+        attempt === 0 &&
+        isBosPresignedUrlExpiredError(error) &&
+        !templateDownloadCancelRequested.value &&
+        !canceledTemplateDownloadIds.has(downloadId)
+      ) {
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw lastError || new Error('模板资源下载失败');
+}
+
 async function openTemplatePreview(topic) {
   if (templateDetailLoading.value) {
     return;
@@ -588,6 +676,8 @@ async function openTemplatePreview(topic) {
   templateDownloadTitle.value = topic.title || templateId;
   templateDownloadStatus.value = '';
   templateDownloadProgress.value = 0;
+  templateDownloadDownloadedBytes.value = 0;
+  templateDownloadTotalBytes.value = 0;
   activeDownloadId.value = '';
   let unlistenProgress = null;
   let downloadId = '';
@@ -602,9 +692,6 @@ async function openTemplatePreview(topic) {
     }
     const detail = getResponsePayload(detailResponse) || {};
     const templateVersion = String(detail.version ?? '');
-    const encodedTemplateId = encodeURIComponent(localTemplateId);
-    const templateFileUrl = `/aicut/file/download?bucket=template&path=${encodedTemplateId}/template.xml`;
-    const materialPackageUrl = `/aicut/file/download?bucket=template&path=${encodedTemplateId}/assets.zip`;
 
     const cachedInfo = await invoke('get_cached_template_assets', {
       templateId: localTemplateId,
@@ -628,6 +715,9 @@ async function openTemplatePreview(topic) {
       templateDownloadProgress.value = Number(payload.progress) || 0;
       templateDownloadStatus.value =
         payload.status || templateDownloadStatus.value;
+      templateDownloadDownloadedBytes.value =
+        Number(payload.downloadedBytes) || 0;
+      templateDownloadTotalBytes.value = Number(payload.totalBytes) || 0;
     });
 
     if (templateDownloadCancelRequested.value) {
@@ -639,13 +729,9 @@ async function openTemplatePreview(topic) {
       templateDownloadProgress.value,
       3,
     );
-    const localInfo = await invoke('prepare_template_assets', {
+    const localInfo = await prepareTemplateAssetsWithBosUrls({
       templateId: localTemplateId,
       templateVersion,
-      templateFileUrl,
-      materialPackageUrl,
-      apiBaseUrl: API_BASE_URL,
-      authorizationToken: localStorage.getItem('token') || '',
       downloadId,
     });
     if (canceledTemplateDownloadIds.has(downloadId)) {
@@ -675,6 +761,8 @@ async function openTemplatePreview(topic) {
       templateDownloadCancelRequested.value = false;
       templateDownloadStatus.value = '';
       templateDownloadProgress.value = 0;
+      templateDownloadDownloadedBytes.value = 0;
+      templateDownloadTotalBytes.value = 0;
       activeDownloadId.value = '';
     }
     if (downloadId) {
@@ -686,24 +774,24 @@ async function openTemplatePreview(topic) {
   }
 }
 
-// 取消模板下载并同步清理前端下载状态。
+// 暂停模板下载，等待 Rust 停止写入后再关闭弹窗并保留断点。
 function cancelTemplateDownload() {
   if (!activeDownloadId.value || templateDownloadCanceling.value) return;
 
   const downloadId = activeDownloadId.value;
   templateDownloadCancelRequested.value = true;
   canceledTemplateDownloadIds.add(downloadId);
-  templateDownloadVisible.value = false;
-  templateDownloadCanceling.value = false;
-  templateDetailLoading.value = false;
-  templateDownloadStatus.value = '';
-  templateDownloadProgress.value = 0;
-  activeDownloadId.value = '';
+  templateDownloadCanceling.value = true;
+  templateDownloadStatus.value = '正在暂停并保存下载断点...';
 
   invoke('cancel_template_download', {
     downloadId,
   }).catch((error) => {
     console.error('[template-download] cancel failed', error);
+    canceledTemplateDownloadIds.delete(downloadId);
+    templateDownloadCancelRequested.value = false;
+    templateDownloadCanceling.value = false;
+    templateDownloadStatus.value = '暂停失败，下载仍在继续...';
   });
 }
 
@@ -4191,6 +4279,20 @@ async function downloadHelpGuide() {
   }
 }
 
+function formatFileSize(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+
+  const units = ['B', 'KB', 'MB', 'GB'];
+  const unitIndex = Math.min(
+    Math.floor(Math.log(bytes) / Math.log(1024)),
+    units.length - 1,
+  );
+  const size = bytes / 1024 ** unitIndex;
+  const decimals = unitIndex === 0 || size >= 100 ? 0 : size >= 10 ? 1 : 2;
+  return `${size.toFixed(decimals)} ${units[unitIndex]}`;
+}
+
 function showLogoutConfirm() {
   logoutConfirmVisible.value = true;
   closeAccountMenu();
@@ -5719,6 +5821,12 @@ onBeforeUnmount(() => {
                   <p class="text-on-surface-variant/70 text-xs mt-3">
                     {{ templateDownloadStatus }}
                   </p>
+                  <p
+                    v-if="templateDownloadBytesLabel"
+                    class="text-on-surface-variant/60 text-xs mt-1 tabular-nums"
+                  >
+                    {{ templateDownloadBytesLabel }}
+                  </p>
                 </div>
                 <button
                   class="w-full py-3 bg-white/5 text-on-surface-variant font-bold rounded-xl hover:bg-white/10 hover:text-white transition-all disabled:opacity-60 disabled:cursor-not-allowed"
@@ -5726,7 +5834,7 @@ onBeforeUnmount(() => {
                   :disabled="templateDownloadCanceling"
                   @click="cancelTemplateDownload"
                 >
-                  {{ templateDownloadCanceling ? '正在取消...' : '取消下载' }}
+                  {{ templateDownloadCanceling ? '正在暂停...' : '暂停下载' }}
                 </button>
               </div>
             </div>
