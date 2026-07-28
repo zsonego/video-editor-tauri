@@ -27,6 +27,56 @@ use std::{
 #[cfg(target_os = "macos")]
 use libloading::Library;
 
+#[cfg(target_os = "windows")]
+const ES_SYSTEM_REQUIRED: u32 = 0x0000_0001;
+#[cfg(target_os = "windows")]
+const ES_DISPLAY_REQUIRED: u32 = 0x0000_0002;
+#[cfg(target_os = "windows")]
+const ES_CONTINUOUS: u32 = 0x8000_0000;
+
+#[cfg(target_os = "windows")]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    #[link_name = "SetThreadExecutionState"]
+    fn set_thread_execution_state(flags: u32) -> u32;
+}
+
+#[cfg(target_os = "macos")]
+const K_CFSTRING_ENCODING_UTF8: u32 = 0x0800_0100;
+#[cfg(target_os = "macos")]
+const K_IOPM_ASSERTION_LEVEL_ON: u32 = 255;
+#[cfg(target_os = "macos")]
+const K_IO_RETURN_SUCCESS: i32 = 0;
+
+#[cfg(target_os = "macos")]
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    #[link_name = "CFStringCreateWithCString"]
+    fn cf_string_create_with_c_string(
+        allocator: *const c_void,
+        value: *const c_char,
+        encoding: u32,
+    ) -> *const c_void;
+
+    #[link_name = "CFRelease"]
+    fn cf_release(value: *const c_void);
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "IOKit", kind = "framework")]
+unsafe extern "C" {
+    #[link_name = "IOPMAssertionCreateWithName"]
+    fn iopm_assertion_create_with_name(
+        assertion_type: *const c_void,
+        assertion_level: u32,
+        assertion_name: *const c_void,
+        assertion_id: *mut u32,
+    ) -> i32;
+
+    #[link_name = "IOPMAssertionRelease"]
+    fn iopm_assertion_release(assertion_id: u32) -> i32;
+}
+
 static DOWNLOAD_CANCEL_FLAGS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
 
 #[derive(Serialize)]
@@ -103,6 +153,144 @@ struct ComposerExportResult {
 struct TerminalInfo {
     terminal_type: u8,
     terminal_name: String,
+}
+
+struct ExportWakeGuard {
+    #[cfg(target_os = "windows")]
+    active: bool,
+    #[cfg(target_os = "macos")]
+    assertion_id: Option<u32>,
+}
+
+impl ExportWakeGuard {
+    fn acquire() -> Result<Self, String> {
+        #[cfg(target_os = "windows")]
+        {
+            let flags = ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED;
+            let previous_state = unsafe { set_thread_execution_state(flags) };
+            if previous_state == 0 {
+                return Err(format!(
+                    "SetThreadExecutionState failed: {}",
+                    io::Error::last_os_error()
+                ));
+            }
+
+            Ok(Self { active: true })
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let assertion_type =
+                CString::new("PreventUserIdleDisplaySleep").map_err(|error| error.to_string())?;
+            let assertion_name =
+                CString::new("AICut video export").map_err(|error| error.to_string())?;
+
+            let assertion_type = unsafe {
+                cf_string_create_with_c_string(
+                    std::ptr::null(),
+                    assertion_type.as_ptr(),
+                    K_CFSTRING_ENCODING_UTF8,
+                )
+            };
+            if assertion_type.is_null() {
+                return Err("Failed to create macOS power assertion type".to_string());
+            }
+
+            let assertion_name = unsafe {
+                cf_string_create_with_c_string(
+                    std::ptr::null(),
+                    assertion_name.as_ptr(),
+                    K_CFSTRING_ENCODING_UTF8,
+                )
+            };
+            if assertion_name.is_null() {
+                unsafe { cf_release(assertion_type) };
+                return Err("Failed to create macOS power assertion name".to_string());
+            }
+
+            let mut assertion_id = 0_u32;
+            let result = unsafe {
+                iopm_assertion_create_with_name(
+                    assertion_type,
+                    K_IOPM_ASSERTION_LEVEL_ON,
+                    assertion_name,
+                    &mut assertion_id,
+                )
+            };
+            unsafe {
+                cf_release(assertion_name);
+                cf_release(assertion_type);
+            }
+
+            if result != K_IO_RETURN_SUCCESS {
+                return Err(format!(
+                    "IOPMAssertionCreateWithName failed: 0x{:08x}",
+                    result as u32
+                ));
+            }
+
+            Ok(Self {
+                assertion_id: Some(assertion_id),
+            })
+        }
+
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            Ok(Self {})
+        }
+    }
+
+    fn is_active(&self) -> bool {
+        #[cfg(target_os = "windows")]
+        {
+            self.active
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            self.assertion_id.is_some()
+        }
+
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            false
+        }
+    }
+}
+
+impl Drop for ExportWakeGuard {
+    fn drop(&mut self) {
+        #[cfg(target_os = "windows")]
+        {
+            if self.active {
+                let previous_state = unsafe { set_thread_execution_state(ES_CONTINUOUS) };
+                if previous_state == 0 {
+                    app_log_error(format!(
+                        "[power] failed to release Windows export wake lock: {}",
+                        io::Error::last_os_error()
+                    ));
+                } else {
+                    app_log_info("[power] released Windows export wake lock");
+                }
+                self.active = false;
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(assertion_id) = self.assertion_id.take() {
+                let result = unsafe { iopm_assertion_release(assertion_id) };
+                if result != K_IO_RETURN_SUCCESS {
+                    app_log_error(format!(
+                        "[power] failed to release macOS export wake lock: 0x{:08x}",
+                        result as u32
+                    ));
+                } else {
+                    app_log_info("[power] released macOS export wake lock");
+                }
+            }
+        }
+    }
 }
 
 type ComposerState = Arc<Mutex<ComposerRuntime>>;
@@ -2994,6 +3182,24 @@ async fn compose_project_video(
     app_log_info("[composer] spawning blocking compose task");
     tauri::async_runtime::spawn_blocking(move || {
         let composer = composer.lock().map_err(|error| error.to_string())?;
+        let _wake_guard = match ExportWakeGuard::acquire() {
+            Ok(guard) => {
+                if guard.is_active() {
+                    app_log_info("[power] export wake lock acquired");
+                } else {
+                    app_log_info(
+                        "[power] export wake lock is unsupported on this platform; continuing",
+                    );
+                }
+                Some(guard)
+            }
+            Err(error) => {
+                app_log_error(format!(
+                    "[power] failed to acquire export wake lock; continuing export: {error}"
+                ));
+                None
+            }
+        };
         composer.compose_video(
             &template_path_string,
             &project_path_string,
