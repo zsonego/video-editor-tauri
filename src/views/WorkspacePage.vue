@@ -57,6 +57,7 @@ let recommendationRequestId = 0;
 let templateSearchTimer = null;
 const templateCoverUrls = new Map();
 const templateCoverRequests = new Map();
+let templateCoverCacheGeneration = 0;
 const projectCoverUrls = new Map();
 const projectCoverRequests = new Map();
 
@@ -3875,14 +3876,25 @@ function parseTemplateSegmentsFromText(xmlContent) {
   });
 }
 
+function clearTemplateCoverCache() {
+  templateCoverCacheGeneration += 1;
+  templateCoverUrls.forEach((objectUrl) => {
+    URL.revokeObjectURL(objectUrl);
+  });
+  templateCoverUrls.clear();
+  templateCoverRequests.clear();
+}
+
 async function getTemplateCoverUrl(templateId) {
   const key = String(templateId || '').trim();
   if (!key) return '';
   if (templateCoverUrls.has(key)) return templateCoverUrls.get(key);
   if (templateCoverRequests.has(key)) return templateCoverRequests.get(key);
 
+  const cacheGeneration = templateCoverCacheGeneration;
   const request = downloadTemplateCover(key)
     .then((blob) => {
+      if (cacheGeneration !== templateCoverCacheGeneration) return '';
       if (!(blob instanceof Blob) || blob.size === 0) return '';
 
       const objectUrl = URL.createObjectURL(blob);
@@ -3894,7 +3906,9 @@ async function getTemplateCoverUrl(templateId) {
       return '';
     })
     .finally(() => {
-      templateCoverRequests.delete(key);
+      if (templateCoverRequests.get(key) === request) {
+        templateCoverRequests.delete(key);
+      }
     });
 
   templateCoverRequests.set(key, request);
@@ -4078,6 +4092,7 @@ async function fetchTemplateTopics(categoryId = '', keyword = '') {
 async function loadRecommendedTemplates() {
   const requestId = ++recommendationRequestId;
   recommendationsLoading.value = true;
+  clearTemplateCoverCache();
 
   try {
     const topics = await fetchTemplateTopics('');
@@ -4394,11 +4409,7 @@ onBeforeUnmount(() => {
     URL.revokeObjectURL(objectUrl);
   });
   importedVideoObjectUrls.clear();
-  templateCoverUrls.forEach((objectUrl) => {
-    URL.revokeObjectURL(objectUrl);
-  });
-  templateCoverUrls.clear();
-  templateCoverRequests.clear();
+  clearTemplateCoverCache();
   projectCoverUrls.forEach((objectUrl) => {
     URL.revokeObjectURL(objectUrl);
   });
