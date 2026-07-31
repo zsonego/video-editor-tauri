@@ -33,6 +33,7 @@ export function downloadTemplateCover(templateId) {
     data: {
       bucket: "template",
       path: `${templateId}/cover.png`,
+      thumbnail: true,
     },
     responseType: "blob",
   });

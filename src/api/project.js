@@ -18,6 +18,7 @@ export function downloadProjectCover(renterId, projectId) {
     data: {
       bucket: "media-tenants",
       path: `${renterId}/${projectId}/cover.png`,
+      thumbnail: true,
     },
     responseType: "blob",
   });
