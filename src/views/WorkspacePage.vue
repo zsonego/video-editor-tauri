@@ -5052,41 +5052,43 @@ onBeforeUnmount(() => {
                 >
                   <div
                     v-if="collection.isGroup"
-                    class="flex items-center justify-between gap-3 px-2 py-2 mb-2 border-b border-electric-blue/20"
+                    class="px-2 py-2 mb-2 border-b border-electric-blue/20"
                   >
-                    <div class="min-w-0 flex-1">
-                      <div class="text-[13px] font-black text-white truncate">
-                        {{ collection.name }}
-                      </div>
-                      <div class="mt-1 text-[10px] text-on-surface-variant">
-                        {{ collection.segments.length }} 个子类 ·
-                        {{ collection.count }} 个视频
-                      </div>
-                    </div>
-                    <button
-                      class="h-7 w-7 rounded-md border border-white/10 bg-white/5 text-on-surface-variant hover:text-white hover:bg-white/10 transition-colors flex items-center justify-center shrink-0"
-                      type="button"
-                      :title="
-                        isSegmentCollectionExpanded(collection)
-                          ? '折叠'
-                          : '展开'
-                      "
-                      :aria-label="
-                        isSegmentCollectionExpanded(collection)
-                          ? '折叠'
-                          : '展开'
-                      "
-                      @click.stop="toggleSegmentCollection(collection)"
+                    <div
+                      class="w-full text-[13px] font-black text-white truncate"
+                      :title="collection.name"
                     >
-                      <AppIcon
-                        :name="
+                      {{ collection.name }}
+                    </div>
+                    <div class="mt-2 flex items-center justify-between gap-3">
+                      <div class="text-[10px] text-on-surface-variant">
+                        {{ collection.segments.length }} 个子类
+                      </div>
+                      <button
+                        class="h-7 w-7 rounded-md border border-white/10 bg-white/5 text-on-surface-variant hover:text-white hover:bg-white/10 transition-colors flex items-center justify-center shrink-0"
+                        type="button"
+                        :title="
                           isSegmentCollectionExpanded(collection)
-                            ? 'keyboard_arrow_up'
-                            : 'keyboard_arrow_down'
+                            ? '折叠'
+                            : '展开'
                         "
-                        :size="14"
-                      />
-                    </button>
+                        :aria-label="
+                          isSegmentCollectionExpanded(collection)
+                            ? '折叠'
+                            : '展开'
+                        "
+                        @click.stop="toggleSegmentCollection(collection)"
+                      >
+                        <AppIcon
+                          :name="
+                            isSegmentCollectionExpanded(collection)
+                              ? 'keyboard_arrow_up'
+                              : 'keyboard_arrow_down'
+                          "
+                          :size="14"
+                        />
+                      </button>
+                    </div>
                   </div>
                   <div
                     v-show="isSegmentCollectionExpanded(collection)"
@@ -5143,57 +5145,56 @@ onBeforeUnmount(() => {
                   >
                     <div
                       v-if="collection.isGroup"
-                      class="flex items-center justify-between gap-3 p-3 border-b border-electric-blue/20 bg-electric-blue/10"
+                      class="p-3 border-b border-electric-blue/20 bg-electric-blue/10"
                     >
-                      <div class="min-w-0 flex-1">
-                        <div
-                          class="text-[13px] font-black text-white truncate"
-                          :title="collection.name"
-                        >
-                          {{ collection.name }}
-                        </div>
-                        <div class="mt-1 text-[10px] text-on-surface-variant">
-                          {{ collection.segments.length }} 个子类 ·
-                          {{ collection.count }} 个视频
-                        </div>
+                      <div
+                        class="w-full text-[13px] font-black text-white truncate"
+                        :title="collection.name"
+                      >
+                        {{ collection.name }}
                       </div>
-                      <div class="flex items-center gap-2 shrink-0">
-                        <button
-                          class="px-3 py-1.5 text-[11px] font-bold rounded-md flex items-center gap-1 transition-colors"
-                          :class="
-                            isSegmentGroupFullyImported(collection)
-                              ? 'bg-white/5 text-on-surface-variant/60 border border-white/10 hover:bg-white/10'
-                              : 'bg-electric-blue text-white shadow-lg shadow-electric-blue/10 hover:brightness-110'
-                          "
-                          type="button"
-                          @click="requestGroupOneClickImport(collection)"
-                        >
-                          {{ `一键导入 (${collection.count})` }}
-                        </button>
-                        <button
-                          class="h-7 w-7 rounded-md border border-white/10 bg-white/5 text-on-surface-variant hover:text-white hover:bg-white/10 transition-colors flex items-center justify-center"
-                          type="button"
-                          :title="
-                            isSegmentCollectionExpanded(collection)
-                              ? '折叠'
-                              : '展开'
-                          "
-                          :aria-label="
-                            isSegmentCollectionExpanded(collection)
-                              ? '折叠'
-                              : '展开'
-                          "
-                          @click.stop="toggleSegmentCollection(collection)"
-                        >
-                          <AppIcon
-                            :name="
-                              isSegmentCollectionExpanded(collection)
-                                ? 'keyboard_arrow_up'
-                                : 'keyboard_arrow_down'
+                      <div class="mt-2 flex items-center justify-between gap-3">
+                        <div class="text-[10px] text-on-surface-variant">
+                          {{ collection.segments.length }} 个子类
+                        </div>
+                        <div class="flex items-center gap-2 shrink-0">
+                          <button
+                            class="px-3 py-1.5 text-[11px] font-bold rounded-md flex items-center gap-1 transition-colors"
+                            :class="
+                              isSegmentGroupFullyImported(collection)
+                                ? 'bg-white/5 text-on-surface-variant/60 border border-white/10 hover:bg-white/10'
+                                : 'bg-electric-blue text-white shadow-lg shadow-electric-blue/10 hover:brightness-110'
                             "
-                            :size="14"
-                          />
-                        </button>
+                            type="button"
+                            @click="requestGroupOneClickImport(collection)"
+                          >
+                            {{ `一键导入 (${collection.count})` }}
+                          </button>
+                          <button
+                            class="h-7 w-7 rounded-md border border-white/10 bg-white/5 text-on-surface-variant hover:text-white hover:bg-white/10 transition-colors flex items-center justify-center"
+                            type="button"
+                            :title="
+                              isSegmentCollectionExpanded(collection)
+                                ? '折叠'
+                                : '展开'
+                            "
+                            :aria-label="
+                              isSegmentCollectionExpanded(collection)
+                                ? '折叠'
+                                : '展开'
+                            "
+                            @click.stop="toggleSegmentCollection(collection)"
+                          >
+                            <AppIcon
+                              :name="
+                                isSegmentCollectionExpanded(collection)
+                                  ? 'keyboard_arrow_up'
+                                  : 'keyboard_arrow_down'
+                              "
+                              :size="14"
+                            />
+                          </button>
+                        </div>
                       </div>
                     </div>
                     <div
@@ -5227,7 +5228,7 @@ onBeforeUnmount(() => {
                         type="button"
                         @click="requestOneClickImport(style)"
                       >
-                        {{ `一键导入 (${style.count})` }}
+                        {{ collection.isGroup ? '导入' : '一键导入' }}
                       </button>
                     </div>
                     <div
@@ -5270,7 +5271,14 @@ onBeforeUnmount(() => {
                             class="text-primary shrink-0"
                           />
                           <div class="min-w-0">
-                            <div class="text-[12px] text-white truncate">
+                            <div
+                              class="text-[12px] truncate"
+                              :class="
+                                isProjectImportedVideo(video)
+                                  ? 'text-electric-blue'
+                                  : 'text-white'
+                              "
+                            >
                               {{ video.name }}
                             </div>
                             <div class="text-[10px] text-on-surface-variant">
