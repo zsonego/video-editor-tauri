@@ -627,6 +627,7 @@ function enterTemplatePreview(topic, templateId, localInfo) {
   const segments = parseTemplateSegments(localInfo.xmlContent);
   const demoPath = parseTemplateDemoPath(localInfo.xmlContent);
 
+  collapsedSegmentCollectionIds.value = new Set();
   activeTemplateSegments.value = segments;
   openPreview(title, getTemplateMaterialSummary(segments));
   activeTemplateId.value = templateId;
@@ -1755,6 +1756,7 @@ function clearProjectEditingState() {
   importOverwriteConfirmVisible.value = false;
   pendingRepeatImport.value = null;
   importRepeatConfirmVisible.value = false;
+  collapsedSegmentCollectionIds.value = new Set();
   resetMainPlayer();
 }
 
@@ -5062,15 +5064,20 @@ onBeforeUnmount(() => {
                       </div>
                     </div>
                     <button
-                      class="h-7 px-2 rounded-md border border-white/10 bg-white/5 text-[10px] font-bold text-on-surface-variant hover:text-white hover:bg-white/10 transition-colors flex items-center gap-1 shrink-0"
+                      class="h-7 w-7 rounded-md border border-white/10 bg-white/5 text-on-surface-variant hover:text-white hover:bg-white/10 transition-colors flex items-center justify-center shrink-0"
                       type="button"
-                      @click.stop="toggleSegmentCollection(collection)"
-                    >
-                      <span>{{
+                      :title="
                         isSegmentCollectionExpanded(collection)
                           ? '折叠'
                           : '展开'
-                      }}</span>
+                      "
+                      :aria-label="
+                        isSegmentCollectionExpanded(collection)
+                          ? '折叠'
+                          : '展开'
+                      "
+                      @click.stop="toggleSegmentCollection(collection)"
+                    >
                       <AppIcon
                         :name="
                           isSegmentCollectionExpanded(collection)
@@ -5152,25 +5159,6 @@ onBeforeUnmount(() => {
                       </div>
                       <div class="flex items-center gap-2 shrink-0">
                         <button
-                          class="h-7 px-2 rounded-md border border-white/10 bg-white/5 text-[10px] font-bold text-on-surface-variant hover:text-white hover:bg-white/10 transition-colors flex items-center gap-1"
-                          type="button"
-                          @click.stop="toggleSegmentCollection(collection)"
-                        >
-                          <span>{{
-                            isSegmentCollectionExpanded(collection)
-                              ? '折叠'
-                              : '展开'
-                          }}</span>
-                          <AppIcon
-                            :name="
-                              isSegmentCollectionExpanded(collection)
-                                ? 'keyboard_arrow_up'
-                                : 'keyboard_arrow_down'
-                            "
-                            :size="14"
-                          />
-                        </button>
-                        <button
                           class="px-3 py-1.5 text-[11px] font-bold rounded-md flex items-center gap-1 transition-colors"
                           :class="
                             isSegmentGroupFullyImported(collection)
@@ -5181,6 +5169,30 @@ onBeforeUnmount(() => {
                           @click="requestGroupOneClickImport(collection)"
                         >
                           {{ `一键导入 (${collection.count})` }}
+                        </button>
+                        <button
+                          class="h-7 w-7 rounded-md border border-white/10 bg-white/5 text-on-surface-variant hover:text-white hover:bg-white/10 transition-colors flex items-center justify-center"
+                          type="button"
+                          :title="
+                            isSegmentCollectionExpanded(collection)
+                              ? '折叠'
+                              : '展开'
+                          "
+                          :aria-label="
+                            isSegmentCollectionExpanded(collection)
+                              ? '折叠'
+                              : '展开'
+                          "
+                          @click.stop="toggleSegmentCollection(collection)"
+                        >
+                          <AppIcon
+                            :name="
+                              isSegmentCollectionExpanded(collection)
+                                ? 'keyboard_arrow_up'
+                                : 'keyboard_arrow_down'
+                            "
+                            :size="14"
+                          />
                         </button>
                       </div>
                     </div>
