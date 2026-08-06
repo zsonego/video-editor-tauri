@@ -148,6 +148,7 @@ const importOverwriteConfirmVisible = ref(false);
 const pendingImportSegment = ref(null);
 const importRepeatConfirmVisible = ref(false);
 const pendingRepeatImport = ref(null);
+const collapsedSegmentCollectionIds = ref(new Set());
 let exportInterval = null;
 let exportFinishedAudio = null;
 let exportFinishedAudioContext = null;
@@ -341,6 +342,26 @@ const importSegmentCollections = computed(() => {
   });
 
   return collections;
+});
+const overwriteImportPromptCount = computed(() =>
+  getOneClickImportTargetImportedCount(pendingImportSegment.value),
+);
+const repeatImportPromptInfo = computed(() => {
+  const pendingImport = pendingRepeatImport.value;
+  if (!pendingImport) {
+    return { selectedCount: 0, requiredCount: 0, missingCount: 0 };
+  }
+
+  const selectedCount = pendingImport.filePaths?.length || 0;
+  const requiredCount = getOneClickImportSlots(
+    pendingImport.target,
+    pendingImport.mode,
+  ).length;
+  return {
+    selectedCount,
+    requiredCount,
+    missingCount: Math.max(0, requiredCount - selectedCount),
+  };
 });
 const visibleDraftProjects = computed(() =>
   draftFilter.value === 'all'
@@ -1908,6 +1929,43 @@ function hasImportedVideoInOneClickTarget(target) {
   return normalizedTarget.kind === 'group'
     ? hasImportedVideoInSegmentGroup(normalizedTarget.value)
     : hasImportedVideoInSegment(normalizedTarget.value);
+}
+
+function getOneClickImportTargetImportedCount(target) {
+  if (!target) return 0;
+
+  return getOneClickImportSegments(target).reduce((total, segment) => {
+    const targetCount = Number(segment.count) || 0;
+    const importedCount = Array.from(
+      { length: targetCount },
+      (_, slotIndex) => segment.videos?.[slotIndex],
+    ).filter(isProjectImportedVideo).length;
+    return total + importedCount;
+  }, 0);
+}
+
+function getSegmentCollectionCollapseKey(collection) {
+  return `${activeTemplateId.value || activeTemplateName.value || 'template'}::${collection.id}`;
+}
+
+function isSegmentCollectionExpanded(collection) {
+  if (!collection?.isGroup) return true;
+  return !collapsedSegmentCollectionIds.value.has(
+    getSegmentCollectionCollapseKey(collection),
+  );
+}
+
+function toggleSegmentCollection(collection) {
+  if (!collection?.isGroup) return;
+
+  const collapseKey = getSegmentCollectionCollapseKey(collection);
+  const nextCollapsedIds = new Set(collapsedSegmentCollectionIds.value);
+  if (nextCollapsedIds.has(collapseKey)) {
+    nextCollapsedIds.delete(collapseKey);
+  } else {
+    nextCollapsedIds.add(collapseKey);
+  }
+  collapsedSegmentCollectionIds.value = nextCollapsedIds;
 }
 
 function getOneClickImportSlots(target, mode = 'overwrite') {
@@ -4992,17 +5050,39 @@ onBeforeUnmount(() => {
                 >
                   <div
                     v-if="collection.isGroup"
-                    class="px-2 py-2 mb-2 border-b border-electric-blue/20"
+                    class="flex items-center justify-between gap-3 px-2 py-2 mb-2 border-b border-electric-blue/20"
                   >
-                    <div class="text-[13px] font-black text-white truncate">
-                      {{ collection.name }}
+                    <div class="min-w-0 flex-1">
+                      <div class="text-[13px] font-black text-white truncate">
+                        {{ collection.name }}
+                      </div>
+                      <div class="mt-1 text-[10px] text-on-surface-variant">
+                        {{ collection.segments.length }} 个子类 ·
+                        {{ collection.count }} 个视频
+                      </div>
                     </div>
-                    <div class="mt-1 text-[10px] text-on-surface-variant">
-                      {{ collection.segments.length }} 个子类 ·
-                      {{ collection.count }} 个视频
-                    </div>
+                    <button
+                      class="h-7 px-2 rounded-md border border-white/10 bg-white/5 text-[10px] font-bold text-on-surface-variant hover:text-white hover:bg-white/10 transition-colors flex items-center gap-1 shrink-0"
+                      type="button"
+                      @click.stop="toggleSegmentCollection(collection)"
+                    >
+                      <span>{{
+                        isSegmentCollectionExpanded(collection)
+                          ? '折叠'
+                          : '展开'
+                      }}</span>
+                      <AppIcon
+                        :name="
+                          isSegmentCollectionExpanded(collection)
+                            ? 'keyboard_arrow_up'
+                            : 'keyboard_arrow_down'
+                        "
+                        :size="14"
+                      />
+                    </button>
                   </div>
                   <div
+                    v-show="isSegmentCollectionExpanded(collection)"
                     :class="collection.isGroup ? 'space-y-2' : ''"
                   >
                   <div
@@ -5070,20 +5150,44 @@ onBeforeUnmount(() => {
                           {{ collection.count }} 个视频
                         </div>
                       </div>
-                      <button
-                        class="px-3 py-1.5 text-[11px] font-bold rounded-md flex items-center gap-1 shrink-0 transition-colors"
-                        :class="
-                          isSegmentGroupFullyImported(collection)
-                            ? 'bg-white/5 text-on-surface-variant/60 border border-white/10 hover:bg-white/10'
-                            : 'bg-electric-blue text-white shadow-lg shadow-electric-blue/10 hover:brightness-110'
-                        "
-                        type="button"
-                        @click="requestGroupOneClickImport(collection)"
-                      >
-                        {{ `一键导入 (${collection.count})` }}
-                      </button>
+                      <div class="flex items-center gap-2 shrink-0">
+                        <button
+                          class="h-7 px-2 rounded-md border border-white/10 bg-white/5 text-[10px] font-bold text-on-surface-variant hover:text-white hover:bg-white/10 transition-colors flex items-center gap-1"
+                          type="button"
+                          @click.stop="toggleSegmentCollection(collection)"
+                        >
+                          <span>{{
+                            isSegmentCollectionExpanded(collection)
+                              ? '折叠'
+                              : '展开'
+                          }}</span>
+                          <AppIcon
+                            :name="
+                              isSegmentCollectionExpanded(collection)
+                                ? 'keyboard_arrow_up'
+                                : 'keyboard_arrow_down'
+                            "
+                            :size="14"
+                          />
+                        </button>
+                        <button
+                          class="px-3 py-1.5 text-[11px] font-bold rounded-md flex items-center gap-1 transition-colors"
+                          :class="
+                            isSegmentGroupFullyImported(collection)
+                              ? 'bg-white/5 text-on-surface-variant/60 border border-white/10 hover:bg-white/10'
+                              : 'bg-electric-blue text-white shadow-lg shadow-electric-blue/10 hover:brightness-110'
+                          "
+                          type="button"
+                          @click="requestGroupOneClickImport(collection)"
+                        >
+                          {{ `一键导入 (${collection.count})` }}
+                        </button>
+                      </div>
                     </div>
-                    <div :class="collection.isGroup ? 'p-2 space-y-2' : ''">
+                    <div
+                      v-show="isSegmentCollectionExpanded(collection)"
+                      :class="collection.isGroup ? 'p-2 space-y-2' : ''"
+                    >
                     <div
                       v-for="style in collection.segments"
                       :key="style.id"
@@ -6103,37 +6207,28 @@ onBeforeUnmount(() => {
               class="relative w-full max-w-sm bg-surface-container-highest rounded-2xl p-7 border border-white/10 shadow-2xl modal-pop-in"
             >
               <div class="flex flex-col items-center text-center gap-5">
-                <div
-                  class="w-14 h-14 rounded-full bg-electric-blue/10 border border-electric-blue/20 flex items-center justify-center"
-                >
-                  <AppIcon
-                    name="sync_problem"
-                    :size="30"
-                    class="text-electric-blue"
-                  />
-                </div>
                 <div>
                   <h3 class="text-lg font-black text-white mb-2">
-                    是否覆盖现有上传内容？
+                    该素材集已有 {{ overwriteImportPromptCount }} 个视频
                   </h3>
-                  <p class="text-[13px] leading-6 text-on-surface-variant">
-                    选择“是”将从头覆盖全部素材，选择“否”将只填充剩余位置。
+                  <p class="text-[12px] leading-5 text-on-surface-variant">
+                    您本次导入的新视频，将如何处理？
                   </p>
                 </div>
                 <div class="grid grid-cols-2 gap-3 w-full">
                   <button
                     class="h-11 rounded-xl bg-white/5 text-on-surface-variant text-[13px] font-bold hover:bg-white/10 hover:text-white transition-all active:scale-95"
                     type="button"
-                    @click="chooseFillRemainingImportSlots"
+                    @click="confirmImportOverwrite"
                   >
-                    否
+                    替换已有
                   </button>
                   <button
                     class="h-11 rounded-xl bg-electric-blue text-white text-[13px] font-bold hover:brightness-110 transition-all active:scale-95 shadow-lg shadow-electric-blue/20"
                     type="button"
-                    @click="confirmImportOverwrite"
+                    @click="chooseFillRemainingImportSlots"
                   >
-                    是
+                    补充空缺
                   </button>
                 </div>
               </div>
@@ -6149,37 +6244,39 @@ onBeforeUnmount(() => {
               class="relative w-full max-w-sm bg-surface-container-highest rounded-2xl p-7 border border-white/10 shadow-2xl modal-pop-in"
             >
               <div class="flex flex-col items-center text-center gap-5">
-                <div
-                  class="w-14 h-14 rounded-full bg-electric-blue/10 border border-electric-blue/20 flex items-center justify-center"
-                >
-                  <AppIcon
-                    name="sync_problem"
-                    :size="30"
-                    class="text-electric-blue"
-                  />
-                </div>
                 <div>
                   <h3 class="text-lg font-black text-white mb-2">
-                    素材数量不足
+                    数量不够，还缺
+                    {{ repeatImportPromptInfo.missingCount }} 个视频
                   </h3>
-                  <p class="text-[13px] leading-6 text-on-surface-variant">
-                    当前选择素材数量不够，是否重复填充？
-                  </p>
+                  <div
+                    class="text-[12px] leading-5 text-on-surface-variant space-y-1"
+                  >
+                    <p>
+                      您只选了 {{ repeatImportPromptInfo.selectedCount }} 个视频，但该素材集需要
+                      {{ repeatImportPromptInfo.requiredCount }} 个。
+                    </p>
+                    <p>
+                      是否让系统自动重复使用这
+                      {{ repeatImportPromptInfo.selectedCount }}
+                      个视频来循环填满所有空位？
+                    </p>
+                  </div>
                 </div>
                 <div class="grid grid-cols-2 gap-3 w-full">
-                  <button
-                    class="h-11 rounded-xl bg-white/5 text-on-surface-variant text-[13px] font-bold hover:bg-white/10 hover:text-white transition-all active:scale-95"
-                    type="button"
-                    @click="resolveRepeatImport(false)"
-                  >
-                    否
-                  </button>
                   <button
                     class="h-11 rounded-xl bg-electric-blue text-white text-[13px] font-bold hover:brightness-110 transition-all active:scale-95 shadow-lg shadow-electric-blue/20"
                     type="button"
                     @click="resolveRepeatImport(true)"
                   >
-                    是
+                    循环填满
+                  </button>
+                  <button
+                    class="h-11 rounded-xl bg-white/5 text-on-surface-variant text-[13px] font-bold hover:bg-white/10 hover:text-white transition-all active:scale-95"
+                    type="button"
+                    @click="resolveRepeatImport(false)"
+                  >
+                    只导这些
                   </button>
                 </div>
               </div>
