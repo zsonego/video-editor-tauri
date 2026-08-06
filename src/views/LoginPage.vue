@@ -7,6 +7,7 @@ import backgroundVideo from '../assets/background.mp4';
 import boxImage from '../assets/box.png';
 import logoImage from '../assets/logo1.png';
 import userAgreementText from '../assets/user-agreement.txt?raw';
+import AppIcon from '../components/AppIcon.vue';
 
 const emit = defineEmits(['login']);
 
@@ -628,7 +629,10 @@ onMounted(() => {
 
             <form class="login-form" @submit.prevent="handleLogin">
               <div class="form-row">
-                <label for="login-account">账号</label>
+                <label for="login-account">
+                  <AppIcon name="person" :size="20" />
+                  <span>账号</span>
+                </label>
                 <input
                   id="login-account"
                   v-model="account"
@@ -640,7 +644,10 @@ onMounted(() => {
               </div>
 
               <div class="form-row password-row">
-                <label for="login-password">密码</label>
+                <label for="login-password">
+                  <AppIcon name="lock_reset" :size="20" />
+                  <span>密码</span>
+                </label>
                 <input
                   id="login-password"
                   v-model="password"
@@ -720,14 +727,17 @@ onMounted(() => {
                   v-model="agreementAccepted"
                   type="checkbox"
                 />
-                <span
-                  class="agreement-check material-symbols-outlined"
+                <AppIcon
+                  :name="
+                    agreementAccepted
+                      ? 'check_box'
+                      : 'check_box_outline_blank'
+                  "
+                  :size="17"
+                  class="agreement-check"
                   aria-hidden="true"
                   @click="agreementAccepted = !agreementAccepted"
-                  >{{
-                    agreementAccepted ? 'check_box' : 'check_box_outline_blank'
-                  }}</span
-                >
+                />
                 <label for="agreement-consent">我已阅读并同意</label>
                 <button type="button" @click="openAgreement">
                   《服务协议及隐私政策》
@@ -1627,16 +1637,8 @@ onMounted(() => {
   font-size: 0;
 }
 
-.form-row label::before {
-  content: 'person';
-  font-family: 'Material Symbols Outlined';
-  font-size: 20px;
-  line-height: 1;
-  font-weight: 300;
-}
-
-.password-row label::before {
-  content: 'vpn_key';
+.form-row label svg {
+  display: block;
 }
 
 .input-underline {

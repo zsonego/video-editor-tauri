@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from "vue-router";
 import LoginPage from "../views/LoginPage.vue";
 import WorkspacePage from "../views/WorkspacePage.vue";
+import CreateTemplatePage from "../views/CreateTemplatePage.vue";
 
 function hasLoginState() {
   try {
@@ -26,6 +27,12 @@ const routes = [
     path: "/home",
     name: "home",
     component: WorkspacePage,
+    meta: { requiresAuth: true },
+  },
+  {
+    path: "/create-template",
+    name: "create-template",
+    component: CreateTemplatePage,
     meta: { requiresAuth: true },
   },
   {

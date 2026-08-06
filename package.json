@@ -17,6 +17,7 @@
     "build:mas:pkg": "npm run build:mas:app && node scripts/package-mas-pkg.mjs"
   },
   "dependencies": {
+    "@lucide/vue": "^1.28.0",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2.7.1",
     "@tauri-apps/plugin-opener": "^2",
