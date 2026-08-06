@@ -7,6 +7,7 @@ import {
   reactive,
   ref,
 } from 'vue';
+import { useRouter } from 'vue-router';
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
@@ -36,9 +37,11 @@ import { systemMessage } from '../utils/message';
 import dingAudio from '../assets/ding.mp3';
 import hotImage from '../assets/hot.png';
 import logoImage from '../assets/logo.png';
+import AppIcon from '../components/AppIcon.vue';
 
 // 页面对外事件与远程/本地资源配置。
 const emit = defineEmits(['logout']);
+const router = useRouter();
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
@@ -143,6 +146,8 @@ const exportOutputPath = ref('');
 const defaultTemplateExportConfirmVisible = ref(false);
 const importOverwriteConfirmVisible = ref(false);
 const pendingImportSegment = ref(null);
+const importRepeatConfirmVisible = ref(false);
+const pendingRepeatImport = ref(null);
 let exportInterval = null;
 let exportFinishedAudio = null;
 let exportFinishedAudioContext = null;
@@ -287,7 +292,10 @@ const importSegments = computed(() =>
     const state = segmentImportState[id] || {};
     const count = Number(segment.count) || 0;
     const videos = state.videos || [];
-    const remainingCount = Math.max(0, count - videos.length);
+    const remainingCount = Array.from(
+      { length: count },
+      (_, videoIndex) => videos[videoIndex],
+    ).filter((video) => !isProjectImportedVideo(video)).length;
 
     return {
       ...segment,
@@ -299,6 +307,41 @@ const importSegments = computed(() =>
     };
   }),
 );
+const importSegmentCollections = computed(() => {
+  const collections = [];
+  const groupedCollections = new Map();
+
+  importSegments.value.forEach((segment) => {
+    if (!segment.parentGroupId) {
+      collections.push({
+        id: `single-${segment.id}`,
+        isGroup: false,
+        name: '',
+        segments: [segment],
+        count: segment.count,
+      });
+      return;
+    }
+
+    let collection = groupedCollections.get(segment.parentGroupId);
+    if (!collection) {
+      collection = {
+        id: `group-${segment.parentGroupId}`,
+        sourceId: segment.parentGroupId,
+        isGroup: true,
+        name: segment.parentGroupName || '素材大类',
+        segments: [],
+        count: 0,
+      };
+      groupedCollections.set(segment.parentGroupId, collection);
+      collections.push(collection);
+    }
+    collection.segments.push(segment);
+    collection.count += segment.count;
+  });
+
+  return collections;
+});
 const visibleDraftProjects = computed(() =>
   draftFilter.value === 'all'
     ? draftProjects.value
@@ -1689,6 +1732,8 @@ function clearProjectEditingState() {
   timeline.startTime = 0;
   pendingImportSegment.value = null;
   importOverwriteConfirmVisible.value = false;
+  pendingRepeatImport.value = null;
+  importRepeatConfirmVisible.value = false;
   resetMainPlayer();
 }
 
@@ -1826,71 +1871,209 @@ function buildFilledImportPaths(filePaths, count) {
   );
 }
 
-async function openImportFilePicker(segment) {
-  const filePaths = await pickVideoPaths(true);
-  if (filePaths.length === 0) return;
+function isSegmentGroupFullyImported(group) {
+  return (
+    group?.segments?.length > 0 &&
+    group.segments.every(isSegmentFullyImported)
+  );
+}
 
-  const previousState = getSegmentImportState(segment.id);
-  const targetCount = Number(segment.count) || 0;
-  const selectedPaths = buildFilledImportPaths(filePaths, targetCount);
-  const importedVideos = [];
+function hasImportedVideoInSegmentGroup(group) {
+  return (group?.segments || []).some(hasImportedVideoInSegment);
+}
 
-  try {
-    for (const [index, filePath] of selectedPaths.entries()) {
-      const assetId = segment.defaultAssets?.[index]?.id || '';
-      importedVideos.push(
-        await createImportedVideoFromPath(
+function normalizeOneClickImportTarget(target) {
+  if (target?.kind === 'group') return target;
+  return { kind: 'segment', value: target?.value || target };
+}
+
+function getOneClickImportSegments(target) {
+  const normalizedTarget = normalizeOneClickImportTarget(target);
+  return normalizedTarget.kind === 'group'
+    ? normalizedTarget.value?.segments || []
+    : normalizedTarget.value
+      ? [normalizedTarget.value]
+      : [];
+}
+
+function isOneClickImportTargetFullyImported(target) {
+  const normalizedTarget = normalizeOneClickImportTarget(target);
+  return normalizedTarget.kind === 'group'
+    ? isSegmentGroupFullyImported(normalizedTarget.value)
+    : isSegmentFullyImported(normalizedTarget.value);
+}
+
+function hasImportedVideoInOneClickTarget(target) {
+  const normalizedTarget = normalizeOneClickImportTarget(target);
+  return normalizedTarget.kind === 'group'
+    ? hasImportedVideoInSegmentGroup(normalizedTarget.value)
+    : hasImportedVideoInSegment(normalizedTarget.value);
+}
+
+function getOneClickImportSlots(target, mode = 'overwrite') {
+  return getOneClickImportSegments(target).flatMap((segment) => {
+    const targetCount = Number(segment.count) || 0;
+    return Array.from({ length: targetCount }, (_, slotIndex) => ({
+      segment,
+      slotIndex,
+      video: segment.videos?.[slotIndex],
+    })).filter(
+      ({ video }) => mode === 'overwrite' || !isProjectImportedVideo(video),
+    );
+  });
+}
+
+async function importPathsIntoSlots(slots, filePaths) {
+  const assignments = slots.slice(0, filePaths.length).map((slot, index) => ({
+    ...slot,
+    filePath: filePaths[index],
+  }));
+  if (assignments.length === 0) return false;
+
+  const assignmentsBySegment = new Map();
+  assignments.forEach((assignment) => {
+    const segmentAssignments =
+      assignmentsBySegment.get(assignment.segment.id) || [];
+    segmentAssignments.push(assignment);
+    assignmentsBySegment.set(assignment.segment.id, segmentAssignments);
+  });
+
+  let firstImportedVideo = null;
+  let firstImportedSegment = null;
+
+  for (const segmentAssignments of assignmentsBySegment.values()) {
+    const segment = segmentAssignments[0].segment;
+    const previousState = getSegmentImportState(segment.id);
+    const videos = [...previousState.videos];
+    const replacedVideos = [];
+    const importedVideos = [];
+
+    try {
+      for (const { filePath, slotIndex } of segmentAssignments) {
+        const assetId = segment.defaultAssets?.[slotIndex]?.id || '';
+        const importedVideo = await createImportedVideoFromPath(
           filePath,
-          `${segment.id}-${index}`,
+          `${segment.id}-${slotIndex}`,
           assetId,
-        ),
-      );
+        );
+        const previousVideo = videos[slotIndex];
+        if (previousVideo) replacedVideos.push(previousVideo);
+        videos[slotIndex] = importedVideo;
+        importedVideos.push(importedVideo);
+        firstImportedVideo ||= importedVideo;
+        firstImportedSegment ||= segment;
+      }
+    } catch (error) {
+      systemMessage.error(error?.message || '素材导入失败');
+      return false;
     }
-  } catch (error) {
-    systemMessage.error(error?.message || '素材导入失败');
-    return;
+
+    try {
+      await deleteReplacedProjectAssets(replacedVideos, importedVideos);
+    } catch (error) {
+      systemMessage.error(error?.message || '旧素材清理失败');
+    }
+
+    replacedVideos.forEach(revokeImportedVideo);
+    const targetCount = Number(segment.count) || 0;
+    segmentImportState[segment.id] = {
+      imported:
+        targetCount > 0 &&
+        Array.from(
+          { length: targetCount },
+          (_, slotIndex) => videos[slotIndex],
+        ).every(isProjectImportedVideo),
+      videos,
+    };
   }
 
-  try {
-    await deleteReplacedProjectAssets(previousState.videos, importedVideos);
-  } catch (error) {
-    systemMessage.error(error?.message || '旧素材清理失败');
-  }
-
-  previousState.videos.forEach(revokeImportedVideo);
-  segmentImportState[segment.id] = {
-    imported: importedVideos.length >= targetCount,
-    videos: importedVideos,
-  };
   refreshInvalidDurationVideoState();
+  if (firstImportedVideo && firstImportedSegment) {
+    selectVideoForTimeline(firstImportedVideo, firstImportedSegment.name);
+  }
+  return true;
+}
 
-  if (importedVideos[0]) {
-    selectVideoForTimeline(importedVideos[0], segment.name);
+async function executeOneClickImport(target, mode, filePaths, repeat = false) {
+  const slots = getOneClickImportSlots(target, mode);
+  const pathsToImport = repeat
+    ? buildFilledImportPaths(filePaths, slots.length)
+    : filePaths.slice(0, slots.length);
+  const imported = await importPathsIntoSlots(slots, pathsToImport);
+  const normalizedTarget = normalizeOneClickImportTarget(target);
+
+  if (imported && normalizedTarget.kind === 'group') {
+    systemMessage.success(`“${normalizedTarget.value.name}”下的素材已导入`);
   }
 }
 
-function requestOneClickImport(segment) {
-  if (hasImportedVideoInSegment(segment)) {
-    pendingImportSegment.value = segment;
+async function openOneClickImportFilePicker(target, mode = 'overwrite') {
+  const filePaths = await pickVideoPaths(true);
+  if (filePaths.length === 0) return;
+
+  const slots = getOneClickImportSlots(target, mode);
+  if (slots.length === 0) return;
+
+  if (filePaths.length < slots.length) {
+    pendingRepeatImport.value = { target, mode, filePaths };
+    importRepeatConfirmVisible.value = true;
+    return;
+  }
+
+  await executeOneClickImport(target, mode, filePaths);
+}
+
+function requestOneClickImportTarget(target) {
+  const normalizedTarget = normalizeOneClickImportTarget(target);
+  if (
+    hasImportedVideoInOneClickTarget(normalizedTarget) &&
+    !isOneClickImportTargetFullyImported(normalizedTarget)
+  ) {
+    pendingImportSegment.value = normalizedTarget;
     importOverwriteConfirmVisible.value = true;
     return;
   }
 
-  openImportFilePicker(segment);
+  openOneClickImportFilePicker(normalizedTarget, 'overwrite');
 }
 
-function closeImportOverwriteConfirm() {
+function requestOneClickImport(segment) {
+  requestOneClickImportTarget({ kind: 'segment', value: segment });
+}
+
+function requestGroupOneClickImport(group) {
+  requestOneClickImportTarget({ kind: 'group', value: group });
+}
+
+async function chooseFillRemainingImportSlots() {
+  const pendingImport = pendingImportSegment.value;
   importOverwriteConfirmVisible.value = false;
   pendingImportSegment.value = null;
+  if (pendingImport) {
+    await openOneClickImportFilePicker(pendingImport, 'fill-empty');
+  }
 }
 
 async function confirmImportOverwrite() {
-  const segment = pendingImportSegment.value;
+  const pendingImport = pendingImportSegment.value;
   importOverwriteConfirmVisible.value = false;
   pendingImportSegment.value = null;
+  if (pendingImport) {
+    await openOneClickImportFilePicker(pendingImport, 'overwrite');
+  }
+}
 
-  if (segment) {
-    await openImportFilePicker(segment);
+async function resolveRepeatImport(shouldRepeat) {
+  const pendingImport = pendingRepeatImport.value;
+  importRepeatConfirmVisible.value = false;
+  pendingRepeatImport.value = null;
+  if (pendingImport) {
+    await executeOneClickImport(
+      pendingImport.target,
+      pendingImport.mode,
+      pendingImport.filePaths,
+      shouldRepeat,
+    );
   }
 }
 
@@ -3757,6 +3940,57 @@ function parseProjectMaxOffsets(projectFileXml) {
   return maxOffsets;
 }
 
+function parseMediaAssetElement(mediaAsset, index, parentGroup = null) {
+  const directChildren = Array.from(mediaAsset.children);
+  const defaultAsset = directChildren.find(
+    (child) => child.tagName.toLowerCase() === 'default-asset',
+  );
+  const constraints = directChildren.find(
+    (child) => child.tagName.toLowerCase() === 'constraints',
+  );
+  const constraintChildren = constraints ? Array.from(constraints.children) : [];
+  const minDuration =
+    constraintChildren
+      .find((child) => child.tagName.toLowerCase() === 'minduration')
+      ?.textContent?.trim() || '';
+  const maxDuration =
+    constraintChildren
+      .find((child) => child.tagName.toLowerCase() === 'maxduration')
+      ?.textContent?.trim() || '';
+  const defaultAssets = defaultAsset
+    ? Array.from(defaultAsset.children).filter(
+        (child) => child.tagName.toLowerCase() === 'asset',
+      )
+    : [];
+  const defaultAssetItems = defaultAssets.map((asset) => ({
+    id: asset.getAttribute('id') || '',
+    filepath: asset.getAttribute('filepath') || '',
+  }));
+  const comment =
+    directChildren
+      .find((child) => child.tagName.toLowerCase() === 'comment')
+      ?.textContent?.trim() || '';
+  const sourceId = mediaAsset.getAttribute('id') || `media-asset-${index + 1}`;
+  const name =
+    mediaAsset.getAttribute('name') ||
+    directChildren
+      .find((child) => child.tagName.toLowerCase() === 'name')
+      ?.textContent?.trim() ||
+    sourceId ||
+    `素材 ${index + 1}`;
+
+  return {
+    sourceId,
+    name,
+    shot: comment,
+    count: defaultAssets.length,
+    durationRange: formatMaterialDurationRange(minDuration, maxDuration),
+    defaultAssets: defaultAssetItems,
+    parentGroupId: parentGroup?.id || '',
+    parentGroupName: parentGroup?.name || '',
+  };
+}
+
 function parseTemplateSegments(xmlContent) {
   const xml = new DOMParser().parseFromString(xmlContent, 'text/xml');
 
@@ -3764,56 +3998,38 @@ function parseTemplateSegments(xmlContent) {
     return parseTemplateSegmentsFromText(xmlContent);
   }
 
-  return Array.from(xml.querySelectorAll('media-asset')).map(
-    (mediaAsset, index) => {
-      const directChildren = Array.from(mediaAsset.children);
-      const defaultAsset = directChildren.find(
-        (child) => child.tagName.toLowerCase() === 'default-asset',
-      );
-      const constraints = directChildren.find(
-        (child) => child.tagName.toLowerCase() === 'constraints',
-      );
-      const constraintChildren = constraints
-        ? Array.from(constraints.children)
-        : [];
-      const minDuration =
-        constraintChildren
-          .find((child) => child.tagName.toLowerCase() === 'minduration')
-          ?.textContent?.trim() || '';
-      const maxDuration =
-        constraintChildren
-          .find((child) => child.tagName.toLowerCase() === 'maxduration')
-          ?.textContent?.trim() || '';
-      const defaultAssets = defaultAsset
-        ? Array.from(defaultAsset.children).filter(
-            (child) => child.tagName.toLowerCase() === 'asset',
-          )
-        : [];
-      const defaultAssetItems = defaultAssets.map((asset) => ({
-        id: asset.getAttribute('id') || '',
-        filepath: asset.getAttribute('filepath') || '',
-      }));
-      const comment =
-        directChildren
-          .find((child) => child.tagName.toLowerCase() === 'comment')
-          ?.textContent?.trim() || '';
-      const name =
-        mediaAsset.getAttribute('name') ||
-        directChildren
-          .find((child) => child.tagName.toLowerCase() === 'name')
-          ?.textContent?.trim() ||
-        mediaAsset.getAttribute('id') ||
-        `素材 ${index + 1}`;
+  const template = xml.querySelector('template');
+  if (!template) return [];
+  const segments = [];
+  let segmentIndex = 0;
+  let groupIndex = 0;
 
-      return {
-        name,
-        shot: comment,
-        count: defaultAssets.length,
-        durationRange: formatMaterialDurationRange(minDuration, maxDuration),
-        defaultAssets: defaultAssetItems,
-      };
-    },
-  );
+  Array.from(template.children).forEach((node) => {
+    const tagName = node.tagName.toLowerCase();
+    if (tagName === 'media-asset') {
+      segments.push(parseMediaAssetElement(node, segmentIndex));
+      segmentIndex += 1;
+      return;
+    }
+    if (tagName !== 'media-assets') return;
+
+    const group = {
+      id: node.getAttribute('id') || `media-assets-${groupIndex + 1}`,
+      name:
+        node.getAttribute('name') ||
+        node.getAttribute('id') ||
+        `素材大类 ${groupIndex + 1}`,
+    };
+    groupIndex += 1;
+    Array.from(node.children)
+      .filter((child) => child.tagName.toLowerCase() === 'media-asset')
+      .forEach((mediaAsset) => {
+        segments.push(parseMediaAssetElement(mediaAsset, segmentIndex, group));
+        segmentIndex += 1;
+      });
+  });
+
+  return segments;
 }
 
 function getElementText(source, name) {
@@ -3848,32 +4064,83 @@ function parseAssetTags(source) {
   });
 }
 
+function parseMediaAssetText(match, index, parentGroup = null) {
+  const attributes = match[1] || '';
+  const body = match[2] || '';
+  const defaultAssetBody = getElementText(body, 'default-asset');
+  const sourceId =
+    getAttributeValue(attributes, 'id') || `media-asset-${index + 1}`;
+  const name =
+    getAttributeValue(attributes, 'name') ||
+    getElementText(body, 'name') ||
+    sourceId ||
+    `素材 ${index + 1}`;
+
+  return {
+    sourceId,
+    name,
+    shot: getElementText(body, 'comment'),
+    count: (defaultAssetBody.match(/<asset\b/gi) || []).length,
+    durationRange: formatMaterialDurationRange(
+      getElementText(body, 'minDuration'),
+      getElementText(body, 'maxDuration'),
+    ),
+    defaultAssets: parseAssetTags(defaultAssetBody),
+    parentGroupId: parentGroup?.id || '',
+    parentGroupName: parentGroup?.name || '',
+  };
+}
+
 function parseTemplateSegmentsFromText(xmlContent) {
-  const mediaAssetMatches = Array.from(
-    xmlContent.matchAll(/<media-asset\b([^>]*)>([\s\S]*?)<\/media-asset>/gi),
+  const groupMatches = Array.from(
+    xmlContent.matchAll(/<media-assets\b([^>]*)>([\s\S]*?)<\/media-assets>/gi),
   );
+  const groupRanges = groupMatches.map((match) => ({
+    start: match.index,
+    end: match.index + match[0].length,
+  }));
+  const entries = [];
+  let segmentIndex = 0;
 
-  return mediaAssetMatches.map((match, index) => {
-    const attributes = match[1] || '';
-    const body = match[2] || '';
-    const defaultAssetBody = getElementText(body, 'default-asset');
-    const name =
-      getAttributeValue(attributes, 'name') ||
-      getElementText(body, 'name') ||
-      getAttributeValue(attributes, 'id') ||
-      `素材 ${index + 1}`;
-
-    return {
-      name,
-      shot: getElementText(body, 'comment'),
-      count: (defaultAssetBody.match(/<asset\b/gi) || []).length,
-      durationRange: formatMaterialDurationRange(
-        getElementText(body, 'minDuration'),
-        getElementText(body, 'maxDuration'),
-      ),
-      defaultAssets: parseAssetTags(defaultAssetBody),
+  groupMatches.forEach((groupMatch, groupIndex) => {
+    const attributes = groupMatch[1] || '';
+    const group = {
+      id:
+        getAttributeValue(attributes, 'id') || `media-assets-${groupIndex + 1}`,
+      name:
+        getAttributeValue(attributes, 'name') ||
+        getAttributeValue(attributes, 'id') ||
+        `素材大类 ${groupIndex + 1}`,
     };
+    const segments = Array.from(
+      groupMatch[2].matchAll(
+        /<media-asset\b([^>]*)>([\s\S]*?)<\/media-asset>/gi,
+      ),
+    ).map((match) => {
+      const segment = parseMediaAssetText(match, segmentIndex, group);
+      segmentIndex += 1;
+      return segment;
+    });
+    entries.push({ position: groupMatch.index, segments });
   });
+
+  Array.from(
+    xmlContent.matchAll(/<media-asset\b([^>]*)>([\s\S]*?)<\/media-asset>/gi),
+  ).forEach((match) => {
+    const insideGroup = groupRanges.some(
+      (range) => match.index >= range.start && match.index < range.end,
+    );
+    if (insideGroup) return;
+    entries.push({
+      position: match.index,
+      segments: [parseMediaAssetText(match, segmentIndex)],
+    });
+    segmentIndex += 1;
+  });
+
+  return entries
+    .sort((left, right) => left.position - right.position)
+    .flatMap((entry) => entry.segments);
 }
 
 function clearTemplateCoverCache() {
@@ -4260,6 +4527,11 @@ function hideHelpCenter() {
   helpCenterVisible.value = false;
 }
 
+function showCreateTemplate() {
+  closeAccountMenu();
+  router.push({ name: 'create-template' });
+}
+
 function switchHelpTab(tab) {
   activeHelpTab.value = tab;
 }
@@ -4502,9 +4774,7 @@ onBeforeUnmount(() => {
               type="button"
               @click="showProfileModal"
             >
-              <span class="material-symbols-outlined text-[18px]"
-                >account_circle</span
-              >
+              <AppIcon name="account_circle" :size="18" />
               <span>个人信息</span>
             </button>
             <div class="mx-2 my-1 border-t border-outline-variant/30"></div>
@@ -4513,10 +4783,17 @@ onBeforeUnmount(() => {
               type="button"
               @click="showPasswordModal"
             >
-              <span class="material-symbols-outlined text-[18px]"
-                >lock_reset</span
-              >
+              <AppIcon name="lock_reset" :size="18" />
               <span>修改密码</span>
+            </button>
+            <div class="mx-2 my-1 border-t border-outline-variant/30"></div>
+            <button
+              class="w-full flex items-center gap-3 px-4 py-2.5 text-[13px] text-on-surface-variant hover:bg-electric-blue/10 hover:text-white transition-colors text-left"
+              type="button"
+              @click="showCreateTemplate"
+            >
+              <AppIcon name="add_box" :size="18" />
+              <span>创建模板</span>
             </button>
             <div class="mx-2 my-1 border-t border-outline-variant/30"></div>
             <button
@@ -4524,9 +4801,7 @@ onBeforeUnmount(() => {
               type="button"
               @click="showHelpCenter"
             >
-              <span class="material-symbols-outlined text-[18px]"
-                >help_center</span
-              >
+              <AppIcon name="help_center" :size="18" />
               <span>帮助中心</span>
             </button>
             <div class="mx-2 my-1 border-t border-outline-variant/30"></div>
@@ -4534,8 +4809,7 @@ onBeforeUnmount(() => {
               class="flex items-center gap-3 px-4 py-2.5 text-[13px] text-[#ec4034] hover:bg-[#ec4034]/10 transition-colors"
               href="#"
               @click.prevent="showLogoutConfirm"
-              ><span class="material-symbols-outlined text-[18px]">logout</span
-              ><span>退出登录</span></a
+              ><AppIcon name="logout" :size="18" /><span>退出登录</span></a
             >
           </div>
         </div>
@@ -4572,10 +4846,11 @@ onBeforeUnmount(() => {
           <span>收藏夹</span>
         </button>
         <div class="relative max-w-[200px] shrink-0">
-          <span
-            class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-[16px] text-on-surface-variant/50"
-            >search</span
-          >
+          <AppIcon
+            name="search"
+            :size="16"
+            class="absolute left-3 top-1/2 -translate-y-1/2 text-on-surface-variant/50"
+          />
           <input
             v-model="templateSearchKeyword"
             class="w-full bg-surface-container-lowest/50 border border-outline-variant/30 rounded-full pl-9 pr-4 py-1.5 text-[11px] focus:border-electric-blue/50 focus:bg-surface-container-lowest outline-none transition-all text-on-surface placeholder:text-on-surface-variant/40"
@@ -4630,9 +4905,7 @@ onBeforeUnmount(() => {
                 @click="handleSidebarBack"
               >
                 <span class="text-[11px]">返回</span>
-                <span class="material-symbols-outlined text-[18px]"
-                  >arrow_forward</span
-                >
+                <AppIcon name="arrow_forward" :size="18" />
               </button>
             </h2>
           </div>
@@ -4709,10 +4982,34 @@ onBeforeUnmount(() => {
                 class="flex-1 overflow-y-auto custom-scrollbar space-y-3 pt-1 templateDetailWrapper"
               >
                 <div
-                  v-for="segment in visibleSegments"
-                  :key="segment.name"
-                  class="segment-card p-3 rounded bg-surface-container-high/50 border border-white/5 hover:border-electric-blue/40 transition-all transform hover:-translate-y-0.5 cursor-pointer shadow-sm"
+                  v-for="collection in importSegmentCollections"
+                  :key="collection.id"
+                  :class="
+                    collection.isGroup
+                      ? 'rounded-xl border border-electric-blue/30 bg-electric-blue/5 p-2'
+                      : ''
+                  "
                 >
+                  <div
+                    v-if="collection.isGroup"
+                    class="px-2 py-2 mb-2 border-b border-electric-blue/20"
+                  >
+                    <div class="text-[13px] font-black text-white truncate">
+                      {{ collection.name }}
+                    </div>
+                    <div class="mt-1 text-[10px] text-on-surface-variant">
+                      {{ collection.segments.length }} 个子类 ·
+                      {{ collection.count }} 个视频
+                    </div>
+                  </div>
+                  <div
+                    :class="collection.isGroup ? 'space-y-2' : ''"
+                  >
+                  <div
+                    v-for="segment in collection.segments"
+                    :key="segment.id"
+                    class="segment-card p-3 rounded bg-surface-container-high/50 border border-white/5 hover:border-electric-blue/40 transition-all transform hover:-translate-y-0.5 cursor-pointer shadow-sm"
+                  >
                   <div class="text-[12px] font-bold text-on-surface">
                     {{ segment.name }}
                   </div>
@@ -4730,6 +5027,8 @@ onBeforeUnmount(() => {
                       }}</span>
                     </div>
                   </div>
+                  </div>
+                </div>
                 </div>
               </div>
             </div>
@@ -4747,10 +5046,50 @@ onBeforeUnmount(() => {
                 </template>
                 <template v-else>
                   <div
-                    v-for="style in importSegments"
-                    :key="style.id"
-                    class="videoList rounded-lg bg-surface-container-low border border-white/5 overflow-hidden mb-3 shadow-sm"
+                    v-for="collection in importSegmentCollections"
+                    :key="collection.id"
+                    :class="
+                      collection.isGroup
+                        ? 'rounded-xl border border-electric-blue/35 bg-electric-blue/5 overflow-hidden mb-3 shadow-lg shadow-black/10'
+                        : ''
+                    "
                   >
+                    <div
+                      v-if="collection.isGroup"
+                      class="flex items-center justify-between gap-3 p-3 border-b border-electric-blue/20 bg-electric-blue/10"
+                    >
+                      <div class="min-w-0 flex-1">
+                        <div
+                          class="text-[13px] font-black text-white truncate"
+                          :title="collection.name"
+                        >
+                          {{ collection.name }}
+                        </div>
+                        <div class="mt-1 text-[10px] text-on-surface-variant">
+                          {{ collection.segments.length }} 个子类 ·
+                          {{ collection.count }} 个视频
+                        </div>
+                      </div>
+                      <button
+                        class="px-3 py-1.5 text-[11px] font-bold rounded-md flex items-center gap-1 shrink-0 transition-colors"
+                        :class="
+                          isSegmentGroupFullyImported(collection)
+                            ? 'bg-white/5 text-on-surface-variant/60 border border-white/10 hover:bg-white/10'
+                            : 'bg-electric-blue text-white shadow-lg shadow-electric-blue/10 hover:brightness-110'
+                        "
+                        type="button"
+                        @click="requestGroupOneClickImport(collection)"
+                      >
+                        {{ `一键导入 (${collection.count})` }}
+                      </button>
+                    </div>
+                    <div :class="collection.isGroup ? 'p-2 space-y-2' : ''">
+                    <div
+                      v-for="style in collection.segments"
+                      :key="style.id"
+                      class="videoList rounded-lg bg-surface-container-low border border-white/5 overflow-hidden shadow-sm"
+                      :class="{ 'mb-3': !collection.isGroup }"
+                    >
                     <div
                       class="flex items-center justify-between gap-3 p-3 bg-white/5"
                     >
@@ -4809,10 +5148,11 @@ onBeforeUnmount(() => {
                           >
                             {{ videoIndex + 1 }}
                           </span>
-                          <span
-                            class="material-symbols-outlined text-primary text-[18px] shrink-0"
-                            >smart_display</span
-                          >
+                          <AppIcon
+                            name="smart_display"
+                            :size="18"
+                            class="text-primary shrink-0"
+                          />
                           <div class="min-w-0">
                             <div class="text-[12px] text-white truncate">
                               {{ video.name }}
@@ -4837,6 +5177,8 @@ onBeforeUnmount(() => {
                       </div>
                     </div>
                   </div>
+                    </div>
+                  </div>
                 </template>
               </div>
             </div>
@@ -4851,10 +5193,11 @@ onBeforeUnmount(() => {
             class="absolute top-1/2 left-0 -translate-y-1/2 z-[80] bg-surface-container-high border border-outline-variant text-white w-6 h-12 rounded-r-full flex items-center justify-center shadow-lg hover:bg-surface-container-highest transition-all duration-300 group"
             @click="toggleSidebar()"
           >
-            <span
-              class="material-symbols-outlined text-[18px] group-hover:scale-110"
-              >{{ sidebarHidden ? 'chevron_right' : 'chevron_left' }}</span
-            >
+            <AppIcon
+              :name="sidebarHidden ? 'chevron_right' : 'chevron_left'"
+              :size="18"
+              class="group-hover:scale-110"
+            />
           </button>
           <div
             class="absolute inset-0 z-[190] bg-black/60 backdrop-blur-[2px] modal-fade-in"
@@ -4906,23 +5249,22 @@ onBeforeUnmount(() => {
                     type="button"
                     @click.stop="toggleTemplateFavorite(card)"
                   >
-                    <span
-                      class="material-symbols-outlined text-[21px]"
+                    <AppIcon
+                      :name="
+                        isTemplateFavoriteUpdating(card)
+                          ? 'progress_activity'
+                          : 'star'
+                      "
+                      :size="21"
+                      :filled="
+                        isTemplateFavorited(card) &&
+                        !isTemplateFavoriteUpdating(card)
+                      "
                       :class="{
                         'start-editing-spinner':
                           isTemplateFavoriteUpdating(card),
                       }"
-                      :style="
-                        isTemplateFavorited(card)
-                          ? { fontVariationSettings: `'FILL' 1` }
-                          : undefined
-                      "
-                      >{{
-                        isTemplateFavoriteUpdating(card)
-                          ? 'progress_activity'
-                          : 'star'
-                      }}</span
-                    >
+                    />
                   </button>
                   <img
                     v-if="Number(card.score || 0) !== 0"
@@ -4991,11 +5333,12 @@ onBeforeUnmount(() => {
                     class="w-20 h-20 bg-black/45 rounded-full flex items-center justify-center border border-white/20 hover:scale-105 transition-transform shadow-2xl"
                     @click="togglePlayerPlayback"
                   >
-                    <span
-                      class="material-symbols-outlined text-white text-[48px]"
-                      style="font-variation-settings: 'FILL' 1"
-                      >{{ playerPaused ? 'play_arrow' : 'pause' }}</span
-                    >
+                    <AppIcon
+                      :name="playerPaused ? 'play_arrow' : 'pause'"
+                      :size="48"
+                      class="text-white"
+                      filled
+                    />
                   </button>
                 </div>
                 <div
@@ -5016,27 +5359,23 @@ onBeforeUnmount(() => {
                       class="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center transition-colors"
                       @click="seekPlayerBy(-10)"
                     >
-                      <span class="material-symbols-outlined text-[18px]"
-                        >replay_10</span
-                      >
+                      <AppIcon name="replay_10" :size="18" />
                     </button>
                     <button
                       class="w-9 h-9 rounded-full bg-electric-blue hover:brightness-110 flex items-center justify-center shadow-lg shadow-electric-blue/20 transition-all"
                       @click="togglePlayerPlayback"
                     >
-                      <span
-                        class="material-symbols-outlined text-[22px]"
-                        style="font-variation-settings: 'FILL' 1"
-                        >{{ playerPaused ? 'play_arrow' : 'pause' }}</span
-                      >
+                      <AppIcon
+                        :name="playerPaused ? 'play_arrow' : 'pause'"
+                        :size="22"
+                        filled
+                      />
                     </button>
                     <button
                       class="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center transition-colors"
                       @click="seekPlayerBy(10)"
                     >
-                      <span class="material-symbols-outlined text-[18px]"
-                        >forward_10</span
-                      >
+                      <AppIcon name="forward_10" :size="18" />
                     </button>
                     <div class="text-[11px] font-code-data text-white/80">
                       {{ playerTimeLabel }}
@@ -5052,9 +5391,10 @@ onBeforeUnmount(() => {
                       class="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center transition-colors"
                       @click="togglePlayerMute"
                     >
-                      <span class="material-symbols-outlined text-[18px]">{{
-                        playerMuted ? 'volume_off' : 'volume_up'
-                      }}</span>
+                      <AppIcon
+                        :name="playerMuted ? 'volume_off' : 'volume_up'"
+                        :size="18"
+                      />
                     </button>
                   </div>
                 </div>
@@ -5072,9 +5412,14 @@ onBeforeUnmount(() => {
               :class="timelineCollapsed ? 'top-[-28px]' : 'top-0'"
               @click="toggleTimelineContainer"
             >
-              <span class="material-symbols-outlined text-[20px]">{{
-                timelineCollapsed ? 'keyboard_arrow_up' : 'keyboard_arrow_down'
-              }}</span>
+              <AppIcon
+                :name="
+                  timelineCollapsed
+                    ? 'keyboard_arrow_up'
+                    : 'keyboard_arrow_down'
+                "
+                :size="20"
+              />
               <span class="sr-only">展开时间线</span>
             </button>
             <div
@@ -5237,34 +5582,35 @@ onBeforeUnmount(() => {
                   "
                   @click.stop="togglePreviewFavorite"
                 >
-                  <span
-                    class="material-symbols-outlined text-[24px] group-hover:scale-110"
+                  <AppIcon
+                    :name="
+                      isTemplateFavoriteUpdating({ id: activeTemplateId })
+                        ? 'progress_activity'
+                        : 'star'
+                    "
+                    :size="24"
+                    :filled="
+                      previewFavorited &&
+                      !isTemplateFavoriteUpdating({ id: activeTemplateId })
+                    "
+                    class="group-hover:scale-110"
                     :class="{
                       'start-editing-spinner': isTemplateFavoriteUpdating({
                         id: activeTemplateId,
                       }),
                     }"
-                    :style="
-                      previewFavorited
-                        ? { fontVariationSettings: `'FILL' 1` }
-                        : undefined
-                    "
-                    >{{
-                      isTemplateFavoriteUpdating({ id: activeTemplateId })
-                        ? 'progress_activity'
-                        : 'star'
-                    }}</span
-                  >
+                  />
                 </button>
                 <button
                   class="p-2 bg-black/40 backdrop-blur-md rounded-full text-white/80 hover:text-white transition-colors group"
                   type="button"
                   @click="hidePreviewModal"
                 >
-                  <span
-                    class="material-symbols-outlined text-[24px] group-hover:scale-110"
-                    >close</span
-                  >
+                  <AppIcon
+                    name="close"
+                    :size="24"
+                    class="group-hover:scale-110"
+                  />
                 </button>
               </div>
               <div
@@ -5298,11 +5644,12 @@ onBeforeUnmount(() => {
                       class="w-20 h-20 bg-black/45 rounded-full flex items-center justify-center border border-white/20 hover:scale-105 transition-transform shadow-2xl"
                       @click="toggleModalPreviewPlayback"
                     >
-                      <span
-                        class="material-symbols-outlined text-white text-[48px]"
-                        style="font-variation-settings: 'FILL' 1"
-                        >{{ modalPaused ? 'play_arrow' : 'pause' }}</span
-                      >
+                      <AppIcon
+                        :name="modalPaused ? 'play_arrow' : 'pause'"
+                        :size="48"
+                        class="text-white"
+                        filled
+                      />
                     </button>
                   </div>
                   <div
@@ -5343,20 +5690,18 @@ onBeforeUnmount(() => {
                       type="button"
                       @click="toggleModalPreviewPlayback"
                     >
-                      <span
-                        class="material-symbols-outlined text-[28px]"
-                        style="font-variation-settings: 'FILL' 1"
-                        >{{ modalPaused ? 'play_arrow' : 'pause' }}</span
-                      >
+                      <AppIcon
+                        :name="modalPaused ? 'play_arrow' : 'pause'"
+                        :size="28"
+                        filled
+                      />
                     </button>
                     <button
                       class="w-16 h-9 rounded-full bg-white/5 border border-white/10 text-white/80 hover:bg-white/10 hover:text-white transition-colors flex items-center justify-center"
                       type="button"
                       @click="seekModalPreviewBy(5)"
                     >
-                      <span class="material-symbols-outlined text-[22px]"
-                        >fast_forward</span
-                      >
+                      <AppIcon name="fast_forward" :size="22" />
                     </button>
                   </div>
                   <div class="flex items-center gap-4 flex-1 justify-end">
@@ -5365,11 +5710,12 @@ onBeforeUnmount(() => {
                       :disabled="startEditingLoading"
                       @click="confirmSelection"
                     >
-                      <span
+                      <AppIcon
                         v-if="startEditingLoading"
-                        class="material-symbols-outlined text-[20px] start-editing-spinner"
-                        >progress_activity</span
-                      >
+                        name="progress_activity"
+                        :size="20"
+                        class="start-editing-spinner"
+                      />
                       {{ startEditingLoading ? '正在加载' : '开始编辑' }}
                     </button>
                   </div>
@@ -5396,10 +5742,11 @@ onBeforeUnmount(() => {
                   <div
                     class="w-8 h-8 bg-electric-blue rounded-lg flex items-center justify-center"
                   >
-                    <span
-                      class="material-symbols-outlined text-white text-[20px]"
-                      >menu_book</span
-                    >
+                    <AppIcon
+                      name="menu_book"
+                      :size="20"
+                      class="text-white"
+                    />
                   </div>
                   <h3 class="text-lg font-black text-white">产品帮助中心</h3>
                 </div>
@@ -5408,7 +5755,7 @@ onBeforeUnmount(() => {
                   type="button"
                   @click="hideHelpCenter"
                 >
-                  <span class="material-symbols-outlined">close</span>
+                  <AppIcon name="close" :size="24" />
                 </button>
               </div>
               <div class="flex-1 flex overflow-hidden">
@@ -5425,9 +5772,7 @@ onBeforeUnmount(() => {
                     type="button"
                     @click="switchHelpTab('guide')"
                   >
-                    <span class="material-symbols-outlined text-[20px]"
-                      >explore</span
-                    >
+                    <AppIcon name="explore" :size="20" />
                     <span>使用指南</span>
                   </button>
                   <button
@@ -5440,9 +5785,7 @@ onBeforeUnmount(() => {
                     type="button"
                     @click="switchHelpTab('faq')"
                   >
-                    <span class="material-symbols-outlined text-[20px]"
-                      >quiz</span
-                    >
+                    <AppIcon name="quiz" :size="20" />
                     <span>常见问题</span>
                   </button>
                   <button
@@ -5455,9 +5798,7 @@ onBeforeUnmount(() => {
                     type="button"
                     @click="switchHelpTab('changelog')"
                   >
-                    <span class="material-symbols-outlined text-[20px]"
-                      >history</span
-                    >
+                    <AppIcon name="history" :size="20" />
                     <span>更新日志</span>
                   </button>
                 </aside>
@@ -5552,15 +5893,17 @@ onBeforeUnmount(() => {
                       :disabled="helpGuideDownloading"
                       @click="downloadHelpGuide"
                     >
-                      <span
-                        class="material-symbols-outlined"
+                      <AppIcon
+                        :name="
+                          helpGuideDownloading
+                            ? 'progress_activity'
+                            : 'download'
+                        "
+                        :size="24"
                         :class="{
                           'start-editing-spinner': helpGuideDownloading,
                         }"
-                        >{{
-                          helpGuideDownloading ? 'progress_activity' : 'download'
-                        }}</span
-                      >
+                      />
                       <span>{{
                         helpGuideDownloading ? '下载中...' : '下载离线指南'
                       }}</span>
@@ -5587,15 +5930,16 @@ onBeforeUnmount(() => {
                 type="button"
                 @click="hideProfileModal"
               >
-                <span class="material-symbols-outlined">close</span>
+                <AppIcon name="close" :size="24" />
               </button>
               <div
                 class="w-16 h-16 bg-electric-blue/10 rounded-full flex items-center justify-center mx-auto mb-4"
               >
-                <span
-                  class="material-symbols-outlined text-electric-blue text-3xl"
-                  >person</span
-                >
+                <AppIcon
+                  name="person"
+                  :size="30"
+                  class="text-electric-blue"
+                />
               </div>
               <h3 class="text-xl font-black text-white mb-6">个人信息</h3>
               <div
@@ -5661,9 +6005,11 @@ onBeforeUnmount(() => {
               <h3
                 class="text-lg font-black text-white mb-6 flex items-center gap-2"
               >
-                <span class="material-symbols-outlined text-electric-blue"
-                  >lock_reset</span
-                >
+                <AppIcon
+                  name="lock_reset"
+                  :size="24"
+                  class="text-electric-blue"
+                />
                 修改密码
               </h3>
               <div class="space-y-4">
@@ -5717,9 +6063,11 @@ onBeforeUnmount(() => {
               <div
                 class="w-16 h-16 bg-white/5 rounded-full flex items-center justify-center mx-auto mb-4 border border-white/10"
               >
-                <span class="material-symbols-outlined text-[#ec4034] text-3xl"
-                  >logout</span
-                >
+                <AppIcon
+                  name="logout"
+                  :size="30"
+                  class="text-[#ec4034]"
+                />
               </div>
               <h3 class="text-xl font-black text-white mb-2">退出登录</h3>
               <p class="text-on-surface-variant text-sm mb-6">
@@ -5758,33 +6106,80 @@ onBeforeUnmount(() => {
                 <div
                   class="w-14 h-14 rounded-full bg-electric-blue/10 border border-electric-blue/20 flex items-center justify-center"
                 >
-                  <span
-                    class="material-symbols-outlined text-electric-blue text-3xl"
-                    >sync_problem</span
-                  >
+                  <AppIcon
+                    name="sync_problem"
+                    :size="30"
+                    class="text-electric-blue"
+                  />
                 </div>
                 <div>
                   <h3 class="text-lg font-black text-white mb-2">
-                    确认一键导入
+                    是否覆盖现有上传内容？
                   </h3>
                   <p class="text-[13px] leading-6 text-on-surface-variant">
-                    当前类下已经导入过视频，一键导入会替换全部视频内容，是否继续？
+                    选择“是”将从头覆盖全部素材，选择“否”将只填充剩余位置。
                   </p>
                 </div>
                 <div class="grid grid-cols-2 gap-3 w-full">
                   <button
                     class="h-11 rounded-xl bg-white/5 text-on-surface-variant text-[13px] font-bold hover:bg-white/10 hover:text-white transition-all active:scale-95"
                     type="button"
-                    @click="closeImportOverwriteConfirm"
+                    @click="chooseFillRemainingImportSlots"
                   >
-                    取消
+                    否
                   </button>
                   <button
                     class="h-11 rounded-xl bg-electric-blue text-white text-[13px] font-bold hover:brightness-110 transition-all active:scale-95 shadow-lg shadow-electric-blue/20"
                     type="button"
                     @click="confirmImportOverwrite"
                   >
-                    确定
+                    是
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div
+            class="fixed inset-0 z-[415] flex items-center justify-center"
+            :class="{ hidden: !importRepeatConfirmVisible }"
+          >
+            <div class="absolute inset-0 bg-black/50"></div>
+            <div
+              class="relative w-full max-w-sm bg-surface-container-highest rounded-2xl p-7 border border-white/10 shadow-2xl modal-pop-in"
+            >
+              <div class="flex flex-col items-center text-center gap-5">
+                <div
+                  class="w-14 h-14 rounded-full bg-electric-blue/10 border border-electric-blue/20 flex items-center justify-center"
+                >
+                  <AppIcon
+                    name="sync_problem"
+                    :size="30"
+                    class="text-electric-blue"
+                  />
+                </div>
+                <div>
+                  <h3 class="text-lg font-black text-white mb-2">
+                    素材数量不足
+                  </h3>
+                  <p class="text-[13px] leading-6 text-on-surface-variant">
+                    当前选择素材数量不够，是否重复填充？
+                  </p>
+                </div>
+                <div class="grid grid-cols-2 gap-3 w-full">
+                  <button
+                    class="h-11 rounded-xl bg-white/5 text-on-surface-variant text-[13px] font-bold hover:bg-white/10 hover:text-white transition-all active:scale-95"
+                    type="button"
+                    @click="resolveRepeatImport(false)"
+                  >
+                    否
+                  </button>
+                  <button
+                    class="h-11 rounded-xl bg-electric-blue text-white text-[13px] font-bold hover:brightness-110 transition-all active:scale-95 shadow-lg shadow-electric-blue/20"
+                    type="button"
+                    @click="resolveRepeatImport(true)"
+                  >
+                    是
                   </button>
                 </div>
               </div>
@@ -5803,10 +6198,11 @@ onBeforeUnmount(() => {
                 <div
                   class="w-16 h-16 bg-electric-blue/10 rounded-full flex items-center justify-center"
                 >
-                  <span
-                    class="material-symbols-outlined text-electric-blue text-3xl"
-                    >downloading</span
-                  >
+                  <AppIcon
+                    name="downloading"
+                    :size="30"
+                    class="text-electric-blue"
+                  />
                 </div>
                 <div
                   class="circular-progress"
@@ -5863,10 +6259,11 @@ onBeforeUnmount(() => {
                 <div
                   class="w-16 h-16 bg-electric-blue/10 rounded-full flex items-center justify-center"
                 >
-                  <span
-                    class="material-symbols-outlined text-electric-blue text-3xl"
-                    >warning</span
-                  >
+                  <AppIcon
+                    name="warning"
+                    :size="30"
+                    class="text-electric-blue"
+                  />
                 </div>
                 <div>
                   <h3 class="text-xl font-black text-white mb-2">确认导出</h3>
@@ -5907,10 +6304,11 @@ onBeforeUnmount(() => {
                 <div
                   class="w-16 h-16 bg-electric-blue/10 rounded-full flex items-center justify-center"
                 >
-                  <span
-                    class="material-symbols-outlined text-electric-blue text-3xl"
-                    >payments</span
-                  >
+                  <AppIcon
+                    name="payments"
+                    :size="30"
+                    class="text-electric-blue"
+                  />
                 </div>
                 <div>
                   <h3 class="text-xl font-black text-white mb-2">
@@ -6028,8 +6426,10 @@ onBeforeUnmount(() => {
             class="flex items-center gap-2 text-on-surface-variant hover:text-electric-blue bg-surface-container-lowest px-3 py-1.5 rounded-lg border border-white/5 transition-all"
             @click="hideDraftLibrary"
           >
-            <span class="material-symbols-outlined text-[20px]">arrow_back</span
-            ><span class="text-[12px] font-bold">返回</span>
+            <AppIcon name="arrow_back" :size="20" /><span
+              class="text-[12px] font-bold"
+              >返回</span
+            >
           </button>
           <h2 class="text-xl font-black text-white flex items-center gap-2">
             工程库
@@ -6049,10 +6449,11 @@ onBeforeUnmount(() => {
               <option value="editing">编辑中</option>
               <option value="exported">已导出</option>
             </select>
-            <span
-              class="material-symbols-outlined pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[18px] text-electric-blue"
-              >expand_more</span
-            >
+            <AppIcon
+              name="expand_more"
+              :size="18"
+              class="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-electric-blue"
+            />
           </div>
           <button
             class="h-9 px-3 rounded-md border border-white/5 bg-surface-container-lowest text-[12px] font-bold text-on-surface-variant hover:border-electric-blue/50 hover:text-electric-blue transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
@@ -6104,19 +6505,19 @@ onBeforeUnmount(() => {
                 :checked="isDraftProjectSelected(project)"
                 @change="toggleDraftProjectSelection(project)"
               />
-              <span
-                class="material-symbols-outlined text-[26px]"
+              <AppIcon
+                :name="
+                  isDraftProjectSelected(project)
+                    ? 'check_box'
+                    : 'check_box_outline_blank'
+                "
+                :size="26"
                 :class="
                   isDraftProjectSelected(project)
                     ? 'text-electric-blue'
                     : 'text-white/50'
                 "
-                >{{
-                  isDraftProjectSelected(project)
-                    ? 'check_box'
-                    : 'check_box_outline_blank'
-                }}</span
-              >
+              />
             </label>
             <img
               v-if="project.image"
@@ -6172,7 +6573,7 @@ onBeforeUnmount(() => {
               title="删除工程"
               @click.stop="requestSingleDraftDelete(project)"
             >
-              <span class="material-symbols-outlined text-[15px]">delete</span>
+              <AppIcon name="delete" :size="15" />
             </button>
           </div>
         </div>
@@ -6225,9 +6626,7 @@ onBeforeUnmount(() => {
               type="button"
               @click="hideFinishedLibrary"
             >
-              <span class="material-symbols-outlined text-[20px]"
-                >arrow_back</span
-              >
+              <AppIcon name="arrow_back" :size="20" />
               <span class="text-[12px] font-bold">返回</span>
             </button>
             <h2 class="text-xl font-black flex items-center gap-2 text-white">
@@ -6301,9 +6700,11 @@ onBeforeUnmount(() => {
           <div
             class="w-16 h-16 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center mb-4"
           >
-            <span class="material-symbols-outlined text-electric-blue text-3xl"
-              >stars</span
-            >
+            <AppIcon
+              name="stars"
+              :size="30"
+              class="text-electric-blue"
+            />
           </div>
           <h3 class="text-lg font-black text-white">暂无收藏模板</h3>
           <p class="text-[13px] text-on-surface-variant mt-2">
@@ -6322,15 +6723,6 @@ onBeforeUnmount(() => {
   overflow: hidden;
   position: relative;
   background: #07122a;
-}
-
-.workspace-page .material-symbols-outlined {
-  font-variation-settings:
-    'FILL' 0,
-    'wght' 400,
-    'GRAD' 0,
-    'opsz' 24;
-  vertical-align: middle;
 }
 
 .templateListWrapper .draft-project-card {
