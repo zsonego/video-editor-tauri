@@ -697,6 +697,7 @@ function appendArea({
   mirror = 'none',
   speed = 1,
   rotate = 0,
+  opacity = 1,
   isMirrorGenerated = false,
   mirrorSourceAreaId = '',
   mirrorDirection = '',
@@ -705,6 +706,10 @@ function appendArea({
   triptychGroupId = '',
   triptychSourceAreaId = '',
   triptychRole = '',
+  isQuadGenerated = false,
+  quadGroupId = '',
+  quadSourceAreaId = '',
+  quadRole = '',
   index = null,
   x = 0,
   y = 0,
@@ -723,6 +728,7 @@ function appendArea({
     mirror,
     speed,
     rotate,
+    opacity: clampNumber(opacity, 0, 1),
     isMirrorGenerated,
     mirrorSourceAreaId,
     mirrorDirection,
@@ -731,6 +737,10 @@ function appendArea({
     triptychGroupId,
     triptychSourceAreaId,
     triptychRole,
+    isQuadGenerated,
+    quadGroupId,
+    quadSourceAreaId,
+    quadRole,
     index:
       index === null || index === undefined
         ? nextLayerIndex
@@ -876,7 +886,7 @@ function openAreaContextMenu(event, areaId) {
   Object.assign(areaContextMenu, {
     open: true,
     x: Math.max(8, Math.min(event.clientX, window.innerWidth - 286)),
-    y: Math.max(8, Math.min(event.clientY, window.innerHeight - 190)),
+    y: Math.max(8, Math.min(event.clientY, window.innerHeight - 220)),
     areaId,
   });
   window.addEventListener('pointerdown', closeAreaContextMenu);
@@ -894,11 +904,23 @@ function areaForContextMenu(areaId = areaContextMenu.areaId) {
 }
 
 function isBoundGeneratedArea(area) {
-  return Boolean(area?.isMirrorGenerated || area?.isTriptychGenerated);
+  return Boolean(
+    area?.isMirrorGenerated ||
+      area?.isTriptychGenerated ||
+      area?.isQuadGenerated,
+  );
 }
 
 function isTriptychSourceArea(area) {
   return Boolean(area?.triptychGroupId && area?.triptychRole === 'center');
+}
+
+function isQuadSourceArea(area) {
+  return Boolean(area?.quadGroupId && area?.quadRole === 'top-left');
+}
+
+function isLayoutSourceArea(area) {
+  return isTriptychSourceArea(area) || isQuadSourceArea(area);
 }
 
 function mirrorAreaGeometry(area, direction) {
@@ -916,7 +938,7 @@ function canMirrorArea(areaId, direction) {
   if (
     !area?.assetId ||
     isBoundGeneratedArea(area) ||
-    isTriptychSourceArea(area) ||
+    isLayoutSourceArea(area) ||
     area.mirroredDirections?.includes(direction)
   ) {
     return false;
@@ -967,6 +989,7 @@ function createMirroredArea(direction) {
     mirror: transform.mirror,
     speed: sourceArea.speed,
     rotate: transform.rotate,
+    opacity: sourceArea.opacity ?? 1,
     isMirrorGenerated: true,
     mirrorSourceAreaId: sourceArea.id,
     mirrorDirection: direction,
@@ -983,7 +1006,7 @@ function canCreateTriptych(areaId = areaContextMenu.areaId) {
   return Boolean(
     area?.assetId &&
       !isBoundGeneratedArea(area) &&
-      !isTriptychSourceArea(area) &&
+      !isLayoutSourceArea(area) &&
       (!area.mirror || area.mirror === 'none') &&
       !(area.mirroredDirections?.length > 0),
   );
@@ -1009,6 +1032,7 @@ function createTriptych(rotation) {
     mirror: 'none',
     speed: sourceArea.speed,
     rotate: rotation,
+    opacity: sourceArea.opacity ?? 1,
     isTriptychGenerated: true,
     triptychGroupId: groupId,
     triptychSourceAreaId: sourceArea.id,
@@ -1023,6 +1047,7 @@ function createTriptych(rotation) {
     mirror: 'none',
     speed: sourceArea.speed,
     rotate: rotation,
+    opacity: sourceArea.opacity ?? 1,
     isTriptychGenerated: true,
     triptychGroupId: groupId,
     triptychSourceAreaId: sourceArea.id,
@@ -1035,6 +1060,66 @@ function createTriptych(rotation) {
   areaDraft.value = sourceArea;
   scrollAreaPaneToBottom();
   showToast('三分屏区域已创建');
+}
+
+function canCreateQuad(areaId = areaContextMenu.areaId) {
+  const area = areaForContextMenu(areaId);
+  return Boolean(
+    area?.assetId &&
+      !isBoundGeneratedArea(area) &&
+      !isLayoutSourceArea(area) &&
+      (!area.mirror || area.mirror === 'none') &&
+      !(area.mirroredDirections?.length > 0),
+  );
+}
+
+function createQuad() {
+  const sourceArea = areaForContextMenu();
+  if (!sourceArea || !canCreateQuad(sourceArea.id)) return;
+
+  const groupId = generateId();
+  const sharedArea = {
+    assetId: sourceArea.assetId,
+    mirror: sourceArea.mirror || 'none',
+    speed: sourceArea.speed,
+    rotate: sourceArea.rotate,
+    opacity: sourceArea.opacity ?? 1,
+    isQuadGenerated: true,
+    quadGroupId: groupId,
+    quadSourceAreaId: sourceArea.id,
+    width: 960,
+    height: 540,
+  };
+  closeAreaContextMenu();
+  Object.assign(sourceArea, {
+    x: 0,
+    y: 0,
+    width: 960,
+    height: 540,
+    quadGroupId: groupId,
+    quadRole: 'top-left',
+  });
+  appendArea({
+    ...sharedArea,
+    quadRole: 'top-right',
+    x: 960,
+    y: 0,
+  });
+  appendArea({
+    ...sharedArea,
+    quadRole: 'bottom-left',
+    x: 0,
+    y: 540,
+  });
+  appendArea({
+    ...sharedArea,
+    quadRole: 'bottom-right',
+    x: 960,
+    y: 540,
+  });
+  areaDraft.value = sourceArea;
+  scrollAreaPaneToBottom();
+  showToast('四分屏区域已创建');
 }
 
 function openAreaManager() {
@@ -1061,13 +1146,20 @@ function removeArea(area) {
         (candidate) => candidate.triptychGroupId === area.triptychGroupId,
       ).length
     : 0;
+  const linkedQuadCount = area.quadGroupId
+    ? (selectedClip.value?.areas ?? []).filter(
+        (candidate) => candidate.quadGroupId === area.quadGroupId,
+      ).length
+    : 0;
   askConfirm({
     title: '删除画面区域？',
-    message: linkedTriptychCount
-      ? '该区域属于三分屏，三个关联区域会一起删除。'
-      : linkedMirrorCount
-        ? `该区域和关联的 ${linkedMirrorCount} 个镜像区域会一起删除。`
-        : '该 Area 的素材和画面参数会被移除。',
+    message: linkedQuadCount
+      ? '该区域属于四分屏，四个关联区域会一起删除。'
+      : linkedTriptychCount
+        ? '该区域属于三分屏，三个关联区域会一起删除。'
+        : linkedMirrorCount
+          ? `该区域和关联的 ${linkedMirrorCount} 个镜像区域会一起删除。`
+          : '该 Area 的素材和画面参数会被移除。',
     action: () => {
       const areas = selectedClip.value?.areas;
       if (!areas) return;
@@ -1091,6 +1183,13 @@ function removeArea(area) {
       if (area.triptychGroupId) {
         areas.forEach((candidate) => {
           if (candidate.triptychGroupId === area.triptychGroupId) {
+            removedIds.add(candidate.id);
+          }
+        });
+      }
+      if (area.quadGroupId) {
+        areas.forEach((candidate) => {
+          if (candidate.quadGroupId === area.quadGroupId) {
             removedIds.add(candidate.id);
           }
         });
@@ -1232,6 +1331,7 @@ function areaImageTransformStyle(area) {
   const scaleX = area.mirror === 'horizontal' ? -1 : 1;
   const scaleY = area.mirror === 'vertical' ? -1 : 1;
   const rotate = Number.isFinite(Number(area.rotate)) ? Number(area.rotate) : 0;
+  const opacity = clampNumber(area.opacity ?? 1, 0, 1);
   const normalizedRotation = ((rotate % 360) + 360) % 360;
   if (normalizedRotation === 90 || normalizedRotation === 270) {
     const width = Math.max(1, Number(area.width) || 1);
@@ -1242,6 +1342,7 @@ function areaImageTransformStyle(area) {
       top: '50%',
       width: `${(height / width) * 100}%`,
       height: `${(width / height) * 100}%`,
+      opacity,
       transform: `translate(-50%, -50%) rotate(${rotate}deg) scale(${scaleX}, ${scaleY})`,
     };
   }
@@ -1249,6 +1350,7 @@ function areaImageTransformStyle(area) {
     objectFit: isTriptychSourceArea(area) || area.triptychGroupId
       ? 'contain'
       : 'cover',
+    opacity,
     transform: `rotate(${rotate}deg) scale(${scaleX}, ${scaleY})`,
   };
 }
@@ -1256,6 +1358,17 @@ function areaImageTransformStyle(area) {
 function areaMirrorBindingBounds(area, width, height) {
   const directions = new Set(area?.mirroredDirections ?? []);
   const triptychSource = isTriptychSourceArea(area);
+  const quadSource = isQuadSourceArea(area);
+  if (quadSource) {
+    return {
+      minX: 0,
+      maxX: AREA_CANVAS_WIDTH - width * 2,
+      minY: 0,
+      maxY: AREA_CANVAS_HEIGHT - height * 2,
+      horizontalSlots: 2,
+      verticalSlots: 2,
+    };
+  }
   const hasLeft = triptychSource || directions.has('left');
   const hasRight = triptychSource || directions.has('right');
   const hasUp = directions.has('up');
@@ -1288,6 +1401,7 @@ function syncMirroredAreasForSource(sourceArea, clip = selectedClip.value) {
       Object.assign(boundArea, {
         assetId: sourceArea.assetId,
         speed: sourceArea.speed,
+        opacity: sourceArea.opacity ?? 1,
         mirror: transform.mirror,
         rotate: transform.rotate,
         ...geometry,
@@ -1302,6 +1416,7 @@ function syncMirroredAreasForSource(sourceArea, clip = selectedClip.value) {
       Object.assign(boundArea, {
         assetId: sourceArea.assetId,
         speed: sourceArea.speed,
+        opacity: sourceArea.opacity ?? 1,
         mirror: sourceArea.mirror || 'none',
         rotate: sourceArea.rotate,
         x:
@@ -1309,6 +1424,26 @@ function syncMirroredAreasForSource(sourceArea, clip = selectedClip.value) {
             ? geometry.x - geometry.width
             : geometry.x + geometry.width,
         y: geometry.y,
+        width: geometry.width,
+        height: geometry.height,
+      });
+      return;
+    }
+    if (
+      boundArea.isQuadGenerated &&
+      boundArea.quadSourceAreaId === sourceArea.id
+    ) {
+      const geometry = normalizedAreaGeometry(sourceArea);
+      const isRight = boundArea.quadRole.endsWith('right');
+      const isBottom = boundArea.quadRole.startsWith('bottom');
+      Object.assign(boundArea, {
+        assetId: sourceArea.assetId,
+        speed: sourceArea.speed,
+        opacity: sourceArea.opacity ?? 1,
+        mirror: sourceArea.mirror || 'none',
+        rotate: sourceArea.rotate,
+        x: geometry.x + (isRight ? geometry.width : 0),
+        y: geometry.y + (isBottom ? geometry.height : 0),
         width: geometry.width,
         height: geometry.height,
       });
@@ -1351,10 +1486,12 @@ function normalizeAreaDraft(sizeSource = 'width') {
       ? Number(areaDraft.value.height) / AREA_ASPECT_HEIGHT
       : Number(areaDraft.value.width) / AREA_ASPECT_WIDTH;
   const directions = new Set(areaDraft.value.mirroredDirections ?? []);
-  const horizontalSlots =
-    1 + Number(directions.has('left')) + Number(directions.has('right'));
-  const verticalSlots =
-    1 + Number(directions.has('up')) + Number(directions.has('down'));
+  const horizontalSlots = isQuadSourceArea(areaDraft.value)
+    ? 2
+    : 1 + Number(directions.has('left')) + Number(directions.has('right'));
+  const verticalSlots = isQuadSourceArea(areaDraft.value)
+    ? 2
+    : 1 + Number(directions.has('up')) + Number(directions.has('down'));
   const bindingMaxScale = Math.floor(
     Math.min(
       AREA_CANVAS_WIDTH / horizontalSlots / AREA_ASPECT_WIDTH,
@@ -1378,6 +1515,11 @@ function normalizeAreaDraft(sizeSource = 'width') {
 function normalizeAreaIndex(area = areaDraft.value) {
   if (!area) return;
   area.index = Math.max(0, Math.round(Number(area.index) || 0));
+}
+
+function normalizeAreaOpacity(area = areaDraft.value) {
+  if (!area) return;
+  area.opacity = clampNumber(area.opacity ?? 1, 0, 1);
 }
 
 function stopAreaInteraction(event) {
@@ -1622,6 +1764,9 @@ function validateModel() {
       if (Number(area.rotate) < -360 || Number(area.rotate) > 360) {
         return `片段“${clip.name}”的旋转角度需在 -360–360 之间。`;
       }
+      if (Number(area.opacity) < 0 || Number(area.opacity) > 1) {
+        return `片段“${clip.name}”的透明度需在 0–1 之间。`;
+      }
       if (Number(area.width) <= 0 || Number(area.height) <= 0) {
         return `片段“${clip.name}”的 Area 宽高必须大于 0。`;
       }
@@ -1718,6 +1863,7 @@ watch(
           area.mirror,
           area.speed,
           area.rotate,
+          area.opacity,
           area.x,
           area.y,
           area.width,
@@ -1864,36 +2010,6 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="track-list">
-          <div class="track-item">
-            <span class="track-index">02</span>
-            <div>
-              <strong>顶层视频 <em>必需</em></strong>
-              <small>{{
-                model.tracks.overlay
-                  ? fileName(model.tracks.overlay)
-                  : '请上传透明前景视频'
-              }}</small>
-            </div>
-            <div class="track-actions">
-              <button
-                v-if="model.tracks.overlay"
-                class="plain-icon danger-hover"
-                type="button"
-                title="移除顶层视频"
-                @click="clearTrackFile('overlay')"
-              >
-                <X :size="13" />
-              </button>
-              <button
-                class="icon-button"
-                type="button"
-                title="上传顶层视频"
-                @click="updateTrackFile('overlay')"
-              >
-                <Upload :size="14" />
-              </button>
-            </div>
-          </div>
           <div class="track-item locked">
             <span class="track-index">01</span>
             <div>
@@ -1901,36 +2017,6 @@ onBeforeUnmount(() => {
               <small>固定生成 · 无需上传</small>
             </div>
             <Check :size="15" />
-          </div>
-          <div class="track-item">
-            <span class="track-index">00</span>
-            <div>
-              <strong>背景底层 <em class="optional">可选</em></strong>
-              <small>{{
-                model.tracks.background
-                  ? fileName(model.tracks.background)
-                  : '未配置时不生成'
-              }}</small>
-            </div>
-            <div class="track-actions">
-              <button
-                v-if="model.tracks.background"
-                class="plain-icon danger-hover"
-                type="button"
-                title="移除背景视频"
-                @click="clearTrackFile('background')"
-              >
-                <X :size="13" />
-              </button>
-              <button
-                class="icon-button"
-                type="button"
-                title="上传背景视频"
-                @click="updateTrackFile('background')"
-              >
-                <Upload :size="14" />
-              </button>
-            </div>
           </div>
           <div class="track-item">
             <span class="track-index">AU</span>
@@ -2543,6 +2629,39 @@ onBeforeUnmount(() => {
             </button>
           </div>
 
+          <div class="area-track-upload area-track-upload-required">
+            <div class="area-track-upload-copy">
+              <span class="area-track-upload-icon"><Video :size="17" /></span>
+              <div>
+                <strong>顶层视频 <em>必需</em></strong>
+                <span :title="model.tracks.overlay || ''">{{
+                  model.tracks.overlay
+                    ? fileName(model.tracks.overlay)
+                    : '请上传一个透明前景视频'
+                }}</span>
+              </div>
+            </div>
+            <div class="upload-actions">
+              <button
+                v-if="model.tracks.overlay"
+                class="plain-icon danger-hover"
+                type="button"
+                title="移除顶层视频"
+                @click="clearTrackFile('overlay')"
+              >
+                <X :size="14" />
+              </button>
+              <button
+                class="button button-secondary area-track-upload-button"
+                type="button"
+                @click="updateTrackFile('overlay')"
+              >
+                <Upload :size="14" />
+                {{ model.tracks.overlay ? '重新上传' : '上传视频' }}
+              </button>
+            </div>
+          </div>
+
           <div class="modal-body area-modal-body">
             <div class="area-editor-layout">
               <aside class="area-asset-pane">
@@ -2711,7 +2830,7 @@ onBeforeUnmount(() => {
                           type="button"
                           :disabled="
                             isBoundGeneratedArea(areaDraft) ||
-                            isTriptychSourceArea(areaDraft)
+                            isLayoutSourceArea(areaDraft)
                           "
                           @click="areaDraft.mirror = 'none'"
                         >
@@ -2722,7 +2841,7 @@ onBeforeUnmount(() => {
                           type="button"
                           :disabled="
                             isBoundGeneratedArea(areaDraft) ||
-                            isTriptychSourceArea(areaDraft)
+                            isLayoutSourceArea(areaDraft)
                           "
                           @click="areaDraft.mirror = 'horizontal'"
                         >
@@ -2733,7 +2852,7 @@ onBeforeUnmount(() => {
                           type="button"
                           :disabled="
                             isBoundGeneratedArea(areaDraft) ||
-                            isTriptychSourceArea(areaDraft)
+                            isLayoutSourceArea(areaDraft)
                           "
                           @click="areaDraft.mirror = 'vertical'"
                         >
@@ -2764,6 +2883,26 @@ onBeforeUnmount(() => {
                         />
                       </div>
                     </div>
+                    <div class="range-field area-opacity-field">
+                      <div>
+                        <label>透明度</label>
+                        <strong>{{
+                          clampNumber(areaDraft.opacity ?? 1, 0, 1).toFixed(2)
+                        }}</strong>
+                      </div>
+                      <input
+                        v-model.number="areaDraft.opacity"
+                        type="range"
+                        :disabled="isBoundGeneratedArea(areaDraft)"
+                        min="0"
+                        max="1"
+                        step="0.01"
+                        @change="normalizeAreaOpacity()"
+                      />
+                      <div class="range-labels">
+                        <span>0</span><span>1</span>
+                      </div>
+                    </div>
                   </section>
 
                   <section
@@ -2778,6 +2917,8 @@ onBeforeUnmount(() => {
                       <small>{{
                         isBoundGeneratedArea(areaDraft)
                           ? '跟随原区域'
+                          : isQuadSourceArea(areaDraft)
+                            ? '四分屏联动'
                           : isTriptychSourceArea(areaDraft)
                             ? '三分屏联动'
                             : '固定 16:9'
@@ -2950,6 +3091,39 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
+          <div class="area-track-upload area-track-upload-optional">
+            <div class="area-track-upload-copy">
+              <span class="area-track-upload-icon"><Film :size="17" /></span>
+              <div>
+                <strong>背景底层 <em class="optional">可选</em></strong>
+                <span :title="model.tracks.background || ''">{{
+                  model.tracks.background
+                    ? fileName(model.tracks.background)
+                    : '未上传时不生成底层背景'
+                }}</span>
+              </div>
+            </div>
+            <div class="upload-actions">
+              <button
+                v-if="model.tracks.background"
+                class="plain-icon danger-hover"
+                type="button"
+                title="移除背景视频"
+                @click="clearTrackFile('background')"
+              >
+                <X :size="14" />
+              </button>
+              <button
+                class="button button-secondary area-track-upload-button"
+                type="button"
+                @click="updateTrackFile('background')"
+              >
+                <Upload :size="14" />
+                {{ model.tracks.background ? '重新上传' : '上传视频' }}
+              </button>
+            </div>
+          </div>
+
           <div class="modal-footer">
             <span class="auto-save-note">{{
               areaDraft ? '修改内容已自动保存' : '请先添加画面区域'
@@ -3014,6 +3188,14 @@ onBeforeUnmount(() => {
                 </button>
               </div>
             </div>
+            <button
+              class="area-context-item area-context-action"
+              type="button"
+              :disabled="!canCreateQuad(areaContextMenu.areaId)"
+              @click.stop="createQuad"
+            >
+              <span>四分屏</span>
+            </button>
           </div>
         </div>
       </div>
@@ -5155,7 +5337,7 @@ label:focus-within {
   width: min(1040px, 100%);
   max-height: min(820px, calc(100vh - 56px));
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.8);
   border-radius: 17px;
@@ -5181,6 +5363,84 @@ label:focus-within {
   margin: 5px 0 0;
   color: var(--muted);
   font-size: 10px;
+}
+
+.area-track-upload {
+  min-width: 0;
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 9px 22px;
+  background: #fbfbf9;
+}
+
+.area-track-upload-required {
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(90deg, var(--accent-soft), #fbfbf9 48%);
+}
+
+.area-track-upload-optional {
+  border-top: 1px solid var(--line);
+}
+
+.area-track-upload-copy {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.area-track-upload-copy > div {
+  min-width: 0;
+}
+
+.area-track-upload-icon {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  color: var(--accent-dark);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+}
+
+.area-track-upload-copy strong {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+}
+
+.area-track-upload-copy strong em {
+  color: var(--accent-dark);
+  font-size: 8px;
+  font-style: normal;
+}
+
+.area-track-upload-copy strong em.optional {
+  color: var(--muted);
+}
+
+.area-track-upload-copy div > span {
+  display: block;
+  overflow: hidden;
+  max-width: 520px;
+  margin-top: 2px;
+  color: var(--subtle);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.area-track-upload-button {
+  min-height: 31px;
+  padding: 6px 10px;
+  font-size: 10px;
+  white-space: nowrap;
 }
 
 .modal-body {
@@ -5566,6 +5826,10 @@ label:focus-within {
   gap: 7px;
 }
 
+.area-main-pane .area-opacity-field {
+  margin-top: 2px;
+}
+
 .area-editor-empty {
   min-height: 280px;
   display: flex;
@@ -5801,6 +6065,22 @@ label:focus-within {
 .area-context-item:hover {
   color: var(--accent-dark);
   background: var(--accent-soft);
+}
+
+.area-context-action {
+  width: 100%;
+  color: inherit;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+.area-context-action:disabled {
+  color: #b9bab5;
+  cursor: not-allowed;
+  background: transparent;
 }
 
 .area-context-submenu {

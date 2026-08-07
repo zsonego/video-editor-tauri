@@ -27,6 +27,8 @@ const n = (value, fallback = 0) => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
+const opacity = (value) => Math.min(1, Math.max(0, n(value, 1)));
+
 const directChild = (node, tag) =>
   Array.from(node?.children ?? []).find((child) => child.tagName === tag) ??
   null;
@@ -114,7 +116,7 @@ export function buildXml(model) {
 
     clip.areas.forEach((area) => {
       lines.push(
-        `                <area id="${attr(area.id)}" asset-id="${attr(area.assetId)}" index="${attr(Math.max(0, Math.round(n(area.index, 1))))}">`,
+        `                <area id="${attr(area.id)}" asset-id="${attr(area.assetId)}" index="${attr(Math.max(0, Math.round(n(area.index, 1))))}" opacity="${attr(opacity(area.opacity))}">`,
         '                    <source>',
         `                        <duration>${n(clip.duration)}</duration>`,
         '                    </source>',
@@ -232,6 +234,7 @@ export function parseXml(xmlText) {
             0,
             Math.round(n(areaNode.getAttribute('index'), areaIndex + 1)),
           ),
+          opacity: opacity(areaNode.getAttribute('opacity')),
           mirror: childText(transform, 'mirror', 'none') || 'none',
           speed: n(childText(transform, 'speed'), 1),
           rotate: n(childText(transform, 'rotate'), 0),

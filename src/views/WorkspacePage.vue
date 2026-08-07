@@ -689,8 +689,7 @@ async function prepareTemplateAssetsWithBosUrls({
       attempt === 0
         ? '正在获取模板下载地址...'
         : '下载地址已失效，正在刷新后续传...';
-    const { xmlUrl, assetsUrl } =
-      await getBosTemplateDownloadUrls(templateId);
+    const { xmlUrl, assetsUrl } = await getBosTemplateDownloadUrls(templateId);
     if (
       templateDownloadCancelRequested.value ||
       canceledTemplateDownloadIds.has(downloadId)
@@ -1896,8 +1895,7 @@ function buildFilledImportPaths(filePaths, count) {
 
 function isSegmentGroupFullyImported(group) {
   return (
-    group?.segments?.length > 0 &&
-    group.segments.every(isSegmentFullyImported)
+    group?.segments?.length > 0 && group.segments.every(isSegmentFullyImported)
   );
 }
 
@@ -4008,7 +4006,9 @@ function parseMediaAssetElement(mediaAsset, index, parentGroup = null) {
   const constraints = directChildren.find(
     (child) => child.tagName.toLowerCase() === 'constraints',
   );
-  const constraintChildren = constraints ? Array.from(constraints.children) : [];
+  const constraintChildren = constraints
+    ? Array.from(constraints.children)
+    : [];
   const minDuration =
     constraintChildren
       .find((child) => child.tagName.toLowerCase() === 'minduration')
@@ -4848,7 +4848,7 @@ onBeforeUnmount(() => {
             </button>
             <div class="mx-2 my-1 border-t border-outline-variant/30"></div>
             <button
-              class="w-full flex items-center gap-3 px-4 py-2.5 text-[13px] text-on-surface-variant hover:bg-electric-blue/10 hover:text-white transition-colors text-left"
+              class="!hidden w-full flex items-center gap-3 px-4 py-2.5 text-[13px] text-on-surface-variant hover:bg-electric-blue/10 hover:text-white transition-colors text-left"
               type="button"
               @click="showCreateTemplate"
             >
@@ -5094,30 +5094,30 @@ onBeforeUnmount(() => {
                     v-show="isSegmentCollectionExpanded(collection)"
                     :class="collection.isGroup ? 'space-y-2' : ''"
                   >
-                  <div
-                    v-for="segment in collection.segments"
-                    :key="segment.id"
-                    class="segment-card p-3 rounded bg-surface-container-high/50 border border-white/5 hover:border-electric-blue/40 transition-all transform hover:-translate-y-0.5 cursor-pointer shadow-sm"
-                  >
-                  <div class="text-[12px] font-bold text-on-surface">
-                    {{ segment.name }}
-                  </div>
-                  <div class="flex flex-col gap-1 mt-1.5">
-                    <div class="flex justify-between text-[10px]">
-                      <span class="text-on-surface-variant">所需素材:</span>
-                      <span class="text-electric-blue font-bold"
-                        >{{ segment.count }} 个视频</span
-                      >
+                    <div
+                      v-for="segment in collection.segments"
+                      :key="segment.id"
+                      class="segment-card p-3 rounded bg-surface-container-high/50 border border-white/5 hover:border-electric-blue/40 transition-all transform hover:-translate-y-0.5 cursor-pointer shadow-sm"
+                    >
+                      <div class="text-[12px] font-bold text-on-surface">
+                        {{ segment.name }}
+                      </div>
+                      <div class="flex flex-col gap-1 mt-1.5">
+                        <div class="flex justify-between text-[10px]">
+                          <span class="text-on-surface-variant">所需素材:</span>
+                          <span class="text-electric-blue font-bold"
+                            >{{ segment.count }} 个视频</span
+                          >
+                        </div>
+                        <div class="flex justify-between text-[10px]">
+                          <span class="text-on-surface-variant">素材时长:</span>
+                          <span class="text-electric-blue font-bold">{{
+                            segment.durationRange || '--'
+                          }}</span>
+                        </div>
+                      </div>
                     </div>
-                    <div class="flex justify-between text-[10px]">
-                      <span class="text-on-surface-variant">素材时长:</span>
-                      <span class="text-electric-blue font-bold">{{
-                        segment.durationRange || '--'
-                      }}</span>
-                    </div>
                   </div>
-                  </div>
-                </div>
                 </div>
               </div>
             </div>
@@ -5201,106 +5201,110 @@ onBeforeUnmount(() => {
                       v-show="isSegmentCollectionExpanded(collection)"
                       :class="collection.isGroup ? 'p-2 space-y-2' : ''"
                     >
-                    <div
-                      v-for="style in collection.segments"
-                      :key="style.id"
-                      class="videoList rounded-lg bg-surface-container-low border border-white/5 overflow-hidden shadow-sm"
-                      :class="{ 'mb-3': !collection.isGroup }"
-                    >
-                    <div
-                      class="flex items-center justify-between gap-3 p-3 bg-white/5"
-                    >
-                      <div class="min-w-0 flex-1">
-                        <div
-                          class="text-[13px] font-bold text-white truncate"
-                          :title="style.name"
-                        >
-                          {{ style.name }}
-                        </div>
-                      </div>
-                      <button
-                        class="px-3 py-1.5 text-[11px] font-bold rounded-md flex items-center gap-1 shrink-0 transition-colors"
-                        :class="
-                          isSegmentFullyImported(style)
-                            ? 'bg-white/5 text-on-surface-variant/60 border border-white/10 hover:bg-white/10'
-                            : 'bg-electric-blue text-white shadow-lg shadow-electric-blue/10 hover:brightness-110'
-                        "
-                        type="button"
-                        @click="requestOneClickImport(style)"
-                      >
-                        {{ collection.isGroup ? '导入' : '一键导入' }}
-                      </button>
-                    </div>
-                    <div
-                      v-if="style.videos.length"
-                      class="p-3 space-y-2 border-t border-outline-variant videoContent"
-                    >
                       <div
-                        v-for="(video, videoIndex) in style.videos"
-                        :key="getVideoItemKey(style, video, videoIndex)"
-                        :ref="
-                          (element) =>
-                            setImportVideoItemRef(
-                              getVideoItemKey(style, video, videoIndex),
-                              element,
-                            )
-                        "
-                        class="flex items-center justify-between p-2 rounded bg-surface-container-lowest/50 border border-white/5 hover:border-electric-blue/40 transition-all cursor-pointer group"
-                        :class="{
-                          'is-selected':
-                            selectedVideoKey ===
-                            getVideoItemKey(style, video, videoIndex),
-                          'is-duration-invalid': isVideoDurationInvalid(
-                            style,
-                            video,
-                            videoIndex,
-                          ),
-                        }"
-                        @click="selectVideoForTimeline(video, style.name)"
+                        v-for="style in collection.segments"
+                        :key="style.id"
+                        class="videoList rounded-lg bg-surface-container-low border border-white/5 overflow-hidden shadow-sm"
+                        :class="{ 'mb-3': !collection.isGroup }"
                       >
-                        <div class="flex items-center gap-2 min-w-0">
-                          <span
-                            v-if="style.videos.length >= 2"
-                            class="w-5 shrink-0 text-center text-[11px] font-bold text-on-surface-variant"
-                          >
-                            {{ videoIndex + 1 }}
-                          </span>
-                          <AppIcon
-                            name="smart_display"
-                            :size="18"
-                            class="text-primary shrink-0"
-                          />
-                          <div class="min-w-0">
+                        <div
+                          class="flex items-center justify-between gap-3 p-3 bg-white/5"
+                        >
+                          <div class="min-w-0 flex-1">
                             <div
-                              class="text-[12px] truncate"
-                              :class="
-                                isProjectImportedVideo(video)
-                                  ? 'text-electric-blue'
-                                  : 'text-white'
-                              "
+                              class="text-[13px] font-bold text-white truncate"
+                              :title="style.name"
                             >
-                              {{ video.name }}
-                            </div>
-                            <div class="text-[10px] text-on-surface-variant">
-                              时长：{{ video.duration }}
+                              {{ style.name }}
                             </div>
                           </div>
+                          <button
+                            class="px-3 py-1.5 text-[11px] font-bold rounded-md flex items-center gap-1 shrink-0 transition-colors"
+                            :class="
+                              isSegmentFullyImported(style)
+                                ? 'bg-white/5 text-on-surface-variant/60 border border-white/10 hover:bg-white/10'
+                                : 'bg-electric-blue text-white shadow-lg shadow-electric-blue/10 hover:brightness-110'
+                            "
+                            type="button"
+                            @click="requestOneClickImport(style)"
+                          >
+                            {{ collection.isGroup ? '导入' : '一键导入' }}
+                          </button>
                         </div>
-                        <button
-                          type="button"
-                          class="px-2 py-1 rounded text-[10px] font-bold shrink-0 transition-colors"
-                          :class="
-                            isProjectImportedVideo(video)
-                              ? 'bg-white/5 text-on-surface-variant/60 border border-white/10 hover:bg-white/10'
-                              : 'bg-electric-blue/10 text-electric-blue hover:bg-electric-blue/20'
-                          "
-                          @click.stop="openReplaceFilePicker(style, videoIndex)"
+                        <div
+                          v-if="style.videos.length"
+                          class="p-3 space-y-2 border-t border-outline-variant videoContent"
                         >
-                          替换
-                        </button>
+                          <div
+                            v-for="(video, videoIndex) in style.videos"
+                            :key="getVideoItemKey(style, video, videoIndex)"
+                            :ref="
+                              (element) =>
+                                setImportVideoItemRef(
+                                  getVideoItemKey(style, video, videoIndex),
+                                  element,
+                                )
+                            "
+                            class="flex items-center justify-between p-2 rounded bg-surface-container-lowest/50 border border-white/5 hover:border-electric-blue/40 transition-all cursor-pointer group"
+                            :class="{
+                              'is-selected':
+                                selectedVideoKey ===
+                                getVideoItemKey(style, video, videoIndex),
+                              'is-duration-invalid': isVideoDurationInvalid(
+                                style,
+                                video,
+                                videoIndex,
+                              ),
+                            }"
+                            @click="selectVideoForTimeline(video, style.name)"
+                          >
+                            <div class="flex items-center gap-2 min-w-0">
+                              <span
+                                v-if="style.videos.length >= 2"
+                                class="w-5 shrink-0 text-center text-[11px] font-bold text-on-surface-variant"
+                              >
+                                {{ videoIndex + 1 }}
+                              </span>
+                              <AppIcon
+                                name="smart_display"
+                                :size="18"
+                                class="text-primary shrink-0"
+                              />
+                              <div class="min-w-0">
+                                <div
+                                  class="text-[12px] truncate"
+                                  :class="
+                                    isProjectImportedVideo(video)
+                                      ? 'text-electric-blue'
+                                      : 'text-white'
+                                  "
+                                >
+                                  {{ video.name }}
+                                </div>
+                                <div
+                                  class="text-[10px] text-on-surface-variant"
+                                >
+                                  时长：{{ video.duration }}
+                                </div>
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              class="px-2 py-1 rounded text-[10px] font-bold shrink-0 transition-colors"
+                              :class="
+                                isProjectImportedVideo(video)
+                                  ? 'bg-white/5 text-on-surface-variant/60 border border-white/10 hover:bg-white/10'
+                                  : 'bg-electric-blue/10 text-electric-blue hover:bg-electric-blue/20'
+                              "
+                              @click.stop="
+                                openReplaceFilePicker(style, videoIndex)
+                              "
+                            >
+                              替换
+                            </button>
+                          </div>
+                        </div>
                       </div>
-                    </div>
-                  </div>
                     </div>
                   </div>
                 </template>
@@ -5866,11 +5870,7 @@ onBeforeUnmount(() => {
                   <div
                     class="w-8 h-8 bg-electric-blue rounded-lg flex items-center justify-center"
                   >
-                    <AppIcon
-                      name="menu_book"
-                      :size="20"
-                      class="text-white"
-                    />
+                    <AppIcon name="menu_book" :size="20" class="text-white" />
                   </div>
                   <h3 class="text-lg font-black text-white">产品帮助中心</h3>
                 </div>
@@ -6059,11 +6059,7 @@ onBeforeUnmount(() => {
               <div
                 class="w-16 h-16 bg-electric-blue/10 rounded-full flex items-center justify-center mx-auto mb-4"
               >
-                <AppIcon
-                  name="person"
-                  :size="30"
-                  class="text-electric-blue"
-                />
+                <AppIcon name="person" :size="30" class="text-electric-blue" />
               </div>
               <h3 class="text-xl font-black text-white mb-6">个人信息</h3>
               <div
@@ -6187,11 +6183,7 @@ onBeforeUnmount(() => {
               <div
                 class="w-16 h-16 bg-white/5 rounded-full flex items-center justify-center mx-auto mb-4 border border-white/10"
               >
-                <AppIcon
-                  name="logout"
-                  :size="30"
-                  class="text-[#ec4034]"
-                />
+                <AppIcon name="logout" :size="30" class="text-[#ec4034]" />
               </div>
               <h3 class="text-xl font-black text-white mb-2">退出登录</h3>
               <p class="text-on-surface-variant text-sm mb-6">
@@ -6273,7 +6265,9 @@ onBeforeUnmount(() => {
                     class="text-[12px] leading-5 text-on-surface-variant space-y-1"
                   >
                     <p>
-                      您只选了 {{ repeatImportPromptInfo.selectedCount }} 个视频，但该素材集需要
+                      您只选了
+                      {{ repeatImportPromptInfo.selectedCount }}
+                      个视频，但该素材集需要
                       {{ repeatImportPromptInfo.requiredCount }} 个。
                     </p>
                     <p>
@@ -6817,11 +6811,7 @@ onBeforeUnmount(() => {
           <div
             class="w-16 h-16 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center mb-4"
           >
-            <AppIcon
-              name="stars"
-              :size="30"
-              class="text-electric-blue"
-            />
+            <AppIcon name="stars" :size="30" class="text-electric-blue" />
           </div>
           <h3 class="text-lg font-black text-white">暂无收藏模板</h3>
           <p class="text-[13px] text-on-surface-variant mt-2">
