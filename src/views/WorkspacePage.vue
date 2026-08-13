@@ -4848,7 +4848,7 @@ onBeforeUnmount(() => {
             </button>
             <div class="mx-2 my-1 border-t border-outline-variant/30"></div>
             <button
-              class="!hidden w-full flex items-center gap-3 px-4 py-2.5 text-[13px] text-on-surface-variant hover:bg-electric-blue/10 hover:text-white transition-colors text-left"
+              class="w-full flex items-center gap-3 px-4 py-2.5 text-[13px] text-on-surface-variant hover:bg-electric-blue/10 hover:text-white transition-colors text-left"
               type="button"
               @click="showCreateTemplate"
             >
