@@ -1,0 +1,8 @@
+{
+  "productName": "aicut",
+  "bundle": {
+    "resources": {
+      "libs/windows/libcomposer.dll": "libcomposer.dll"
+    }
+  }
+}

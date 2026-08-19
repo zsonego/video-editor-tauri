@@ -18,13 +18,13 @@ use std::{
 };
 use tauri::{utils::config::Color, AppHandle, Emitter, Manager, WindowEvent};
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::{
     ffi::{CStr, CString},
     os::raw::{c_char, c_int, c_void},
 };
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use libloading::Library;
 
 #[cfg(target_os = "windows")]
@@ -297,27 +297,27 @@ type ComposerState = Arc<Mutex<ComposerRuntime>>;
 
 struct ComposerRuntime {
     init_error: Option<String>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     _library: Option<Library>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     compose: Option<ComposerComposeFn>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     cleanup: Option<ComposerCleanupFn>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     get_last_error: Option<ComposerGetLastErrorFn>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     get_last_cmd: Option<ComposerGetLastCmdFn>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     initialized: bool,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 type ComposerInitFn = unsafe extern "C" fn() -> c_int;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 type ComposerCleanupFn = unsafe extern "C" fn();
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 type ComposerProgressCallback = extern "C" fn(c_int, c_int, *const c_char, *mut c_void);
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 type ComposerComposeFn = unsafe extern "C" fn(
     *const c_char,
     *const c_char,
@@ -325,12 +325,12 @@ type ComposerComposeFn = unsafe extern "C" fn(
     Option<ComposerProgressCallback>,
     *mut c_void,
 ) -> c_int;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 type ComposerGetLastErrorFn = unsafe extern "C" fn(*mut c_void) -> *const c_char;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 type ComposerGetLastCmdFn = unsafe extern "C" fn() -> *const c_char;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 struct ComposerCallbackContext {
     app: AppHandle,
     export_id: String,
@@ -400,7 +400,7 @@ fn emit_composer_progress(app: &AppHandle, export_id: &str, progress: u8, status
     let _ = app.emit("composer-export-progress", payload);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn composer_error_message(code: i32) -> String {
     match code {
         0 => "合成成功".to_string(),
@@ -429,28 +429,28 @@ impl ComposerRuntime {
     fn disabled(error: String) -> Self {
         Self {
             init_error: Some(error),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             _library: None,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             compose: None,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             cleanup: None,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             get_last_error: None,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             get_last_cmd: None,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             initialized: false,
         }
     }
 
     fn try_initialize() -> Result<Self, String> {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             app_log_info("[composer] initializing runtime");
             let library_path = composer_library_path()?;
             app_log_info(format!(
-                "[composer] loading dylib: {}",
+                "[composer] loading dynamic library: {}",
                 library_path.display()
             ));
             let library = unsafe { Library::new(&library_path) }
@@ -526,11 +526,11 @@ impl ComposerRuntime {
             })
         }
 
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
-            app_log_info("[composer] macOS composer runtime is disabled on this platform");
+            app_log_info("[composer] runtime is disabled on this platform");
             Ok(Self {
-                init_error: Some("Composer 动态库当前只支持 macOS".to_string()),
+                init_error: Some("Composer 动态库当前只支持 macOS 和 Windows".to_string()),
             })
         }
     }
@@ -550,7 +550,7 @@ impl ComposerRuntime {
             return Err(error.clone());
         }
 
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             app_log_info(format!("[composer] compose start export_id={export_id}"));
             app_log_info(format!("[composer] template_path={template_path}"));
@@ -618,15 +618,15 @@ impl ComposerRuntime {
             }
         }
 
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             let _ = (template_path, project_path, output_path, app, export_id);
             app_log_error("[composer] compose requested on unsupported platform");
-            Err("Composer 动态库当前只支持 macOS".to_string())
+            Err("Composer 动态库当前只支持 macOS 和 Windows".to_string())
         }
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn composer_last_error_text(&self) -> String {
         let Some(get_last_error) = self.get_last_error else {
             return "composer_get_last_error 函数未加载".to_string();
@@ -643,7 +643,7 @@ impl ComposerRuntime {
             .to_string()
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn composer_last_cmd_text(&self) -> String {
         let Some(get_last_cmd) = self.get_last_cmd else {
             return "composer_get_last_cmd function is not loaded".to_string();
@@ -661,7 +661,7 @@ impl ComposerRuntime {
     }
 
     fn cleanup(&mut self) {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             if self.initialized {
                 let Some(cleanup) = self.cleanup else {
@@ -690,7 +690,7 @@ impl Drop for ComposerRuntime {
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn composer_step_status(step: i32) -> &'static str {
     match step {
         0 => "初始化",
@@ -705,7 +705,7 @@ fn composer_step_status(step: i32) -> &'static str {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 extern "C" fn composer_progress_callback(
     percent: c_int,
     step: c_int,
@@ -724,18 +724,29 @@ extern "C" fn composer_progress_callback(
     emit_composer_progress(&context.app, &context.export_id, progress, status);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn composer_library_path() -> Result<PathBuf, String> {
-    app_log_info("[composer] resolving libcomposer.dylib path");
+    #[cfg(target_os = "macos")]
+    let library_name = "libcomposer.dylib";
+    #[cfg(target_os = "windows")]
+    let library_name = "libcomposer.dll";
+
+    app_log_info(format!("[composer] resolving {library_name} path"));
+
+    #[cfg(target_os = "macos")]
     let bundled_path = std::env::current_exe().ok().and_then(|exe| {
         exe.parent()
             .and_then(|macos_dir| macos_dir.parent())
-            .map(|contents_dir| contents_dir.join("Frameworks").join("libcomposer.dylib"))
+            .map(|contents_dir| contents_dir.join("Frameworks").join(library_name))
     });
+    #[cfg(target_os = "windows")]
+    let bundled_path = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|app_dir| app_dir.join(library_name)));
 
     if let Some(path) = bundled_path {
         app_log_info(format!(
-            "[composer] checking bundled dylib: {}",
+            "[composer] checking bundled dynamic library: {}",
             path.display()
         ));
         if path.is_file() {
@@ -745,18 +756,18 @@ fn composer_library_path() -> Result<PathBuf, String> {
 
     let dev_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("libs")
-        .join("macos")
-        .join("libcomposer.dylib");
+        .join(std::env::consts::OS)
+        .join(library_name);
     app_log_info(format!(
-        "[composer] checking dev dylib: {}",
+        "[composer] checking dev dynamic library: {}",
         dev_path.display()
     ));
     if dev_path.is_file() {
         return Ok(dev_path);
     }
 
-    app_log_error("[composer] libcomposer.dylib not found");
-    Err("未找到 libcomposer.dylib".to_string())
+    app_log_error(format!("[composer] {library_name} not found"));
+    Err(format!("未找到 {library_name}"))
 }
 
 fn aicut_root_dir() -> Result<PathBuf, String> {
@@ -797,7 +808,7 @@ fn aicut_log_file_path() -> Result<PathBuf, String> {
     Ok(ensure_aicut_logs_dir()?.join("app.log"))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn aicut_composer_error_log_file_path() -> Result<PathBuf, String> {
     Ok(ensure_aicut_logs_dir()?.join("composer-error.log"))
 }
@@ -834,7 +845,7 @@ fn append_app_log(level: &str, message: &str) {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn append_composer_error_log(message: &str) {
     let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
     let line = format!("{timestamp} [COMPOSER_ERROR]\n{message}\n\n");
