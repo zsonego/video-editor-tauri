@@ -1,6 +1,7 @@
 <script setup>
 import {
   computed,
+  defineAsyncComponent,
   nextTick,
   onBeforeUnmount,
   onMounted,
@@ -38,6 +39,10 @@ import dingAudio from '../assets/ding.mp3';
 import hotImage from '../assets/hot.png';
 import logoImage from '../assets/logo.png';
 import AppIcon from '../components/AppIcon.vue';
+
+const VideoTransformer = defineAsyncComponent(
+  () => import('../components/VideoTransformer.vue'),
+);
 
 // 页面对外事件与远程/本地资源配置。
 const emit = defineEmits(['logout']);
@@ -184,6 +189,7 @@ const VIDEO_SOURCE_TYPES = {
 // 播放器 DOM 引用、播放状态和拖动状态。
 const mainVideoRef = ref(null);
 const modalVideoRef = ref(null);
+const videoTransformerRef = ref(null);
 const playerStageRef = ref(null);
 const playerWrapperRef = ref(null);
 const importVideoListScrollRef = ref(null);
@@ -219,6 +225,7 @@ const timeline = reactive({
 const draftProjects = ref([]);
 const segmentImportState = reactive({});
 const videoTimelineStateCache = reactive({});
+const videoTransformStateCache = reactive({});
 const invalidDurationVideoKeys = ref(new Set());
 const importVideoItemRefs = new Map();
 
@@ -516,6 +523,9 @@ const timelineRulerMinorTicks = computed(() => {
   return buildTimelineTicks(totalDuration, minorStep, majorStep, false);
 });
 const selectedClipTitle = computed(() => `${selectedVideoName.value}`);
+const selectedVideoTransform = computed(
+  () => videoTransformStateCache[selectedVideoKey.value] || null,
+);
 
 // 页面级导航和主视图切换。
 function statusMeta(status) {
@@ -1730,6 +1740,7 @@ async function initializeDefaultTemplateAssets() {
 }
 
 function clearProjectEditingState() {
+  videoTransformerRef.value?.pause?.();
   if (offsetPersistTimer) {
     window.clearTimeout(offsetPersistTimer);
     offsetPersistTimer = null;
@@ -1739,6 +1750,9 @@ function clearProjectEditingState() {
   }
   for (const key of Object.keys(videoTimelineStateCache)) {
     delete videoTimelineStateCache[key];
+  }
+  for (const key of Object.keys(videoTransformStateCache)) {
+    delete videoTransformStateCache[key];
   }
   invalidDurationVideoKeys.value = new Set();
   selectedVideoName.value = '';
@@ -2248,6 +2262,36 @@ function toggleTimelineContainer() {
   nextTick(schedulePlayerResize);
 }
 
+function updateTransformerVideoControls(state = {}) {
+  const duration = Number(state.duration) || 0;
+  const currentTime = Math.max(0, Number(state.currentTime) || 0);
+  const mainVideo = mainVideoRef.value;
+  if (state.paused === false && mainVideo && !mainVideo.paused) {
+    mainVideo.pause();
+    updatePlayerControls();
+  }
+  if (state.paused === false) {
+    timelinePreviewSeeking.value = false;
+  }
+  playerCurrentTime.value = currentTime;
+  if (duration > 0 && !timelinePreviewSeeking.value) {
+    timelinePlayheadTime.value = currentTime;
+  }
+}
+
+function handleTransformerVideoLoaded() {
+  const targetTime = Math.max(0, Number(timelinePlayheadTime.value) || 0);
+  videoTransformerRef.value?.seekTo?.(targetTime);
+  pendingMainVideoSeekTime = null;
+  timelinePreviewSeeking.value = false;
+}
+
+function handleTimelineVideoTransformChange(values) {
+  const key = selectedVideoKey.value;
+  if (!key) return;
+  videoTransformStateCache[key] = { ...values };
+}
+
 function clampTimelineStart(startTime) {
   const maxStart = Math.max(
     0,
@@ -2266,16 +2310,21 @@ function syncPlayheadToTimelineStart() {
 
 function seekMainPlayerToTimelineTime(targetTime) {
   const video = mainVideoRef.value;
-  if (!video) return;
-
-  const duration = Number.isFinite(video.duration) ? video.duration : 0;
-  const nextTime = duration ? Math.min(duration, targetTime) : targetTime;
-  const currentTime = Number.isFinite(video.currentTime)
-    ? video.currentTime
-    : 0;
-  if (Math.abs(currentTime - nextTime) < 0.03) return;
-
-  video.currentTime = Math.max(0, nextTime);
+  if (video) {
+    const duration = Number.isFinite(video.duration) ? video.duration : 0;
+    const nextTime = duration ? Math.min(duration, targetTime) : targetTime;
+    const currentTime = Number.isFinite(video.currentTime)
+      ? video.currentTime
+      : 0;
+    if (Math.abs(currentTime - nextTime) >= 0.03) {
+      try {
+        video.currentTime = Math.max(0, nextTime);
+      } catch {
+        // 视频元数据尚未就绪时，loadeddata 会再次同步目标时间。
+      }
+    }
+  }
+  videoTransformerRef.value?.seekTo?.(targetTime);
   updatePlayerControls();
 }
 
@@ -3567,6 +3616,7 @@ function resetMainPlayer(targetTime = 0, options = {}) {
 function togglePlayerPlayback() {
   const video = mainVideoRef.value;
   if (!video) return;
+  videoTransformerRef.value?.pause?.();
   timelinePreviewSeeking.value = false;
   if (video.paused) {
     video.play().catch(updatePlayerControls);
@@ -5431,7 +5481,115 @@ onBeforeUnmount(() => {
               ref="playerStageRef"
               class="flex-1 bg-black/90 flex flex-col items-center justify-center relative overflow-hidden p-8"
             >
+              <VideoTransformer
+                v-if="currentViewState === 'import'"
+                :key="`player-transform-${selectedVideoKey}`"
+                ref="videoTransformerRef"
+                class="workspace-video-transformer"
+                :source="selectedVideoSource"
+                :source-name="selectedVideoName"
+                :initial-transform="selectedVideoTransform"
+                @change="handleTimelineVideoTransformChange"
+                @video-loaded="handleTransformerVideoLoaded"
+                @playback-change="updateTransformerVideoControls"
+                @timeupdate="updateTransformerVideoControls"
+                @error="systemMessage.error($event)"
+              >
+                <template #timeline>
+                  <div class="timeline-settings-track">
+                    <div class="track-title flex items-center gap-2">
+                      {{ selectedStyleName }}
+                    </div>
+                    <div class="timeline-overview">
+                      <div
+                        ref="timelineRulerRef"
+                        class="timeline-ruler"
+                        aria-label="时间刻度"
+                      >
+                        <span
+                          v-for="tick in timelineRulerMinorTicks"
+                          :key="`minor-${tick.value}`"
+                          class="timeline-ruler-tick is-minor"
+                          :style="{ left: tick.left }"
+                        ></span>
+                        <span
+                          v-for="tick in timelineRulerMajorTicks"
+                          :key="`major-${tick.value}`"
+                          class="timeline-ruler-tick is-major"
+                          :style="{ left: tick.left }"
+                        ></span>
+                        <span
+                          v-for="tick in timelineRulerMajorTicks"
+                          :key="`label-${tick.value}`"
+                          class="timeline-ruler-label"
+                          :class="{
+                            'is-start': tick.value === 0,
+                            'is-end':
+                              Math.abs(
+                                tick.value - timelineRulerScale.totalDuration,
+                              ) < 0.0001,
+                          }"
+                          :style="{ left: tick.left }"
+                        >
+                          {{ formatTimelineRulerTick(tick.value) }}
+                        </span>
+                      </div>
+                      <button
+                        class="timeline-playhead"
+                        :class="{ 'is-dragging': timelinePlayheadDragging }"
+                        :style="{ left: timelinePlayheadPercent }"
+                        type="button"
+                        aria-label="时间轴播放指针"
+                        @pointerdown="startTimelinePlayheadDrag"
+                      >
+                        <span class="timeline-playhead-handle"></span>
+                        <span class="timeline-playhead-line"></span>
+                      </button>
+                      <div class="clips-row relative h-16">
+                        <div ref="timelineTrackRef" class="duration-track">
+                          <div
+                            class="duration-selection bg-electric-blue/20 border-2 border-electric-blue rounded-md flex items-center px-3 shadow-[0_0_15px_rgba(74,142,255,0.25)]"
+                            :class="{ 'is-dragging': timelineDragging }"
+                            :style="{
+                              ...timelineSelectionStyle,
+                              boxShadow:
+                                timelinePulse && !timelineDragging
+                                  ? '0 0 20px rgba(74,142,255,0.45)'
+                                  : '0 0 15px rgba(74,142,255,0.25)',
+                            }"
+                            @pointerdown="startTimelineDrag"
+                          >
+                            <div
+                              class="flex h-full w-full min-w-0 flex-col justify-between px-2 py-1"
+                            >
+                              <div class="flex min-w-0 items-center gap-1.5">
+                                <span
+                                  class="truncate text-[12px] font-bold tracking-wide text-white"
+                                  >{{ selectedClipTitle }}</span
+                                >
+                              </div>
+                              <div class="duration-meta-row">
+                                <span
+                                  class="duration-meta-duration text-[10px] font-bold text-primary"
+                                  >时长：{{
+                                    timelineSelectedDurationLabel
+                                  }}</span
+                                >
+                                <span
+                                  class="duration-meta-range text-[10px] font-medium text-white/90 font-code-data tracking-tighter"
+                                  >{{ timelineRangeLabel }}</span
+                                >
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </template>
+              </VideoTransformer>
               <div
+                v-else
                 ref="playerWrapperRef"
                 class="playerWrapper group relative rounded-xl overflow-hidden shadow-2xl border border-white/10"
               >
@@ -5530,10 +5688,11 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
-          <div
-            class="timeline-dock relative shrink-0"
-            :class="{ 'timeline-collapsed': timelineCollapsed }"
-          >
+          <Teleport defer to="#global-timeline-slot">
+            <div
+              class="timeline-dock relative shrink-0"
+              :class="{ 'timeline-collapsed': timelineCollapsed }"
+            >
             <button
               v-if="timelineToggleVisible"
               class="absolute left-1/2 -translate-x-1/2 z-[70] h-7 w-12 rounded-t-full bg-surface-container-high border border-outline-variant text-white shadow-lg flex items-center justify-center transition-all duration-200"
@@ -5557,111 +5716,6 @@ onBeforeUnmount(() => {
                 class="track-area custom-scrollbar overflow-x-auto"
                 style="background: #030d25; padding: 26px 12px 60px"
               >
-                <div
-                  class="track w-full"
-                  style="
-                    background: #07122a;
-                    border: 1px solid rgba(74, 142, 255, 0.15);
-                    border-radius: 4px;
-                    margin-bottom: 8px;
-                  "
-                >
-                  <div
-                    class="track-title flex items-center gap-2"
-                    style="
-                      font-size: 10px;
-                      font-weight: 700;
-                      color: rgba(217, 226, 255, 0.5);
-                      border-bottom: 1px solid rgba(74, 142, 255, 0.15);
-                      background: rgba(16, 27, 51, 0.8);
-                    "
-                  >
-                    {{ selectedStyleName }}
-                  </div>
-                  <div class="timeline-overview">
-                    <div
-                      ref="timelineRulerRef"
-                      class="timeline-ruler"
-                      aria-label="时间刻度"
-                    >
-                      <span
-                        v-for="tick in timelineRulerMinorTicks"
-                        :key="`minor-${tick.value}`"
-                        class="timeline-ruler-tick is-minor"
-                        :style="{ left: tick.left }"
-                      ></span>
-                      <span
-                        v-for="tick in timelineRulerMajorTicks"
-                        :key="`major-${tick.value}`"
-                        class="timeline-ruler-tick is-major"
-                        :style="{ left: tick.left }"
-                      ></span>
-                      <span
-                        v-for="tick in timelineRulerMajorTicks"
-                        :key="`label-${tick.value}`"
-                        class="timeline-ruler-label"
-                        :class="{
-                          'is-start': tick.value === 0,
-                          'is-end':
-                            Math.abs(
-                              tick.value - timelineRulerScale.totalDuration,
-                            ) < 0.0001,
-                        }"
-                        :style="{ left: tick.left }"
-                      >
-                        {{ formatTimelineRulerTick(tick.value) }}
-                      </span>
-                    </div>
-                    <button
-                      class="timeline-playhead"
-                      :class="{ 'is-dragging': timelinePlayheadDragging }"
-                      :style="{ left: timelinePlayheadPercent }"
-                      type="button"
-                      aria-label="时间轴播放指针"
-                      @pointerdown="startTimelinePlayheadDrag"
-                    >
-                      <span class="timeline-playhead-handle"></span>
-                      <span class="timeline-playhead-line"></span>
-                    </button>
-                    <div class="clips-row relative h-16">
-                      <div ref="timelineTrackRef" class="duration-track">
-                        <div
-                          class="duration-selection bg-electric-blue/20 border-2 border-electric-blue rounded-md flex items-center px-3 shadow-[0_0_15px_rgba(74,142,255,0.25)]"
-                          :class="{ 'is-dragging': timelineDragging }"
-                          :style="{
-                            ...timelineSelectionStyle,
-                            boxShadow:
-                              timelinePulse && !timelineDragging
-                                ? '0 0 20px rgba(74,142,255,0.45)'
-                                : '0 0 15px rgba(74,142,255,0.25)',
-                          }"
-                          @pointerdown="startTimelineDrag"
-                        >
-                          <div
-                            class="flex flex-col justify-between h-full py-1 px-2 w-full min-w-0"
-                          >
-                            <div class="flex items-center gap-1.5 min-w-0">
-                              <span
-                                class="text-[12px] font-bold text-white tracking-wide truncate"
-                                >{{ selectedClipTitle }}</span
-                              >
-                            </div>
-                            <div class="duration-meta-row">
-                              <span
-                                class="duration-meta-duration text-[10px] font-bold text-primary"
-                                >时长：{{ timelineSelectedDurationLabel }}</span
-                              >
-                              <span
-                                class="duration-meta-range text-[10px] font-medium text-white/90 font-code-data tracking-tighter"
-                                >{{ timelineRangeLabel }}</span
-                              >
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
                 <div
                   class="w-full flex items-center gap-3 px-4 py-3 bg-surface-container-low border border-outline-variant rounded"
                 >
@@ -5687,7 +5741,8 @@ onBeforeUnmount(() => {
                 </div>
               </div>
             </div>
-          </div>
+            </div>
+          </Teleport>
 
           <div
             class="absolute inset-0 z-[200] flex items-center justify-center"
@@ -6523,6 +6578,7 @@ onBeforeUnmount(() => {
           </div>
         </section>
       </div>
+      <div id="global-timeline-slot" class="global-timeline-slot"></div>
     </main>
 
     <div
@@ -7127,11 +7183,46 @@ onBeforeUnmount(() => {
     height 0.25s ease;
 }
 
+.workspace-video-transformer {
+  width: min(100%, 1100px);
+  height: 100%;
+  max-height: 100%;
+  box-shadow: 0 20px 55px rgba(0, 0, 0, 0.42);
+}
+
+.timeline-settings-track {
+  flex: 0 0 auto;
+  margin-bottom: 8px;
+  padding: 6px 0;
+  overflow: hidden;
+  border: 1px solid rgba(74, 142, 255, 0.18);
+  border-radius: 9px;
+  background: #07122a;
+}
+
+.timeline-settings-track .track-title {
+  border-bottom: 1px solid rgba(74, 142, 255, 0.15);
+  background: rgba(16, 27, 51, 0.8);
+  font-size: 10px;
+  font-weight: 700;
+}
+
 .timeline-dock {
   height: 12rem;
   overflow: visible;
   transition: height 0.25s ease;
   z-index: 50;
+}
+
+.global-timeline-slot {
+  position: relative;
+  z-index: 160;
+  width: 100%;
+  flex: 0 0 auto;
+}
+
+.global-timeline-slot:empty {
+  display: none;
 }
 
 .timeline-dock.timeline-collapsed {
