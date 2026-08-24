@@ -7,7 +7,7 @@ import {
   ref,
   watch,
 } from 'vue';
-import { Canvas, FabricImage } from 'fabric';
+import { Canvas, Control, FabricImage, controlsUtils } from 'fabric';
 
 const props = defineProps({
   source: { type: String, default: '' },
@@ -25,23 +25,37 @@ const emit = defineEmits([
 
 const CANVAS_WIDTH = 960;
 const CANVAS_HEIGHT = 540;
+const CORNER_ROTATION_OFFSET = 15;
+const CORNER_ROTATION_HIT_SIZE = 22;
+const ROTATE_CURSOR_PATHS = [
+  'M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8',
+  'M21 3v5h-5',
+];
 const canvasElement = ref(null);
 const errorMessage = ref('');
 const isReady = ref(false);
 const isPlaying = ref(false);
 const isTransformExpanded = ref(true);
 const isBeautyExpanded = ref(true);
+const materialResetConfirmVisible = ref(false);
 const transform = reactive({ x: 480, y: 270, angle: 0, scale: 1 });
 const DEFAULT_BEAUTY_SETTINGS = Object.freeze({
   lutStyle: 'none',
   lutIntensity: 100,
-  skinTone: 'fair',
+  skinTone: 'off',
+  skinTemperature: 0,
+  skinIntensity: 60,
   smoothing: 0,
   whitening: 0,
   stabilization: false,
   oneClickBeauty: false,
 });
 const beauty = reactive({ ...DEFAULT_BEAUTY_SETTINGS });
+const SKIN_TONE_OPTIONS = Object.freeze([
+  { value: 'off', label: '不设置', color: 'transparent' },
+  { value: 'natural', label: '白皙', color: '#fddcbe' },
+  { value: 'warm', label: '原生', color: '#d5a273' },
+]);
 
 let fabricCanvas = null;
 let videoObject = null;
@@ -60,6 +74,42 @@ function getCoverScale(video) {
     CANVAS_WIDTH / video.videoWidth,
     CANVAS_HEIGHT / video.videoHeight,
   );
+}
+
+function createRotationCursor(rotation) {
+  const paths = ROTATE_CURSOR_PATHS.map(
+    (path) => `<path d="${path}"/>`,
+  ).join('');
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round"><g transform="rotate(${rotation} 12 12)" stroke="#111827" stroke-width="4">${paths}</g><g transform="rotate(${rotation} 12 12)" stroke="#f8fafc" stroke-width="2">${paths}</g></svg>`;
+  return `url("data:image/svg+xml,${encodeURIComponent(svg)}") 10 10, crosshair`;
+}
+
+function createCornerRotationControl(x, y, cursorRotation) {
+  return new Control({
+    x,
+    y,
+    offsetX: x < 0 ? -CORNER_ROTATION_OFFSET : CORNER_ROTATION_OFFSET,
+    offsetY: y < 0 ? -CORNER_ROTATION_OFFSET : CORNER_ROTATION_OFFSET,
+    sizeX: CORNER_ROTATION_HIT_SIZE,
+    sizeY: CORNER_ROTATION_HIT_SIZE,
+    touchSizeX: CORNER_ROTATION_HIT_SIZE + 8,
+    touchSizeY: CORNER_ROTATION_HIT_SIZE + 8,
+    actionName: 'rotate',
+    actionHandler: controlsUtils.rotationWithSnapping,
+    cursorStyle: createRotationCursor(cursorRotation),
+    cursorStyleHandler: controlsUtils.rotationStyleHandler,
+    render: () => {},
+  });
+}
+
+function addCornerRotationControls(target) {
+  target.controls = {
+    ...target.controls,
+    rotateTl: createCornerRotationControl(-0.5, -0.5, -90),
+    rotateTr: createCornerRotationControl(0.5, -0.5, 0),
+    rotateBr: createCornerRotationControl(0.5, 0.5, 90),
+    rotateBl: createCornerRotationControl(-0.5, 0.5, 180),
+  };
 }
 
 function emitPlaybackState() {
@@ -99,12 +149,23 @@ function emitTransform() {
 function syncBeautySettings(values) {
   if (!values || typeof values !== 'object') return;
   if (typeof values.lutStyle === 'string') beauty.lutStyle = values.lutStyle;
-  if (values.skinTone === 'fair' || values.skinTone === 'healthy') {
+  if (SKIN_TONE_OPTIONS.some((option) => option.value === values.skinTone)) {
     beauty.skinTone = values.skinTone;
+  } else if (values.skinTone === 'healthy') {
+    beauty.skinTone = 'natural';
   }
-  for (const key of ['lutIntensity', 'smoothing', 'whitening']) {
+  for (const key of [
+    'lutIntensity',
+    'skinIntensity',
+    'smoothing',
+    'whitening',
+  ]) {
     const value = Number(values[key]);
     if (Number.isFinite(value)) beauty[key] = Math.min(100, Math.max(0, value));
+  }
+  const skinTemperature = Number(values.skinTemperature);
+  if (Number.isFinite(skinTemperature)) {
+    beauty.skinTemperature = Math.min(100, Math.max(-100, skinTemperature));
   }
   if (typeof values.stabilization === 'boolean') {
     beauty.stabilization = values.stabilization;
@@ -118,6 +179,13 @@ function setBeautyPercent(key, event) {
   const value = Number(event.target.value);
   if (!Number.isFinite(value)) return;
   beauty[key] = Math.min(100, Math.max(0, value));
+  emitTransform();
+}
+
+function setSkinTemperature(event) {
+  const value = Number(event.target.value);
+  if (!Number.isFinite(value)) return;
+  beauty.skinTemperature = Math.min(100, Math.max(-100, value));
   emitTransform();
 }
 
@@ -187,11 +255,13 @@ function addVideoToCanvas(video, revision) {
     transparentCorners: false,
     padding: 2,
   });
+  addCornerRotationControls(videoObject);
   videoObject.setControlsVisibility({
     mt: false,
     mb: false,
     ml: false,
     mr: false,
+    mtr: false,
   });
   fabricCanvas.add(videoObject);
   fabricCanvas.setActiveObject(videoObject);
@@ -459,298 +529,413 @@ defineExpose({
       </div>
 
       <aside class="properties-panel">
-        <div class="properties-titlebar">属性</div>
-        <section class="property-section">
-          <div class="section-heading">
-            <button
-              class="section-name"
-              type="button"
-              :aria-expanded="isTransformExpanded"
-              aria-controls="transform-properties"
-              @click="isTransformExpanded = !isTransformExpanded"
-            >
-              <svg
-                class="section-chevron"
-                :class="{ collapsed: !isTransformExpanded }"
-                aria-hidden="true"
-                viewBox="0 0 16 16"
-              >
-                <path d="m4.5 6 3.5 3.5L11.5 6" />
-              </svg>
-              <span>变换</span>
-            </button>
-            <button
-              class="reset-button"
-              type="button"
-              title="重置变换"
-              aria-label="重置变换"
-              :disabled="!isReady"
-              @click="resetTransform"
-            >
-              <svg aria-hidden="true" viewBox="0 0 20 20">
-                <path d="M4.7 7.2A6 6 0 1 1 4 11m.7-3.8V3.8m0 3.4H8" />
-              </svg>
-            </button>
-          </div>
-
-          <div
-            v-show="isTransformExpanded"
-            id="transform-properties"
-            class="property-rows"
-            :class="{ disabled: !isReady }"
+        <div class="properties-titlebar">
+          <span>属性</span>
+          <button
+            class="material-reset-button"
+            type="button"
+            @click="materialResetConfirmVisible = true"
           >
-            <div class="property-row position-row">
-              <span class="property-label">位置</span>
-              <div class="position-fields">
-                <label class="compact-field">
-                  <small>X</small>
-                  <input
-                    type="number"
-                    step="1"
-                    :value="transform.x"
-                    :disabled="!isReady"
-                    @input="setNumericTransform('x', $event)"
-                  />
-                </label>
-                <label class="compact-field">
-                  <small>Y</small>
-                  <input
-                    type="number"
-                    step="1"
-                    :value="transform.y"
-                    :disabled="!isReady"
-                    @input="setNumericTransform('y', $event)"
-                  />
-                </label>
-              </div>
-            </div>
-
-            <label class="property-row">
-              <span class="property-label">缩放</span>
-              <div class="value-field">
-                <input
-                  type="number"
-                  min="1"
-                  max="1000"
-                  step="0.1"
-                  :value="round(transform.scale * 100, 1)"
-                  :disabled="!isReady"
-                  @input="setScalePercent"
-                />
-                <em>%</em>
-              </div>
-            </label>
-
-            <div class="property-row rotation-row">
-              <span class="property-label">旋转</span>
-              <div class="rotation-control">
-                <label class="value-field">
-                  <input
-                    type="number"
-                    step="0.1"
-                    :value="transform.angle"
-                    :disabled="!isReady"
-                    @input="setNumericTransform('angle', $event)"
-                  />
-                  <em>°</em>
-                </label>
-                <button
-                  class="reset-button"
-                  type="button"
-                  title="重置旋转"
-                  aria-label="重置旋转"
-                  :disabled="!isReady"
-                  @click="resetRotation"
+            素材重置
+          </button>
+        </div>
+        <div class="properties-content">
+          <section class="property-section">
+            <div class="section-heading">
+              <button
+                class="section-name"
+                type="button"
+                :aria-expanded="isTransformExpanded"
+                aria-controls="transform-properties"
+                @click="isTransformExpanded = !isTransformExpanded"
+              >
+                <svg
+                  class="section-chevron"
+                  :class="{ collapsed: !isTransformExpanded }"
+                  aria-hidden="true"
+                  viewBox="0 0 16 16"
                 >
-                  <svg aria-hidden="true" viewBox="0 0 20 20">
-                    <path d="M4.7 7.2A6 6 0 1 1 4 11m.7-3.8V3.8m0 3.4H8" />
-                  </svg>
-                </button>
-              </div>
+                  <path d="m4.5 6 3.5 3.5L11.5 6" />
+                </svg>
+                <span>变换</span>
+              </button>
+              <button
+                class="reset-button"
+                type="button"
+                title="重置变换"
+                aria-label="重置变换"
+                :disabled="!isReady"
+                @click="resetTransform"
+              >
+                <svg aria-hidden="true" viewBox="0 0 20 20">
+                  <path d="M4.7 7.2A6 6 0 1 1 4 11m.7-3.8V3.8m0 3.4H8" />
+                </svg>
+              </button>
             </div>
-          </div>
-        </section>
 
-        <section class="property-section">
-          <div class="section-heading">
-            <button
-              class="section-name"
-              type="button"
-              :aria-expanded="isBeautyExpanded"
-              aria-controls="beauty-properties"
-              @click="isBeautyExpanded = !isBeautyExpanded"
+            <div
+              v-show="isTransformExpanded"
+              id="transform-properties"
+              class="property-rows"
+              :class="{ disabled: !isReady }"
             >
-              <svg
-                class="section-chevron"
-                :class="{ collapsed: !isBeautyExpanded }"
-                aria-hidden="true"
-                viewBox="0 0 16 16"
-              >
-                <path d="m4.5 6 3.5 3.5L11.5 6" />
-              </svg>
-              <span>美颜</span>
-            </button>
-            <button
-              class="reset-button"
-              type="button"
-              title="还原美颜参数"
-              aria-label="还原美颜参数"
-              :disabled="!isReady"
-              @click="resetBeauty"
-            >
-              <svg aria-hidden="true" viewBox="0 0 20 20">
-                <path d="M4.7 7.2A6 6 0 1 1 4 11m.7-3.8V3.8m0 3.4H8" />
-              </svg>
-            </button>
-          </div>
+              <div class="property-row position-row">
+                <span class="property-label">位置</span>
+                <div class="position-fields">
+                  <label class="compact-field">
+                    <small>X</small>
+                    <input
+                      type="number"
+                      step="1"
+                      :value="transform.x"
+                      :disabled="!isReady"
+                      @input="setNumericTransform('x', $event)"
+                    />
+                  </label>
+                  <label class="compact-field">
+                    <small>Y</small>
+                    <input
+                      type="number"
+                      step="1"
+                      :value="transform.y"
+                      :disabled="!isReady"
+                      @input="setNumericTransform('y', $event)"
+                    />
+                  </label>
+                </div>
+              </div>
 
-          <div
-            v-show="isBeautyExpanded"
-            id="beauty-properties"
-            class="property-rows beauty-rows"
-            :class="{ disabled: !isReady }"
-          >
-            <label class="property-row">
-              <span class="property-label">LUT 风格</span>
-              <select
-                v-model="beauty.lutStyle"
-                class="property-select"
-                @change="emitTransform"
-              >
-                <option value="none">无</option>
-                <option value="clear">清透</option>
-                <option value="warm">暖阳</option>
-                <option value="cinematic">电影</option>
-                <option value="vintage">复古</option>
-                <option value="cool">冷调</option>
-              </select>
-            </label>
-
-            <div class="property-row">
-              <span class="property-label">LUT 强度</span>
-              <div class="range-control">
-                <input
-                  class="effect-slider"
-                  type="range"
-                  min="0"
-                  max="100"
-                  step="1"
-                  :value="beauty.lutIntensity"
-                  @input="setBeautyPercent('lutIntensity', $event)"
-                />
-                <label class="value-field compact-value">
+              <label class="property-row">
+                <span class="property-label">缩放</span>
+                <div class="value-field">
                   <input
                     type="number"
+                    min="1"
+                    max="1000"
+                    step="0.1"
+                    :value="round(transform.scale * 100, 1)"
+                    :disabled="!isReady"
+                    @input="setScalePercent"
+                  />
+                  <em>%</em>
+                </div>
+              </label>
+
+              <div class="property-row rotation-row">
+                <span class="property-label">旋转</span>
+                <div class="rotation-control">
+                  <label class="value-field">
+                    <input
+                      type="number"
+                      step="0.1"
+                      :value="transform.angle"
+                      :disabled="!isReady"
+                      @input="setNumericTransform('angle', $event)"
+                    />
+                    <em>°</em>
+                  </label>
+                  <button
+                    class="reset-button"
+                    type="button"
+                    title="重置旋转"
+                    aria-label="重置旋转"
+                    :disabled="!isReady"
+                    @click="resetRotation"
+                  >
+                    <svg aria-hidden="true" viewBox="0 0 20 20">
+                      <path d="M4.7 7.2A6 6 0 1 1 4 11m.7-3.8V3.8m0 3.4H8" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="property-section">
+            <div class="section-heading">
+              <button
+                class="section-name"
+                type="button"
+                :aria-expanded="isBeautyExpanded"
+                aria-controls="beauty-properties"
+                @click="isBeautyExpanded = !isBeautyExpanded"
+              >
+                <svg
+                  class="section-chevron"
+                  :class="{ collapsed: !isBeautyExpanded }"
+                  aria-hidden="true"
+                  viewBox="0 0 16 16"
+                >
+                  <path d="m4.5 6 3.5 3.5L11.5 6" />
+                </svg>
+                <span>美颜</span>
+              </button>
+              <button
+                class="reset-button"
+                type="button"
+                title="还原美颜参数"
+                aria-label="还原美颜参数"
+                :disabled="!isReady"
+                @click="resetBeauty"
+              >
+                <svg aria-hidden="true" viewBox="0 0 20 20">
+                  <path d="M4.7 7.2A6 6 0 1 1 4 11m.7-3.8V3.8m0 3.4H8" />
+                </svg>
+              </button>
+            </div>
+
+            <div
+              v-show="isBeautyExpanded"
+              id="beauty-properties"
+              class="property-rows beauty-rows"
+              :class="{ disabled: !isReady }"
+            >
+              <label class="property-row">
+                <span class="property-label">LUT 风格</span>
+                <select
+                  v-model="beauty.lutStyle"
+                  class="property-select"
+                  @change="emitTransform"
+                >
+                  <option value="none">无</option>
+                  <option value="clear">清透</option>
+                  <option value="warm">暖阳</option>
+                  <option value="cinematic">电影</option>
+                  <option value="vintage">复古</option>
+                  <option value="cool">冷调</option>
+                </select>
+              </label>
+
+              <div class="property-row">
+                <span class="property-label">LUT 强度</span>
+                <div class="range-control">
+                  <input
+                    class="effect-slider"
+                    type="range"
                     min="0"
                     max="100"
                     step="1"
                     :value="beauty.lutIntensity"
                     @input="setBeautyPercent('lutIntensity', $event)"
                   />
-                  <em>%</em>
-                </label>
+                  <label class="value-field compact-value">
+                    <input
+                      type="number"
+                      min="0"
+                      max="100"
+                      step="1"
+                      :value="beauty.lutIntensity"
+                      @input="setBeautyPercent('lutIntensity', $event)"
+                    />
+                    <em>%</em>
+                  </label>
+                </div>
               </div>
-            </div>
 
-            <div class="property-row">
-              <span class="property-label">肤色</span>
-              <div class="skin-tone-control" role="group" aria-label="肤色选择">
-                <button
-                  type="button"
-                  :class="{ active: beauty.skinTone === 'fair' }"
-                  @click="setSkinTone('fair')"
+              <div class="skin-tone-settings">
+                <div class="skin-tone-heading">
+                  <span>肤色</span>
+                </div>
+                <div
+                  class="skin-tone-swatches"
+                  role="group"
+                  aria-label="肤色选择"
                 >
-                  白皙
-                </button>
-                <button
-                  type="button"
-                  :class="{ active: beauty.skinTone === 'healthy' }"
-                  @click="setSkinTone('healthy')"
-                >
-                  原生
-                </button>
+                  <button
+                    v-for="option in SKIN_TONE_OPTIONS"
+                    :key="option.value"
+                    class="skin-tone-swatch"
+                    :class="{
+                      active: beauty.skinTone === option.value,
+                      off: option.value === 'off',
+                    }"
+                    :style="{ '--swatch-color': option.color }"
+                    type="button"
+                    :title="option.label"
+                    :aria-label="option.label"
+                    :aria-pressed="beauty.skinTone === option.value"
+                    @click="setSkinTone(option.value)"
+                  ></button>
+                </div>
+
+                <template v-if="beauty.skinTone !== 'off'">
+                  <div class="property-row skin-adjustment-row">
+                    <span class="property-label">冷暖</span>
+                    <div class="range-control">
+                      <input
+                        class="effect-slider temperature-slider"
+                        type="range"
+                        min="-100"
+                        max="100"
+                        step="1"
+                        :value="beauty.skinTemperature"
+                        @input="setSkinTemperature"
+                      />
+                      <label class="value-field compact-value">
+                        <input
+                          type="number"
+                          min="-100"
+                          max="100"
+                          step="1"
+                          :value="beauty.skinTemperature"
+                          @input="setSkinTemperature"
+                        />
+                      </label>
+                    </div>
+                  </div>
+
+                  <div class="property-row skin-adjustment-row">
+                    <span class="property-label">程度</span>
+                    <div class="range-control">
+                      <input
+                        class="effect-slider"
+                        type="range"
+                        min="0"
+                        max="100"
+                        step="1"
+                        :value="beauty.skinIntensity"
+                        @input="setBeautyPercent('skinIntensity', $event)"
+                      />
+                      <label class="value-field compact-value">
+                        <input
+                          type="number"
+                          min="0"
+                          max="100"
+                          step="1"
+                          :value="beauty.skinIntensity"
+                          @input="setBeautyPercent('skinIntensity', $event)"
+                        />
+                      </label>
+                    </div>
+                  </div>
+                </template>
               </div>
-            </div>
 
-            <div class="property-row">
-              <span class="property-label">磨皮</span>
-              <div class="range-control">
-                <input
-                  class="effect-slider"
-                  type="range"
-                  min="0"
-                  max="100"
-                  step="1"
-                  :value="beauty.smoothing"
-                  @input="setBeautyPercent('smoothing', $event)"
-                />
-                <label class="value-field compact-value">
+              <div class="property-row">
+                <span class="property-label">磨皮</span>
+                <div class="range-control">
                   <input
-                    type="number"
+                    class="effect-slider"
+                    type="range"
                     min="0"
                     max="100"
                     step="1"
                     :value="beauty.smoothing"
                     @input="setBeautyPercent('smoothing', $event)"
                   />
-                  <em>%</em>
-                </label>
+                  <label class="value-field compact-value">
+                    <input
+                      type="number"
+                      min="0"
+                      max="100"
+                      step="1"
+                      :value="beauty.smoothing"
+                      @input="setBeautyPercent('smoothing', $event)"
+                    />
+                    <em>%</em>
+                  </label>
+                </div>
               </div>
-            </div>
 
-            <div class="property-row">
-              <span class="property-label">美白</span>
-              <div class="range-control">
-                <input
-                  class="effect-slider"
-                  type="range"
-                  min="0"
-                  max="100"
-                  step="1"
-                  :value="beauty.whitening"
-                  @input="setBeautyPercent('whitening', $event)"
-                />
-                <label class="value-field compact-value">
+              <div class="property-row">
+                <span class="property-label">美白</span>
+                <div class="range-control">
                   <input
-                    type="number"
+                    class="effect-slider"
+                    type="range"
                     min="0"
                     max="100"
                     step="1"
                     :value="beauty.whitening"
                     @input="setBeautyPercent('whitening', $event)"
                   />
-                  <em>%</em>
-                </label>
+                  <label class="value-field compact-value">
+                    <input
+                      type="number"
+                      min="0"
+                      max="100"
+                      step="1"
+                      :value="beauty.whitening"
+                      @input="setBeautyPercent('whitening', $event)"
+                    />
+                    <em>%</em>
+                  </label>
+                </div>
               </div>
+
+              <label class="property-row stabilization-row">
+                <span class="property-label">视频去抖动</span>
+                <span class="checkbox-control">
+                  <input
+                    v-model="beauty.stabilization"
+                    type="checkbox"
+                    @change="emitTransform"
+                  />
+                  <span aria-hidden="true"></span>
+                </span>
+              </label>
+
+              <label class="property-row one-click-beauty-row">
+                <span class="property-label">一键美颜</span>
+                <span class="checkbox-control">
+                  <input
+                    v-model="beauty.oneClickBeauty"
+                    type="checkbox"
+                    @change="emitTransform"
+                  />
+                  <span aria-hidden="true"></span>
+                </span>
+              </label>
             </div>
-
-            <label class="property-row stabilization-row">
-              <span class="property-label">视频去抖动</span>
-              <span class="checkbox-control">
-                <input
-                  v-model="beauty.stabilization"
-                  type="checkbox"
-                  @change="emitTransform"
-                />
-                <span aria-hidden="true"></span>
-              </span>
-            </label>
-
-            <label class="property-row one-click-beauty-row">
-              <span class="property-label">一键美颜</span>
-              <span class="checkbox-control">
-                <input
-                  v-model="beauty.oneClickBeauty"
-                  type="checkbox"
-                  @change="emitTransform"
-                />
-                <span aria-hidden="true"></span>
-              </span>
-            </label>
-          </div>
-        </section>
+          </section>
+        </div>
+        <div class="properties-footer">
+          <button class="property-footer-button" type="button">一键还原</button>
+          <button
+            class="property-footer-button property-footer-button-primary"
+            type="button"
+          >
+            预览
+          </button>
+        </div>
       </aside>
     </div>
+
+    <Teleport to="body">
+      <div
+        v-if="materialResetConfirmVisible"
+        class="material-reset-dialog-backdrop"
+        @click.self="materialResetConfirmVisible = false"
+      >
+        <div
+          class="material-reset-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="material-reset-dialog-title"
+        >
+          <div class="material-reset-dialog-header">
+            <strong id="material-reset-dialog-title">素材重置</strong>
+          </div>
+          <p>是否重置素材为初始状态？</p>
+          <div class="material-reset-dialog-actions">
+            <button
+              class="material-reset-dialog-button"
+              type="button"
+              @click="materialResetConfirmVisible = false"
+            >
+              否
+            </button>
+            <button
+              class="material-reset-dialog-button is-confirm"
+              type="button"
+              @click="materialResetConfirmVisible = false"
+            >
+              是
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </section>
 </template>
 
@@ -893,44 +1078,185 @@ defineExpose({
   right: 0;
   bottom: 0;
   width: 232px;
-  min-width: 0;
+  min-width: 232px;
+  display: flex;
   padding: 0;
-  overflow-x: hidden;
-  overflow-y: auto;
+  overflow: hidden;
+  flex-direction: column;
   border-left: 1px solid #353535;
   color: #d7d7d7;
   background: #1f1f1f;
+}
+
+.properties-content {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-color: #555555 transparent;
   scrollbar-gutter: stable;
   scrollbar-width: thin;
 }
 
-.properties-panel::-webkit-scrollbar {
+.properties-content::-webkit-scrollbar {
   width: 6px;
 }
 
-.properties-panel::-webkit-scrollbar-track {
+.properties-content::-webkit-scrollbar-track {
   background: transparent;
 }
 
-.properties-panel::-webkit-scrollbar-thumb {
+.properties-content::-webkit-scrollbar-thumb {
   border-radius: 3px;
   background: #555555;
 }
 
 .properties-titlebar {
-  position: sticky;
-  top: 0;
-  z-index: 2;
   display: flex;
+  flex: 0 0 auto;
   height: 30px;
   align-items: center;
+  justify-content: space-between;
   padding: 0 10px;
   border-bottom: 1px solid #353535;
   color: #bdbdbd;
   font-size: 11px;
   font-weight: 600;
+}
+
+.material-reset-button {
+  height: 21px;
+  padding: 0 7px;
+  border: 1px solid #4a4a4a;
+  border-radius: 3px;
+  color: #cfcfcf;
+  background: #303030;
+  font-size: 9px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.material-reset-button:hover {
+  border-color: #686868;
+  color: #ffffff;
+  background: #3a3a3a;
+}
+
+.material-reset-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.62);
+  backdrop-filter: blur(2px);
+}
+
+.material-reset-dialog {
+  width: min(340px, calc(100vw - 40px));
+  overflow: hidden;
+  border: 1px solid #454545;
+  border-radius: 8px;
+  color: #e5e5e5;
+  background: #242424;
+  box-shadow: 0 22px 60px rgba(0, 0, 0, 0.58);
+}
+
+.material-reset-dialog-header {
+  display: flex;
+  height: 40px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 14px;
+  border-bottom: 1px solid #393939;
+  font-size: 12px;
+}
+
+.material-reset-dialog p {
+  margin: 0;
+  padding: 22px 16px;
+  color: #e0e0e0;
+  font-size: 13px;
+  text-align: center;
+}
+
+.material-reset-dialog-actions {
+  display: flex;
+  justify-content: center;
+  gap: 18px;
+  padding: 0 14px 14px;
+}
+
+.material-reset-dialog-button {
+  min-width: 64px;
+  height: 30px;
+  border: 1px solid #4a4a4a;
+  border-radius: 4px;
+  color: #d8d8d8;
+  background: #303030;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.material-reset-dialog-button:hover {
+  border-color: #666666;
+  color: #ffffff;
+  background: #3a3a3a;
+}
+
+.material-reset-dialog-button.is-confirm {
+  border-color: #4a8eff;
+  color: #ffffff;
+  background: #3f78ca;
+}
+
+.material-reset-dialog-button.is-confirm:hover {
+  border-color: #75a9ff;
+  background: #4a8eff;
+}
+
+.properties-footer {
+  display: grid;
+  min-height: 50px;
+  padding: 9px;
+  flex: 0 0 auto;
+  grid-template-columns: 1fr 1fr;
+  align-items: center;
+  gap: 7px;
+  border-top: 1px solid #3a3a3a;
+  background: #242424;
+  box-shadow: 0 -5px 14px rgba(0, 0, 0, 0.18);
+}
+
+.property-footer-button {
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid #4a4a4a;
+  border-radius: 3px;
+  color: #d2d2d2;
+  background: #303030;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.property-footer-button:hover {
+  border-color: #626262;
+  color: #ffffff;
+  background: #3a3a3a;
+}
+
+.property-footer-button-primary {
+  border-color: #4a8eff;
+  color: #ffffff;
+  background: #3f78ca;
+}
+
+.property-footer-button-primary:hover {
+  border-color: #75a9ff;
+  background: #4a8eff;
 }
 
 .property-section {
@@ -1076,38 +1402,107 @@ defineExpose({
 }
 
 .effect-slider {
+  appearance: none;
   width: 100%;
-  height: 14px;
+  height: 2px;
   margin: 0;
-  accent-color: #4a8eff;
+  border-radius: 999px;
+  outline: none;
+  background: #3b3b3b;
   cursor: pointer;
 }
 
-.skin-tone-control {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  overflow: hidden;
-  border: 1px solid #3b3b3b;
-  border-radius: 2px;
+.effect-slider::-webkit-slider-thumb {
+  appearance: none;
+  width: 8px;
+  height: 14px;
+  border: 0;
+  border-radius: 3px;
+  background: #f4f4f4;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
 }
 
-.skin-tone-control button {
-  height: 23px;
-  padding: 0 5px;
+.effect-slider::-moz-range-thumb {
+  width: 8px;
+  height: 14px;
   border: 0;
-  color: #999999;
-  background: #171717;
+  border-radius: 3px;
+  background: #f4f4f4;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+}
+
+.temperature-slider {
+  background: linear-gradient(90deg, #82d8e4 0%, #d7e1dd 50%, #e8a379 100%);
+}
+
+.skin-tone-settings {
+  display: grid;
+  gap: 9px;
+  padding: 5px 0 7px;
+}
+
+.skin-tone-heading {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #bdbdbd;
   font-size: 10px;
 }
 
-.skin-tone-control button + button {
-  border-left: 1px solid #3b3b3b;
+.skin-tone-swatches {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
-.skin-tone-control button:hover,
-.skin-tone-control button.active {
-  color: #ffffff;
-  background: #365f9e;
+.skin-tone-swatch {
+  position: relative;
+  display: grid;
+  width: 25px;
+  height: 25px;
+  padding: 0;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  background: transparent;
+}
+
+.skin-tone-swatch::before {
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  background: var(--swatch-color);
+  content: '';
+}
+
+.skin-tone-swatch:hover,
+.skin-tone-swatch.active {
+  border-color: #eeeeee;
+  box-shadow: 0 0 0 1px #111111 inset;
+}
+
+.skin-tone-swatch.off::before {
+  border: 1px solid #4a4a4a;
+  background: transparent;
+}
+
+.skin-tone-swatch.off::after {
+  position: absolute;
+  width: 18px;
+  height: 1px;
+  background: #4a4a4a;
+  content: '';
+  transform: rotate(45deg);
+}
+
+.skin-adjustment-row {
+  min-height: 27px;
+}
+
+.compact-value input {
+  padding-right: 7px;
+  text-align: center;
 }
 
 .checkbox-control {
@@ -1235,12 +1630,4 @@ input:disabled {
   opacity: 0.45;
 }
 
-@media (max-width: 820px) {
-  .transform-workspace {
-    padding-right: 200px;
-  }
-  .properties-panel {
-    width: 200px;
-  }
-}
 </style>

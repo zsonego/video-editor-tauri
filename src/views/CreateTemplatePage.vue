@@ -1,5 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue';
+import { useRouter } from 'vue-router';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import {
@@ -33,7 +34,29 @@ import {
   WandSparkles,
   X,
 } from '@lucide/vue';
+import logoImage from '../assets/logo.png';
 import { assetPath, buildXml, generateId, parseXml } from '../utils/xml';
+
+const router = useRouter();
+
+const storedAccountProfile = computed(() => {
+  try {
+    const userInfo = JSON.parse(localStorage.getItem('userInfo') || 'null') || {};
+    return userInfo.user || userInfo.profile || userInfo.sysUser || userInfo;
+  } catch {
+    return {};
+  }
+});
+const accountTenantName = computed(
+  () => storedAccountProfile.value.renterName || '--',
+);
+const accountDisplayName = computed(
+  () => storedAccountProfile.value.phone || '--',
+);
+
+function goWorkspaceHome() {
+  router.push({ name: 'home' });
+}
 
 const transitionEffects = [
   { value: 'Fade', label: '淡入淡出' },
@@ -129,6 +152,7 @@ const subtitleDialogOpen = ref(false);
 const subtitleDraft = ref(null);
 const subtitleIsNew = ref(false);
 const searchKeyword = ref('');
+const basicSettingsExpanded = ref(true);
 const toast = reactive({
   visible: false,
   message: '',
@@ -1888,6 +1912,75 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
+  <header
+    class="fixed top-0 left-0 right-0 z-[300] bg-surface-container/80 backdrop-blur-2xl border-b border-primary/20"
+  >
+    <div
+      class="flex items-center px-6 gap-4 overflow-visible no-scrollbar border-b-2 border-white/10 h-16"
+    >
+      <div class="flex items-center gap-4 shrink-0">
+        <img
+          alt="艾咔"
+          class="h-10 w-auto object-contain cursor-pointer select-none"
+          :src="logoImage"
+          @click="goWorkspaceHome"
+        />
+        <h1
+          class="font-display text-[26px] font-bold tracking-tight text-on-surface whitespace-nowrap"
+        >
+          艾咔· <span class="text-electric-blue font-black">专业版</span>
+        </h1>
+      </div>
+      <div
+        class="flex items-center gap-1 rounded-full border p-0.5 shrink-0 bg-surface-container-lowest border-outline-variant/30 shadow-inner ml-4"
+      >
+        <div
+          class="flex items-center gap-1.5 px-3 py-1 bg-surface-container-high border border-electric-blue/40 rounded-full shadow-lg shadow-electric-blue/10"
+        >
+          <span
+            class="text-[13px] text-electric-blue font-bold whitespace-nowrap"
+            >{{ accountTenantName }}</span
+          >
+        </div>
+        <div class="flex items-center gap-1.5 px-3 py-1 rounded-full">
+          <span
+            class="text-[13px] text-on-surface-variant font-medium whitespace-nowrap"
+            >{{ accountDisplayName }}</span
+          >
+        </div>
+      </div>
+      <div class="flex-1"></div>
+      <button
+        class="h-9 w-24 text-electric-blue shrink-0 flex items-center justify-center gap-1.5 bg-surface-container-high shadow-sm rounded-lg border border-electric-blue/40"
+        type="button"
+      >
+        <span class="text-[13px] font-bold whitespace-nowrap">创建模板</span>
+      </button>
+      <button
+        class="h-9 w-24 text-on-surface-variant hover:text-electric-blue shrink-0 flex items-center justify-center gap-1.5 bg-surface-container-low/50 shadow-sm rounded-lg transition-all active:scale-95 hover:bg-surface-container-high border border-outline-variant/20"
+        type="button"
+        @click="goWorkspaceHome"
+      >
+        <span class="text-[13px] font-bold whitespace-nowrap">工程库</span>
+      </button>
+      <button
+        class="h-9 w-24 flex items-center justify-center gap-1.5 bg-surface-container-low/50 text-on-surface-variant hover:text-electric-blue rounded-lg font-bold shadow-sm hover:bg-surface-container-high active:scale-95 transition-all shrink-0 border border-outline-variant/20"
+        type="button"
+        @click="exportXml"
+      >
+        <span class="text-[13px] uppercase tracking-wide whitespace-nowrap"
+          >导出</span
+        >
+      </button>
+      <button
+        class="h-9 w-24 shrink-0 flex items-center justify-center gap-1.5 bg-surface-container-low/50 text-on-surface-variant shadow-sm rounded-lg border border-outline-variant/20"
+        type="button"
+      >
+        <span class="text-[13px] font-bold">个人中心</span>
+      </button>
+    </div>
+  </header>
+
   <div class="app-shell">
     <header class="topbar">
       <div class="brand">
@@ -1933,7 +2026,28 @@ onBeforeUnmount(() => {
     </header>
 
     <aside class="sidebar">
-      <section class="side-section">
+      <section class="basic-settings">
+        <button
+          class="basic-settings-toggle"
+          type="button"
+          :aria-expanded="basicSettingsExpanded"
+          aria-controls="basic-settings-content"
+          @click="basicSettingsExpanded = !basicSettingsExpanded"
+        >
+          <div>
+            <span class="eyebrow">BASIC SETTINGS</span>
+            <h2>基本设置</h2>
+          </div>
+          <ChevronDown v-if="basicSettingsExpanded" :size="18" />
+          <ChevronRight v-else :size="18" />
+        </button>
+
+        <div
+          v-show="basicSettingsExpanded"
+          id="basic-settings-content"
+          class="basic-settings-content"
+        >
+          <section class="side-section">
         <div class="section-heading">
           <div>
             <span class="eyebrow">PROJECT</span>
@@ -1998,9 +2112,9 @@ onBeforeUnmount(() => {
             </button>
           </div>
         </div>
-      </section>
+          </section>
 
-      <section class="side-section">
+          <section class="side-section">
         <div class="section-heading compact">
           <div>
             <span class="eyebrow">TRACKS</span>
@@ -2049,9 +2163,9 @@ onBeforeUnmount(() => {
             </div>
           </div>
         </div>
-      </section>
+          </section>
 
-      <section class="side-section">
+          <section class="side-section">
         <div class="section-heading compact">
           <div>
             <span class="eyebrow">VIDEO STYLE</span>
@@ -2070,6 +2184,8 @@ onBeforeUnmount(() => {
               {{ style.label }}
             </option>
           </select>
+        </div>
+          </section>
         </div>
       </section>
 
@@ -3476,9 +3592,11 @@ onBeforeUnmount(() => {
 }
 
 .app-shell {
+  position: fixed;
+  inset: 64px 0 0;
   width: 100%;
   min-width: 320px;
-  height: 100vh;
+  height: auto;
   margin: 0;
   overflow: hidden;
 }
@@ -3521,12 +3639,12 @@ label:focus-within {
 }
 
 .app-shell {
-  min-height: 100%;
+  min-height: 0;
   background: var(--canvas);
 }
 
 .topbar {
-  position: fixed;
+  position: absolute;
   z-index: 50;
   inset: 0 0 auto 0;
   height: 68px;
@@ -3682,7 +3800,7 @@ label:focus-within {
 }
 
 .sidebar {
-  position: fixed;
+  position: absolute;
   z-index: 20;
   top: 68px;
   bottom: 0;
@@ -3699,6 +3817,42 @@ label:focus-within {
 .side-section {
   padding: 20px;
   border-bottom: 1px solid var(--line);
+}
+
+.basic-settings {
+  border-bottom: 1px solid var(--line);
+}
+
+.basic-settings-toggle {
+  width: 100%;
+  min-height: 68px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  color: var(--ink);
+  text-align: left;
+  border: 0;
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.basic-settings-toggle:hover {
+  background: #f1f1ed;
+}
+
+.basic-settings-toggle h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.basic-settings-toggle > svg {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.basic-settings-content > .side-section:last-child {
+  border-bottom: 0;
 }
 
 .side-section.asset-library {
@@ -4282,7 +4436,7 @@ label:focus-within {
 }
 
 .workspace {
-  position: fixed;
+  position: absolute;
   top: 68px;
   right: 0;
   bottom: 0;
@@ -4722,7 +4876,7 @@ label:focus-within {
 }
 
 .clip-drawer {
-  position: fixed;
+  position: absolute;
   z-index: 40;
   top: 80px;
   right: 12px;

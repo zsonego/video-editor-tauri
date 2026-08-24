@@ -119,6 +119,244 @@ const defaultSubtitleText = '';
 const subtitleText = ref(defaultSubtitleText);
 const subtitleApplying = ref(false);
 const timelinePulse = ref(false);
+const DEMO_AUDIO_OPTIONS = Object.freeze([
+  '视频原声.mp3',
+  '轻快背景音乐.mp3',
+  '舒缓背景音乐.mp3',
+  '环境音.mp3',
+  '转场音效.mp3',
+  '提示音.mp3',
+  '片尾音乐.mp3',
+]);
+const DEMO_AUDIO_TEXTS = Object.freeze({
+  '视频原声.mp3': '今天为大家介绍这段视频的主要内容。',
+  '轻快背景音乐.mp3': '轻快背景音乐（纯音乐，无人声文本）。',
+  '舒缓背景音乐.mp3': '舒缓背景音乐（纯音乐，无人声文本）。',
+  '环境音.mp3': '环境氛围音（无人声文本）。',
+  '转场音效.mp3': '转场音效（无人声文本）。',
+  '提示音.mp3': '提示音效（无人声文本）。',
+  '片尾音乐.mp3': '片尾背景音乐（纯音乐，无人声文本）。',
+});
+const demoAudioSelections = reactive({
+  'background-music': '轻快背景音乐.mp3',
+  'background-music-ending': '舒缓背景音乐.mp3',
+  'narration-intro': '视频原声.mp3',
+  'narration-guide': '舒缓背景音乐.mp3',
+  'narration-detail': '环境音.mp3',
+  'narration-transition': '转场音效.mp3',
+  'narration-summary': '提示音.mp3',
+  'narration-ending': '片尾音乐.mp3',
+});
+const activeAudioDropdownClipId = ref('');
+const hoveredAudioTextName = ref('');
+const audioDropdownMenuStyle = reactive({
+  top: '0px',
+  left: '0px',
+});
+const activeTrackVolumeId = ref('');
+const trackVolumes = reactive({
+  'background-audio': 100,
+  'narration-audio': 100,
+  'background-music': 100,
+  'background-music-ending': 100,
+  'narration-intro': 100,
+  'narration-guide': 100,
+  'narration-detail': 100,
+  'narration-transition': 100,
+  'narration-summary': 100,
+  'narration-ending': 100,
+});
+const trackVolumePopupStyle = reactive({
+  top: '0px',
+  left: '0px',
+});
+const trackVolumeProgressRef = ref(null);
+const trackVolumeDragging = ref(false);
+function toggleAudioDropdown(clipId, event) {
+  const willOpen = activeAudioDropdownClipId.value !== clipId;
+  activeAudioDropdownClipId.value = willOpen ? clipId : '';
+  hoveredAudioTextName.value = '';
+  activeTrackVolumeId.value = '';
+
+  if (!willOpen) return;
+
+  const triggerRect = event.currentTarget.getBoundingClientRect();
+  const menuWidth = 184;
+  const textPopupWidth = 230;
+  const menuHeight = 176;
+  const viewportGap = 8;
+  const left = Math.max(
+    viewportGap,
+    Math.min(
+      triggerRect.left,
+      window.innerWidth - menuWidth - textPopupWidth - 15,
+    ),
+  );
+  const opensUpward =
+    triggerRect.bottom + 5 + menuHeight > window.innerHeight - viewportGap;
+  const top = opensUpward
+    ? Math.max(viewportGap, triggerRect.top - menuHeight - 5)
+    : triggerRect.bottom + 5;
+
+  audioDropdownMenuStyle.left = `${left}px`;
+  audioDropdownMenuStyle.top = `${top}px`;
+}
+
+function selectDemoAudio(clipId, audioName) {
+  demoAudioSelections[clipId] = audioName;
+  activeAudioDropdownClipId.value = '';
+  hoveredAudioTextName.value = '';
+}
+
+function toggleTrackVolumePopup(trackId, event) {
+  const willOpen = activeTrackVolumeId.value !== trackId;
+  activeTrackVolumeId.value = willOpen ? trackId : '';
+  activeAudioDropdownClipId.value = '';
+  hoveredAudioTextName.value = '';
+
+  if (!willOpen) return;
+
+  const buttonRect = event.currentTarget.getBoundingClientRect();
+  const popupWidth = 34;
+  const popupHeight = 90;
+  const viewportGap = 8;
+  const left = Math.max(
+    viewportGap,
+    Math.min(
+      buttonRect.left + buttonRect.width / 2 - popupWidth / 2,
+      window.innerWidth - popupWidth - viewportGap,
+    ),
+  );
+  const top =
+    buttonRect.top - popupHeight - 6 >= viewportGap
+      ? buttonRect.top - popupHeight - 6
+      : buttonRect.bottom + 6;
+
+  trackVolumePopupStyle.left = `${left}px`;
+  trackVolumePopupStyle.top = `${top}px`;
+}
+
+function adjustTrackVolume(trackId, change) {
+  const currentVolume = Number(trackVolumes[trackId]) || 0;
+  trackVolumes[trackId] = Math.min(100, Math.max(0, currentVolume + change));
+}
+
+function setTrackVolumeFromClientY(clientY) {
+  const targetId = activeTrackVolumeId.value;
+  const progress = trackVolumeProgressRef.value;
+  if (!targetId || !progress) return;
+
+  const rect = progress.getBoundingClientRect();
+  const ratio = rect.height
+    ? Math.max(0, Math.min(1, (rect.bottom - clientY) / rect.height))
+    : 0;
+  trackVolumes[targetId] = Math.round(ratio * 100);
+}
+
+function startTrackVolumeDrag(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  event.currentTarget.setPointerCapture?.(event.pointerId);
+  trackVolumeDragging.value = true;
+  setTrackVolumeFromClientY(event.clientY);
+
+  if (trackVolumeMoveHandler) {
+    window.removeEventListener('pointermove', trackVolumeMoveHandler);
+  }
+  if (trackVolumeUpHandler) {
+    window.removeEventListener('pointerup', trackVolumeUpHandler);
+  }
+
+  trackVolumeMoveHandler = (moveEvent) => {
+    setTrackVolumeFromClientY(moveEvent.clientY);
+  };
+  trackVolumeUpHandler = () => {
+    trackVolumeDragging.value = false;
+    window.removeEventListener('pointermove', trackVolumeMoveHandler);
+    window.removeEventListener('pointerup', trackVolumeUpHandler);
+    trackVolumeMoveHandler = null;
+    trackVolumeUpHandler = null;
+  };
+
+  window.addEventListener('pointermove', trackVolumeMoveHandler);
+  window.addEventListener('pointerup', trackVolumeUpHandler);
+}
+
+const DEMO_SUBTITLE_TRACK_CLIPS = Object.freeze([
+  {
+    id: 'subtitle-1',
+    label: '字幕 01',
+    text: '欢迎来到本期视频，今天我们一起看看这个功能如何使用。',
+    style: { flex: '11 1 0', marginLeft: '0' },
+  },
+  {
+    id: 'subtitle-2',
+    label: '字幕 02',
+    text: '首先导入需要编辑的视频素材，并把它添加到时间轴。',
+    style: { flex: '16 1 0', marginLeft: '6px' },
+  },
+  {
+    id: 'subtitle-3',
+    label: '字幕 03',
+    text: '选中画面后，可以自由调整位置、大小和旋转角度。',
+    style: { flex: '9 1 0', marginLeft: '13px' },
+  },
+  {
+    id: 'subtitle-4',
+    label: '字幕 04',
+    text: '属性面板还提供了肤色、磨皮、美白等美颜设置。',
+    style: { flex: '14 1 0', marginLeft: '4px' },
+  },
+  {
+    id: 'subtitle-5',
+    label: '字幕 05',
+    text: '音频轨道可以为不同片段选择对应的音乐和音效。',
+    style: { flex: '12 1 0', marginLeft: '17px' },
+  },
+  {
+    id: 'subtitle-6',
+    label: '字幕 06',
+    text: '完成编辑后，请预览并检查画面、字幕与声音是否同步。',
+    style: { flex: '15 1 0', marginLeft: '9px' },
+  },
+  {
+    id: 'subtitle-7',
+    label: '字幕 07',
+    text: '确认无误后即可导出视频，感谢观看，我们下期再见。',
+    style: { flex: '17 1 0', marginLeft: '12px' },
+  },
+]);
+const hoveredSubtitleClip = ref(null);
+const subtitleTextPopupStyle = reactive({
+  top: '0px',
+  left: '0px',
+});
+
+function showSubtitleClipText(clip, event) {
+  const iconRect = event.currentTarget.getBoundingClientRect();
+  const popupWidth = 240;
+  const popupHeight = 88;
+  const viewportGap = 8;
+  const left =
+    iconRect.right + viewportGap + popupWidth <= window.innerWidth
+      ? iconRect.right + viewportGap
+      : Math.max(viewportGap, iconRect.left - popupWidth - viewportGap);
+  const top = Math.max(
+    viewportGap,
+    Math.min(
+      iconRect.top - popupHeight - viewportGap,
+      window.innerHeight - popupHeight - viewportGap,
+    ),
+  );
+
+  subtitleTextPopupStyle.left = `${left}px`;
+  subtitleTextPopupStyle.top = `${top}px`;
+  hoveredSubtitleClip.value = clip;
+}
+
+function hideSubtitleClipText() {
+  hoveredSubtitleClip.value = null;
+}
 
 // 工程库、收藏夹和账户表单状态。
 const draftLibraryVisible = ref(false);
@@ -164,6 +402,10 @@ let timelineMoveHandler = null;
 let timelineUpHandler = null;
 let timelinePlayheadMoveHandler = null;
 let timelinePlayheadUpHandler = null;
+let audioTimelinePlayheadMoveHandler = null;
+let audioTimelinePlayheadUpHandler = null;
+let trackVolumeMoveHandler = null;
+let trackVolumeUpHandler = null;
 let modalPreviewProgressMoveHandler = null;
 let modalPreviewProgressUpHandler = null;
 let playerResizeFrame = null;
@@ -196,15 +438,20 @@ const importVideoListScrollRef = ref(null);
 const timelineTrackRef = ref(null);
 const timelineTrackWidth = ref(0);
 const timelineRulerRef = ref(null);
+const editorTimelineRulerRef = ref(null);
 const timelineRulerWidth = ref(600);
+const audioTimelineRulerWidth = ref(600);
 const timelineDragging = ref(false);
 const timelinePlayheadDragging = ref(false);
+const audioTimelinePlayheadDragging = ref(false);
+const AUDIO_TIMELINE_DURATION = 3 * 60;
 const playerPaused = ref(true);
 const playerMuted = ref(false);
 const playerSpeed = ref(1);
 const playerProgress = ref(0);
 const playerCurrentTime = ref(0);
 const timelinePlayheadTime = ref(0);
+const audioTimelinePlayheadTime = ref(0);
 const timelinePreviewSeeking = ref(false);
 const playerTimeLabel = ref('00:00 / 00:00');
 const modalPaused = ref(true);
@@ -445,6 +692,72 @@ const timelineSelectionStyle = computed(() => {
     transform: 'translateY(-50%)',
   };
 });
+const demoAudioTrackClips = Object.freeze([
+  {
+    id: 'background-music',
+    name: '背景音乐一',
+    tone: 'music',
+    style: { flex: '2 1 0', marginLeft: '0' },
+  },
+  {
+    id: 'background-music-ending',
+    name: '背景音乐二',
+    tone: 'music',
+    style: { flex: '1 1 0', marginLeft: '6px' },
+  },
+]);
+const demoNarrationTrackClips = Object.freeze([
+  {
+    id: 'narration-intro',
+    name: '开场旁白',
+    tone: 'source',
+    style: { flex: '18 1 0', marginLeft: '0' },
+  },
+  {
+    id: 'narration-guide',
+    name: '引导旁白',
+    tone: 'source',
+    style: { flex: '17 1 0', marginLeft: '5px' },
+  },
+  {
+    id: 'narration-detail',
+    name: '内容旁白',
+    tone: 'source',
+    style: { flex: '15 1 0', marginLeft: '11px' },
+  },
+  {
+    id: 'narration-transition',
+    name: '转场旁白',
+    tone: 'source',
+    style: { flex: '14 1 0', marginLeft: '7px' },
+  },
+  {
+    id: 'narration-summary',
+    name: '总结旁白',
+    tone: 'source',
+    style: { flex: '12 1 0', marginLeft: '15px' },
+  },
+  {
+    id: 'narration-ending',
+    name: '片尾旁白',
+    tone: 'source',
+    style: { flex: '19 1 0', marginLeft: '9px' },
+  },
+]);
+const demoAudioTrackRows = computed(() => [
+  {
+    id: 'background-audio',
+    label: '背景音频',
+    selectable: false,
+    clips: demoAudioTrackClips,
+  },
+  {
+    id: 'narration-audio',
+    label: '旁白音频',
+    selectable: true,
+    clips: demoNarrationTrackClips,
+  },
+]);
 const timelinePlayheadPercent = computed(() => {
   const totalDuration = Math.max(1, Number(timeline.totalDuration) || 1);
   const currentTime = Math.min(
@@ -522,6 +835,38 @@ const timelineRulerMinorTicks = computed(() => {
   const { totalDuration, majorStep, minorStep } = timelineRulerScale.value;
   return buildTimelineTicks(totalDuration, minorStep, majorStep, false);
 });
+const audioTimelineRulerScale = computed(() => {
+  const targetMajorCount = Math.max(
+    2,
+    Math.min(12, Math.floor(audioTimelineRulerWidth.value / 84)),
+  );
+  const majorStep = getNiceTickStep(
+    0,
+    AUDIO_TIMELINE_DURATION,
+    targetMajorCount,
+  );
+
+  return {
+    totalDuration: AUDIO_TIMELINE_DURATION,
+    majorStep,
+    minorStep: majorStep / 5,
+  };
+});
+const audioTimelineRulerMajorTicks = computed(() => {
+  const { totalDuration, majorStep } = audioTimelineRulerScale.value;
+  const ticks = buildTimelineTicks(totalDuration, majorStep, majorStep, true);
+  if (!ticks.some((tick) => Math.abs(tick.value - totalDuration) < 0.0001)) {
+    ticks.push({ value: totalDuration, left: '100%' });
+  }
+  return ticks;
+});
+const audioTimelineRulerMinorTicks = computed(() => {
+  const { totalDuration, majorStep, minorStep } = audioTimelineRulerScale.value;
+  return buildTimelineTicks(totalDuration, minorStep, majorStep, false);
+});
+const audioTimelinePlayheadPercent = computed(
+  () => `${(audioTimelinePlayheadTime.value / AUDIO_TIMELINE_DURATION) * 100}%`,
+);
 const selectedClipTitle = computed(() => `${selectedVideoName.value}`);
 const selectedVideoTransform = computed(
   () => videoTransformStateCache[selectedVideoKey.value] || null,
@@ -2328,8 +2673,10 @@ function seekMainPlayerToTimelineTime(targetTime) {
   updatePlayerControls();
 }
 
-function seekMainPlayerByTimelineClientX(clientX) {
-  const track = timelineTrackRef.value;
+function seekMainPlayerByTimelineClientX(
+  clientX,
+  track = timelineTrackRef.value,
+) {
   if (!track) return;
 
   const rect = track.getBoundingClientRect();
@@ -2342,13 +2689,13 @@ function seekMainPlayerByTimelineClientX(clientX) {
 }
 
 // 播放头拖动实时 seek，结束拖动时移除全局事件监听。
-function startTimelinePlayheadDrag(event) {
+function startTimelinePlayheadDrag(event, track = timelineTrackRef.value) {
   event.preventDefault();
   event.stopPropagation();
   event.currentTarget.setPointerCapture?.(event.pointerId);
   timelinePreviewSeeking.value = false;
   timelinePlayheadDragging.value = true;
-  seekMainPlayerByTimelineClientX(event.clientX);
+  seekMainPlayerByTimelineClientX(event.clientX, track);
 
   if (timelinePlayheadMoveHandler) {
     window.removeEventListener('pointermove', timelinePlayheadMoveHandler);
@@ -2358,7 +2705,7 @@ function startTimelinePlayheadDrag(event) {
   }
 
   timelinePlayheadMoveHandler = (moveEvent) => {
-    seekMainPlayerByTimelineClientX(moveEvent.clientX);
+    seekMainPlayerByTimelineClientX(moveEvent.clientX, track);
   };
 
   timelinePlayheadUpHandler = () => {
@@ -2371,6 +2718,47 @@ function startTimelinePlayheadDrag(event) {
 
   window.addEventListener('pointermove', timelinePlayheadMoveHandler);
   window.addEventListener('pointerup', timelinePlayheadUpHandler);
+}
+
+function startEditorTimelinePlayheadDrag(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  event.currentTarget.setPointerCapture?.(event.pointerId);
+  audioTimelinePlayheadDragging.value = true;
+
+  const seekAudioTimeline = (clientX) => {
+    const ruler = editorTimelineRulerRef.value;
+    if (!ruler) return;
+
+    const rect = ruler.getBoundingClientRect();
+    const ratio = rect.width
+      ? Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
+      : 0;
+    audioTimelinePlayheadTime.value = ratio * AUDIO_TIMELINE_DURATION;
+  };
+
+  seekAudioTimeline(event.clientX);
+
+  if (audioTimelinePlayheadMoveHandler) {
+    window.removeEventListener('pointermove', audioTimelinePlayheadMoveHandler);
+  }
+  if (audioTimelinePlayheadUpHandler) {
+    window.removeEventListener('pointerup', audioTimelinePlayheadUpHandler);
+  }
+
+  audioTimelinePlayheadMoveHandler = (moveEvent) => {
+    seekAudioTimeline(moveEvent.clientX);
+  };
+  audioTimelinePlayheadUpHandler = () => {
+    audioTimelinePlayheadDragging.value = false;
+    window.removeEventListener('pointermove', audioTimelinePlayheadMoveHandler);
+    window.removeEventListener('pointerup', audioTimelinePlayheadUpHandler);
+    audioTimelinePlayheadMoveHandler = null;
+    audioTimelinePlayheadUpHandler = null;
+  };
+
+  window.addEventListener('pointermove', audioTimelinePlayheadMoveHandler);
+  window.addEventListener('pointerup', audioTimelinePlayheadUpHandler);
 }
 
 // 同一素材可能出现在多个模板区域中，统一计算并提交各区域偏移。
@@ -3797,6 +4185,12 @@ function updateTimelineRulerWidth() {
     timelineRulerWidth.value = width;
   }
 
+  const audioRulerWidth =
+    editorTimelineRulerRef.value?.getBoundingClientRect().width;
+  if (Number.isFinite(audioRulerWidth) && audioRulerWidth > 0) {
+    audioTimelineRulerWidth.value = audioRulerWidth;
+  }
+
   const trackWidth = timelineTrackRef.value?.clientWidth;
   if (Number.isFinite(trackWidth) && trackWidth > 0) {
     timelineTrackWidth.value = trackWidth;
@@ -4723,6 +5117,10 @@ async function confirmLogout() {
 // 点击页面空白处时关闭临时浮层。
 function handleWorkspaceClick() {
   closeAccountMenu();
+  activeAudioDropdownClipId.value = '';
+  hoveredAudioTextName.value = '';
+  hoveredSubtitleClip.value = null;
+  activeTrackVolumeId.value = '';
 }
 
 // 初始化页面数据、窗口监听和播放器尺寸观察。
@@ -4766,6 +5164,18 @@ onBeforeUnmount(() => {
   }
   if (timelinePlayheadUpHandler) {
     window.removeEventListener('pointerup', timelinePlayheadUpHandler);
+  }
+  if (audioTimelinePlayheadMoveHandler) {
+    window.removeEventListener('pointermove', audioTimelinePlayheadMoveHandler);
+  }
+  if (audioTimelinePlayheadUpHandler) {
+    window.removeEventListener('pointerup', audioTimelinePlayheadUpHandler);
+  }
+  if (trackVolumeMoveHandler) {
+    window.removeEventListener('pointermove', trackVolumeMoveHandler);
+  }
+  if (trackVolumeUpHandler) {
+    window.removeEventListener('pointerup', trackVolumeUpHandler);
   }
   if (modalPreviewProgressMoveHandler) {
     window.removeEventListener('pointermove', modalPreviewProgressMoveHandler);
@@ -4843,8 +5253,16 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div class="flex-1"></div>
+        <!-- <button
+          class="h-9 w-24 text-on-surface-variant hover:text-electric-blue shrink-0 flex items-center justify-center gap-1.5 bg-surface-container-low/50 shadow-sm rounded-lg transition-all active:scale-95 hover:bg-surface-container-high border border-outline-variant/20"
+          type="button"
+          @click="showCreateTemplate"
+        >
+          <span class="text-[13px] font-bold whitespace-nowrap">创建模板</span>
+        </button> -->
         <button
           class="h-9 w-24 text-on-surface-variant hover:text-electric-blue shrink-0 flex items-center justify-center gap-1.5 bg-surface-container-low/50 shadow-sm rounded-lg transition-all active:scale-95 hover:bg-surface-container-high border border-outline-variant/20"
+          type="button"
           @click="showDraftLibrary"
         >
           <span class="text-[13px] font-bold whitespace-nowrap">工程库</span>
@@ -4895,15 +5313,6 @@ onBeforeUnmount(() => {
             >
               <AppIcon name="lock_reset" :size="18" />
               <span>修改密码</span>
-            </button>
-            <div class="mx-2 my-1 border-t border-outline-variant/30"></div>
-            <button
-              class="w-full flex items-center gap-3 px-4 py-2.5 text-[13px] text-on-surface-variant hover:bg-electric-blue/10 hover:text-white transition-colors text-left"
-              type="button"
-              @click="showCreateTemplate"
-            >
-              <AppIcon name="add_box" :size="18" />
-              <span>创建模板</span>
             </button>
             <div class="mx-2 my-1 border-t border-outline-variant/30"></div>
             <button
@@ -5693,54 +6102,387 @@ onBeforeUnmount(() => {
               class="timeline-dock relative shrink-0"
               :class="{ 'timeline-collapsed': timelineCollapsed }"
             >
-            <button
-              v-if="timelineToggleVisible"
-              class="absolute left-1/2 -translate-x-1/2 z-[70] h-7 w-12 rounded-t-full bg-surface-container-high border border-outline-variant text-white shadow-lg flex items-center justify-center transition-all duration-200"
-              :class="timelineCollapsed ? 'top-[-28px]' : 'top-0'"
-              @click="toggleTimelineContainer"
-            >
-              <AppIcon
-                :name="
-                  timelineCollapsed
-                    ? 'keyboard_arrow_up'
-                    : 'keyboard_arrow_down'
-                "
-                :size="20"
-              />
-              <span class="sr-only">展开时间线</span>
-            </button>
-            <div
-              class="timeline-panel bg-surface-container-lowest border-t border-outline-variant flex flex-col"
-            >
+              <button
+                v-if="timelineToggleVisible"
+                class="absolute left-1/2 -translate-x-1/2 z-[70] h-7 w-12 rounded-t-full bg-surface-container-high border border-outline-variant text-white shadow-lg flex items-center justify-center transition-all duration-200"
+                :class="timelineCollapsed ? 'top-[-28px]' : 'top-0'"
+                @click="toggleTimelineContainer"
+              >
+                <AppIcon
+                  :name="
+                    timelineCollapsed
+                      ? 'keyboard_arrow_up'
+                      : 'keyboard_arrow_down'
+                  "
+                  :size="20"
+                />
+                <span class="sr-only">展开时间线</span>
+              </button>
               <div
-                class="track-area custom-scrollbar overflow-x-auto"
-                style="background: #030d25; padding: 26px 12px 60px"
+                class="timeline-panel bg-surface-container-lowest border-t border-outline-variant flex flex-col"
               >
                 <div
-                  class="w-full flex items-center gap-3 px-4 py-3 bg-surface-container-low border border-outline-variant rounded"
+                  class="track-area custom-scrollbar overflow-x-auto"
+                  style="background: #030d25; padding: 40px 12px 12px"
                 >
-                  <label
-                    class="text-[12px] font-bold text-on-surface-variant shrink-0 whitespace-nowrap"
-                    for="subtitle-edit-input"
-                    >标题编辑</label
+                  <div class="timeline-editor-tracks">
+                    <div class="audio-timeline-ruler-row">
+                      <span aria-hidden="true"></span>
+                      <div
+                        ref="editorTimelineRulerRef"
+                        class="audio-timeline-ruler"
+                        aria-label="音频时间刻度"
+                      >
+                        <span
+                          v-for="tick in audioTimelineRulerMinorTicks"
+                          :key="`editor-minor-${tick.value}`"
+                          class="timeline-ruler-tick is-minor"
+                          :style="{ left: tick.left }"
+                        ></span>
+                        <span
+                          v-for="tick in audioTimelineRulerMajorTicks"
+                          :key="`editor-major-${tick.value}`"
+                          class="timeline-ruler-tick is-major"
+                          :style="{ left: tick.left }"
+                        ></span>
+                        <span
+                          v-for="tick in audioTimelineRulerMajorTicks"
+                          :key="`editor-label-${tick.value}`"
+                          class="timeline-ruler-label"
+                          :class="{
+                            'is-start': tick.value === 0,
+                            'is-end':
+                              Math.abs(
+                                tick.value -
+                                  audioTimelineRulerScale.totalDuration,
+                              ) < 0.0001,
+                          }"
+                          :style="{ left: tick.left }"
+                        >
+                          {{ formatTimelineRulerTick(tick.value) }}
+                        </span>
+                        <button
+                          class="timeline-playhead editor-timeline-playhead"
+                          :class="{
+                            'is-dragging': audioTimelinePlayheadDragging,
+                          }"
+                          :style="{ left: audioTimelinePlayheadPercent }"
+                          type="button"
+                          aria-label="音频时间轴播放指针"
+                          @pointerdown="startEditorTimelinePlayheadDrag"
+                        >
+                          <span class="timeline-playhead-handle"></span>
+                          <span class="timeline-playhead-line"></span>
+                        </button>
+                      </div>
+                      <span aria-hidden="true"></span>
+                    </div>
+
+                    <div
+                      v-for="trackRow in demoAudioTrackRows"
+                      :key="trackRow.id"
+                      class="editor-track-row audio-control-track-row"
+                    >
+                      <div class="editor-track-label">
+                        <AppIcon name="volume_up" :size="15" />
+                        <span>{{ trackRow.label }}</span>
+                      </div>
+                      <div class="editor-track-lane audio-track-lane">
+                        <div
+                          v-for="clip in trackRow.clips"
+                          :key="clip.id"
+                          class="editor-track-clip audio-track-clip"
+                          :class="`is-${clip.tone}`"
+                          :style="clip.style"
+                        >
+                          <div class="audio-clip-content">
+                            <button
+                              v-if="trackRow.selectable"
+                              type="button"
+                              class="audio-dropdown-trigger"
+                              :class="{
+                                'is-open':
+                                  activeAudioDropdownClipId === clip.id,
+                              }"
+                              :aria-expanded="
+                                activeAudioDropdownClipId === clip.id
+                              "
+                              :aria-label="`${clip.name}音频选择`"
+                              @click.stop="toggleAudioDropdown(clip.id, $event)"
+                              @pointerdown.stop
+                            >
+                              <span class="audio-dropdown-selection">
+                                {{ demoAudioSelections[clip.id] }}
+                              </span>
+                              <span
+                                class="clip-volume-icon"
+                                :class="{
+                                  'is-active': activeTrackVolumeId === clip.id,
+                                }"
+                                role="button"
+                                tabindex="0"
+                                :aria-label="`${clip.name}音量设置`"
+                                :title="`${clip.name}音量设置`"
+                                @click.stop="
+                                  toggleTrackVolumePopup(clip.id, $event)
+                                "
+                                @keydown.enter.stop.prevent="
+                                  toggleTrackVolumePopup(clip.id, $event)
+                                "
+                                @pointerdown.stop
+                              >
+                                <AppIcon name="audio_settings" :size="12" />
+                              </span>
+                              <AppIcon name="expand_more" :size="11" />
+                            </button>
+                            <span v-else class="audio-fixed-clip-name">
+                              <span class="audio-fixed-clip-label">
+                                {{ demoAudioSelections[clip.id] }}
+                              </span>
+                              <span
+                                class="clip-volume-icon"
+                                :class="{
+                                  'is-active': activeTrackVolumeId === clip.id,
+                                }"
+                                role="button"
+                                tabindex="0"
+                                :aria-label="`${clip.name}音量设置`"
+                                :title="`${clip.name}音量设置`"
+                                @click.stop="
+                                  toggleTrackVolumePopup(clip.id, $event)
+                                "
+                                @keydown.enter.stop.prevent="
+                                  toggleTrackVolumePopup(clip.id, $event)
+                                "
+                                @pointerdown.stop
+                              >
+                                <AppIcon name="audio_settings" :size="12" />
+                              </span>
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        class="track-volume-button"
+                        :class="{
+                          'is-active': activeTrackVolumeId === trackRow.id,
+                        }"
+                        :aria-label="`${trackRow.label}音量设置`"
+                        :title="`${trackRow.label}音量设置`"
+                        @click.stop="
+                          toggleTrackVolumePopup(trackRow.id, $event)
+                        "
+                        @pointerdown.stop
+                      >
+                        <AppIcon name="audio_settings" :size="14" />
+                      </button>
+                    </div>
+
+                    <Teleport to="body">
+                      <div
+                        v-if="activeTrackVolumeId"
+                        class="track-volume-popup"
+                        :style="trackVolumePopupStyle"
+                        @click.stop
+                        @pointerdown.stop
+                      >
+                        <div class="track-volume-control">
+                          <button
+                            class="track-volume-adjust-button"
+                            type="button"
+                            aria-label="增大音量"
+                            :disabled="trackVolumes[activeTrackVolumeId] >= 100"
+                            @click="adjustTrackVolume(activeTrackVolumeId, 1)"
+                          >
+                            <AppIcon name="add" :size="12" />
+                          </button>
+                          <div
+                            ref="trackVolumeProgressRef"
+                            class="track-volume-progress"
+                            :class="{ 'is-dragging': trackVolumeDragging }"
+                            role="progressbar"
+                            aria-label="当前音量"
+                            aria-valuemin="0"
+                            aria-valuemax="100"
+                            :aria-valuenow="trackVolumes[activeTrackVolumeId]"
+                            @pointerdown="startTrackVolumeDrag"
+                          >
+                            <span
+                              :style="{
+                                height: `${trackVolumes[activeTrackVolumeId]}%`,
+                              }"
+                            ></span>
+                          </div>
+                          <span class="track-volume-value" aria-live="polite">
+                            {{ trackVolumes[activeTrackVolumeId] }}
+                          </span>
+                          <button
+                            class="track-volume-adjust-button"
+                            type="button"
+                            aria-label="减小音量"
+                            :disabled="trackVolumes[activeTrackVolumeId] <= 0"
+                            @click="adjustTrackVolume(activeTrackVolumeId, -1)"
+                          >
+                            <AppIcon name="remove" :size="12" />
+                          </button>
+                        </div>
+                      </div>
+                    </Teleport>
+
+                    <Teleport to="body">
+                      <div
+                        v-if="activeAudioDropdownClipId"
+                        class="audio-dropdown-portal"
+                        :style="audioDropdownMenuStyle"
+                        @click.stop
+                        @pointerdown.stop
+                      >
+                        <div
+                          class="audio-dropdown-menu custom-scrollbar"
+                          role="listbox"
+                        >
+                          <div
+                            v-for="audioName in DEMO_AUDIO_OPTIONS"
+                            :key="audioName"
+                            class="audio-dropdown-option"
+                            :class="{
+                              'is-selected':
+                                demoAudioSelections[
+                                  activeAudioDropdownClipId
+                                ] === audioName,
+                            }"
+                            role="option"
+                            :aria-selected="
+                              demoAudioSelections[activeAudioDropdownClipId] ===
+                              audioName
+                            "
+                            tabindex="0"
+                            @mouseenter="hoveredAudioTextName = audioName"
+                            @mouseleave="hoveredAudioTextName = ''"
+                            @focus="hoveredAudioTextName = audioName"
+                            @blur="hoveredAudioTextName = ''"
+                            @click="
+                              selectDemoAudio(
+                                activeAudioDropdownClipId,
+                                audioName,
+                              )
+                            "
+                            @keydown.enter.prevent="
+                              selectDemoAudio(
+                                activeAudioDropdownClipId,
+                                audioName,
+                              )
+                            "
+                          >
+                            <span class="audio-dropdown-option-name">{{
+                              audioName
+                            }}</span>
+                            <span
+                              class="audio-option-play-icon"
+                              title="播放功能待接入"
+                              aria-hidden="true"
+                              @click.stop
+                              @pointerdown.stop
+                            >
+                              <AppIcon name="play_arrow" :size="13" />
+                            </span>
+                          </div>
+                        </div>
+
+                        <div
+                          v-if="hoveredAudioTextName"
+                          class="audio-option-text-popup"
+                        >
+                          <div class="audio-option-text-popup-heading">
+                            <AppIcon name="description" :size="14" />
+                            <span>{{ hoveredAudioTextName }}</span>
+                          </div>
+                          <p>
+                            {{
+                              DEMO_AUDIO_TEXTS[hoveredAudioTextName] ||
+                              '暂无对应文本。'
+                            }}
+                          </p>
+                        </div>
+                      </div>
+                    </Teleport>
+
+                    <div class="editor-track-row">
+                      <div class="editor-track-label">
+                        <AppIcon name="subtitles" :size="15" />
+                        <span>字幕</span>
+                      </div>
+                      <div class="editor-track-lane subtitle-track-lane">
+                        <div
+                          v-for="clip in DEMO_SUBTITLE_TRACK_CLIPS"
+                          :key="clip.id"
+                          class="editor-track-clip subtitle-track-clip"
+                          :style="clip.style"
+                        >
+                          <div class="subtitle-clip-content">
+                            <span class="subtitle-clip-label">{{
+                              clip.label
+                            }}</span>
+                            <button
+                              type="button"
+                              class="subtitle-text-button"
+                              :aria-label="`查看${clip.label}完整文本`"
+                              title="查看字幕文本"
+                              @click.stop
+                              @pointerdown.stop
+                              @mouseenter="showSubtitleClipText(clip, $event)"
+                              @mouseleave="hideSubtitleClipText"
+                              @focus="showSubtitleClipText(clip, $event)"
+                              @blur="hideSubtitleClipText"
+                            >
+                              <AppIcon name="description" :size="12" />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <Teleport to="body">
+                      <div
+                        v-if="hoveredSubtitleClip"
+                        class="subtitle-text-popup"
+                        :style="subtitleTextPopupStyle"
+                      >
+                        <div class="subtitle-text-popup-heading">
+                          <AppIcon name="subtitles" :size="14" />
+                          <span>{{ hoveredSubtitleClip.label }}</span>
+                        </div>
+                        <p>{{ hoveredSubtitleClip.text }}</p>
+                      </div>
+                    </Teleport>
+                  </div>
+
+                  <div
+                    class="timeline-title-editor w-full flex items-center gap-3 px-4 py-3 bg-surface-container-low border border-outline-variant rounded"
                   >
-                  <input
-                    id="subtitle-edit-input"
-                    v-model="subtitleText"
-                    class="w-[360px] max-w-[42vw] h-9 bg-surface-container-lowest/50 border border-outline-variant/30 rounded px-3 text-[12px] text-on-surface placeholder:text-on-surface-variant/50 focus:border-electric-blue outline-none transition-colors"
-                    placeholder="输入标题内容"
-                    type="text"
-                  />
-                  <button
-                    class="h-9 px-4 bg-electric-blue text-white rounded text-[12px] font-bold shadow-lg shadow-electric-blue/20 hover:brightness-110 active:scale-95 transition-all shrink-0"
-                    :disabled="subtitleApplying"
-                    @click="applySubtitleChange"
-                  >
-                    {{ subtitleApplying ? '应用中...' : '应用更改' }}
-                  </button>
+                    <label
+                      class="text-[12px] font-bold text-on-surface-variant shrink-0 whitespace-nowrap"
+                      for="subtitle-edit-input"
+                      >标题编辑</label
+                    >
+                    <input
+                      id="subtitle-edit-input"
+                      v-model="subtitleText"
+                      class="w-[360px] max-w-[42vw] h-9 bg-surface-container-lowest/50 border border-outline-variant/30 rounded px-3 text-[12px] text-on-surface placeholder:text-on-surface-variant/50 focus:border-electric-blue outline-none transition-colors"
+                      placeholder="输入标题内容"
+                      type="text"
+                    />
+                    <button
+                      class="h-9 px-4 bg-electric-blue text-white rounded text-[12px] font-bold shadow-lg shadow-electric-blue/20 hover:brightness-110 active:scale-95 transition-all shrink-0"
+                      :disabled="subtitleApplying"
+                      @click="applySubtitleChange"
+                    >
+                      {{ subtitleApplying ? '应用中...' : '应用更改' }}
+                    </button>
+                  </div>
                 </div>
               </div>
-            </div>
             </div>
           </Teleport>
 
@@ -6927,10 +7669,544 @@ onBeforeUnmount(() => {
   height: 100%;
   max-height: 100%;
   min-height: 0;
-  overflow-x: hidden;
+  overflow-x: auto;
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 12px 12px 56px;
+}
+
+.timeline-editor-tracks {
+  display: grid;
+  min-width: 620px;
+  gap: 5px;
+  margin-bottom: 8px;
+}
+
+.audio-timeline-ruler-row {
+  display: grid;
+  height: 26px;
+  min-width: 0;
+  grid-template-columns: 88px minmax(0, 1fr) 26px;
+}
+
+.audio-timeline-ruler {
+  position: relative;
+  height: 26px;
+  border-top: 1px solid rgba(74, 142, 255, 0.24);
+  border-bottom: 1px solid rgba(74, 142, 255, 0.24);
+  border-right: 1px solid rgba(217, 226, 255, 0.4);
+  background: rgba(16, 27, 51, 0.72);
+}
+
+.audio-timeline-ruler .timeline-ruler-tick.is-minor {
+  height: 6px;
+}
+
+.audio-timeline-ruler .timeline-ruler-tick.is-major {
+  height: 12px;
+}
+
+.audio-timeline-ruler .timeline-ruler-label {
+  top: 13px;
+  font-size: 8px;
+  line-height: 10px;
+}
+
+.audio-timeline-ruler .editor-timeline-playhead {
+  z-index: 90;
+}
+
+.audio-timeline-ruler .editor-timeline-playhead .timeline-playhead-line {
+  top: 8px;
+  bottom: auto;
+  height: 129px;
+}
+
+.editor-track-row {
+  display: grid;
+  height: 32px;
+  min-width: 0;
+  grid-template-columns: 88px minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 5px;
+  background: rgba(15, 25, 47, 0.82);
+}
+
+.editor-track-label {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 0 9px;
+  border-right: 1px solid rgba(148, 163, 184, 0.16);
+  color: rgba(203, 213, 225, 0.78);
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.audio-control-track-row {
+  grid-template-columns: 88px minmax(0, 1fr) 26px;
+}
+
+.track-volume-button {
+  display: flex;
+  width: 26px;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  color: rgba(203, 213, 225, 0.72);
+  background: transparent;
+  cursor: pointer;
+}
+
+.track-volume-button:hover,
+.track-volume-button.is-active {
+  color: #ffffff;
+  background: transparent;
+}
+
+.track-volume-popup {
+  position: fixed;
+  z-index: 1002;
+  width: 34px;
+  box-sizing: border-box;
+  padding: 4px;
+  border: 1px solid rgba(96, 165, 250, 0.34);
+  border-radius: 6px;
+  color: rgba(226, 232, 240, 0.9);
+  background: #111827;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.5);
+}
+
+.track-volume-control {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+}
+
+.track-volume-adjust-button {
+  display: flex;
+  width: 16px;
+  height: 14px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  color: rgba(226, 232, 240, 0.78);
+  background: transparent;
+  cursor: pointer;
+}
+
+.track-volume-adjust-button:hover:not(:disabled) {
+  color: #ffffff;
+  background: transparent;
+}
+
+.track-volume-adjust-button:disabled {
+  opacity: 0.36;
+  cursor: default;
+}
+
+.track-volume-progress {
+  position: relative;
+  width: 14px;
+  height: 32px;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.track-volume-progress::before {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 6px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.2);
+  content: '';
+  transform: translateX(-50%);
+}
+
+.track-volume-progress span {
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  z-index: 1;
+  width: 6px;
+  border-radius: 999px;
+  background: #60a5fa;
+  box-shadow: 0 0 6px rgba(96, 165, 250, 0.35);
+  transform: translateX(-50%);
+  transition: height 0.12s ease;
+}
+
+.track-volume-progress.is-dragging span {
+  box-shadow: 0 0 8px rgba(96, 165, 250, 0.7);
+  transition: none;
+}
+
+.track-volume-value {
+  min-width: 24px;
+  color: rgba(226, 232, 240, 0.86);
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 9px;
+  text-align: center;
+}
+
+.editor-track-lane {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+    #050d20;
+  background-size: 40px 100%;
+}
+
+.editor-track-clip {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  min-width: 48px;
+  overflow: hidden;
+  border-radius: 3px;
+}
+
+.audio-track-lane,
+.subtitle-track-lane {
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+
+.audio-track-lane > .editor-track-clip,
+.subtitle-track-lane > .editor-track-clip {
+  position: relative;
+  top: auto;
+  bottom: auto;
+  height: 24px;
+  min-width: 0;
+}
+
+.audio-track-clip {
+  border: 1px solid rgba(52, 211, 153, 0.54);
+  background: rgba(16, 185, 129, 0.2);
+}
+
+.audio-track-clip.is-music {
+  border-color: rgba(56, 189, 248, 0.58);
+  background: rgba(14, 165, 233, 0.22);
+}
+
+.audio-track-clip.is-effect {
+  border-color: rgba(192, 132, 252, 0.6);
+  background: rgba(168, 85, 247, 0.24);
+}
+
+.subtitle-track-clip {
+  border: 1px solid rgba(96, 165, 250, 0.58);
+  background: rgba(59, 130, 246, 0.24);
+}
+
+.subtitle-clip-content {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  align-items: center;
+}
+
+.subtitle-clip-label {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  padding-left: 6px;
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 9px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.65);
+  white-space: nowrap;
+}
+
+.subtitle-text-button {
+  display: flex;
+  width: 20px;
+  height: 100%;
+  flex: 0 0 20px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-left: 1px solid rgba(255, 255, 255, 0.14);
+  color: rgba(191, 219, 254, 0.8);
+  background: rgba(2, 6, 23, 0.16);
+  cursor: pointer;
+}
+
+.subtitle-text-button:hover,
+.subtitle-text-button:focus {
+  outline: none;
+  color: #ffffff;
+  background: rgba(96, 165, 250, 0.28);
+}
+
+.subtitle-text-popup {
+  position: fixed;
+  z-index: 1001;
+  width: 240px;
+  overflow: hidden;
+  border: 1px solid rgba(96, 165, 250, 0.4);
+  border-radius: 6px;
+  color: rgba(226, 232, 240, 0.9);
+  background: #111827;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.5);
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.subtitle-text-popup-heading {
+  display: flex;
+  height: 34px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+  color: rgba(147, 197, 253, 0.96);
+  font-weight: 700;
+}
+
+.subtitle-text-popup p {
+  margin: 0;
+  padding: 10px;
+  line-height: 1.55;
+}
+
+.audio-clip-content {
+  position: relative;
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  align-items: stretch;
+}
+
+.audio-fixed-clip-name {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  overflow: hidden;
+  padding: 0 3px 0 7px;
+  color: rgba(255, 255, 255, 0.94);
+  font-size: 9px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.audio-fixed-clip-label {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.audio-dropdown-trigger {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 2px;
+  justify-content: center;
+  padding: 0 4px 0 6px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 2px;
+  outline: none;
+  color: rgba(255, 255, 255, 0.94);
+  background: transparent;
+  font-size: 9px;
+  font-weight: 700;
+  cursor: pointer;
+  transition:
+    color 0.15s ease,
+    background 0.15s ease;
+}
+
+.audio-dropdown-selection {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.clip-volume-icon {
+  display: flex;
+  width: 18px;
+  height: 100%;
+  flex: 0 0 18px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  color: rgba(203, 213, 225, 0.68);
+  cursor: pointer;
+}
+
+.clip-volume-icon:hover,
+.clip-volume-icon:focus,
+.clip-volume-icon.is-active {
+  outline: none;
+  color: #ffffff;
+  background: rgba(96, 165, 250, 0.2);
+}
+
+.audio-dropdown-trigger:hover,
+.audio-dropdown-trigger.is-open {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.audio-dropdown-trigger.is-open svg {
+  transform: rotate(180deg);
+}
+
+.audio-dropdown-portal {
+  position: fixed;
+  z-index: 1000;
+  width: 184px;
+}
+
+.audio-dropdown-menu {
+  width: 100%;
+  max-height: 176px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 6px;
+  background: #111827;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.48);
+}
+
+.audio-dropdown-option {
+  display: flex;
+  height: 28px;
+  align-items: center;
+  gap: 5px;
+  padding-left: 8px;
+  border-radius: 4px;
+  color: rgba(226, 232, 240, 0.84);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.audio-dropdown-option-name {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.audio-dropdown-option:hover,
+.audio-dropdown-option:focus,
+.audio-dropdown-option.is-selected {
+  outline: none;
+  color: #ffffff;
+  background: rgba(59, 130, 246, 0.16);
+}
+
+.audio-option-play-icon {
+  display: flex;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  color: rgba(148, 163, 184, 0.78);
+  background: transparent;
+  cursor: default;
+}
+
+.audio-option-play-icon:hover {
+  color: #ffffff;
+  background: rgba(96, 165, 250, 0.24);
+}
+
+.audio-option-text-popup {
+  position: absolute;
+  top: 0;
+  left: calc(100% + 7px);
+  z-index: 1;
+  width: 230px;
+  overflow: hidden;
+  border: 1px solid rgba(96, 165, 250, 0.34);
+  border-radius: 6px;
+  color: rgba(226, 232, 240, 0.88);
+  background: #111827;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.48);
+  font-size: 11px;
+}
+
+.audio-option-text-popup-heading {
+  display: flex;
+  height: 34px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 7px 0 10px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+  color: rgba(147, 197, 253, 0.94);
+  font-weight: 700;
+}
+
+.audio-option-text-popup-heading span {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.audio-option-text-popup p {
+  margin: 0;
+  padding: 10px;
+  line-height: 1.55;
+}
+
+.editor-track-clip-name {
+  position: relative;
+  z-index: 1;
+  display: block;
+  overflow: hidden;
+  padding: 0 7px;
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 24px;
+  text-overflow: ellipsis;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.75);
+  white-space: nowrap;
+}
+
+.editor-track-empty {
+  display: flex;
+  height: 100%;
+  align-items: center;
+  padding: 0 8px;
+  color: rgba(148, 163, 184, 0.42);
+  font-size: 9px;
+}
+
+.timeline-title-editor {
+  min-width: 620px;
 }
 
 .track {
