@@ -28,6 +28,12 @@ const n = (value, fallback = 0) => {
 };
 
 const opacity = (value) => Math.min(1, Math.max(0, n(value, 1)));
+const progress = (value) => Math.min(1, Math.max(0, n(value, 0)));
+const percent = (value, fallback = 0) =>
+  Math.min(100, Math.max(0, n(value, fallback)));
+const signedPercent = (value, fallback = 0) =>
+  Math.min(100, Math.max(-100, n(value, fallback)));
+const bool = (value) => value === true || value === 'true' || value === '1';
 
 const directChild = (node, tag) =>
   Array.from(node?.children ?? []).find((child) => child.tagName === tag) ??
@@ -55,6 +61,7 @@ export function buildXml(model) {
     `            <duration>${n(model.duration)}</duration>`,
     `            <resolution>${text(model.resolution)}</resolution>`,
     `            <style>${text(model.videoStyle || 'cinematic')}</style>`,
+    `            <progress>${progress(model.progress)}</progress>`,
     `            <demo-path>${text(model.demoPath)}</demo-path>`,
     '        </video>',
     '        <tracks>',
@@ -83,12 +90,20 @@ export function buildXml(model) {
     );
   }
 
+  if (model.tracks.recording) {
+    lines.push(
+      '            <track id="recording" z-index="4">',
+      `                <filepath>${text(model.tracks.recording)}</filepath>`,
+      '            </track>',
+    );
+  }
+
   lines.push('        </tracks>');
 
   model.mediaGroups.forEach((group) => {
     lines.push(
       `        <media-asset id="${attr(group.id)}" name="${attr(group.name)}">`,
-      '            <type>video</type>',
+      `            <type>${group.mediaType === 'audio' ? 'audio' : 'video'}</type>`,
       '            <constraints>',
       `                <minDuration>${n(group.minDuration)}</minDuration>`,
       `                <maxDuration>${n(group.maxDuration)}</maxDuration>`,
@@ -109,7 +124,7 @@ export function buildXml(model) {
 
   model.clips.forEach((clip) => {
     lines.push(
-      `            <clip id="${attr(clip.id)}" name="${attr(clip.name)}">`,
+      `            <clip id="${attr(clip.id)}" name="${attr(clip.name)}" material-type="${attr(clip.materialType === 'fixed' ? 'fixed' : 'variable')}">`,
       `                <starttime>${n(clip.starttime)}</starttime>`,
       `                <duration>${n(clip.duration)}</duration>`,
     );
@@ -125,6 +140,7 @@ export function buildXml(model) {
         `                        <speed>${n(area.speed, 1)}</speed>`,
         `                        <rotate>${n(area.rotate)}</rotate>`,
         '                    </transform>',
+        `                    <beauty lut-style="${attr(area.beauty?.lutStyle || 'none')}" lut-intensity="${attr(percent(area.beauty?.lutIntensity, 100))}" skin-tone="${attr(area.beauty?.skinTone || 'off')}" skin-temperature="${attr(signedPercent(area.beauty?.skinTemperature))}" skin-intensity="${attr(percent(area.beauty?.skinIntensity, 60))}" smoothing="${attr(percent(area.beauty?.smoothing))}" whitening="${attr(percent(area.beauty?.whitening))}" stabilization="${attr(Boolean(area.beauty?.stabilization))}" one-click="${attr(Boolean(area.beauty?.oneClickBeauty))}" />`,
         '                    <destination>',
         `                        <position x="${attr(n(area.x))}" y="${attr(n(area.y))}" />`,
         `                        <width>${n(area.width, 1920)}</width>`,
@@ -187,6 +203,13 @@ export function parseXml(xmlText) {
   const assetIdMap = new Map();
   const mediaGroups = directChildren(template, 'media-asset').map(
     (groupNode) => {
+      const groupName = groupNode.getAttribute('name') || '未命名目录';
+      const mediaType =
+        childText(groupNode, 'type', 'video') === 'audio' ||
+        groupName === '默认音频' ||
+        groupName === '录音音频'
+          ? 'audio'
+          : 'video';
       const constraints = directChild(groupNode, 'constraints');
       const assetsNode = directChild(groupNode, 'default-asset');
       const assets = directChildren(assetsNode, 'asset').map((assetNode) => {
@@ -199,6 +222,7 @@ export function parseXml(xmlText) {
           name: filepathName(filepath),
           filepath,
           sourcePath: '',
+          mediaType,
           thumbnailUrl: '',
           thumbnailStatus: 'unavailable',
           durationMs: 0,
@@ -209,7 +233,8 @@ export function parseXml(xmlText) {
       });
       return {
         id: generateId(),
-        name: groupNode.getAttribute('name') || '未命名目录',
+        name: groupName,
+        mediaType,
         minDuration: n(childText(constraints, 'minDuration'), 3000),
         maxDuration: n(childText(constraints, 'maxDuration'), 10000),
         expanded: true,
@@ -224,6 +249,7 @@ export function parseXml(xmlText) {
     const areas = directChildren(clipNode, 'area').map(
       (areaNode, areaIndex) => {
         const transform = directChild(areaNode, 'transform');
+        const beauty = directChild(areaNode, 'beauty');
         const destination = directChild(areaNode, 'destination');
         const position = directChild(destination, 'position');
         const oldAssetId = areaNode.getAttribute('asset-id') || '';
@@ -238,6 +264,25 @@ export function parseXml(xmlText) {
           mirror: childText(transform, 'mirror', 'none') || 'none',
           speed: n(childText(transform, 'speed'), 1),
           rotate: n(childText(transform, 'rotate'), 0),
+          beauty: {
+            lutStyle: beauty?.getAttribute('lut-style') || 'none',
+            lutIntensity: percent(
+              beauty?.getAttribute('lut-intensity'),
+              100,
+            ),
+            skinTone: beauty?.getAttribute('skin-tone') || 'off',
+            skinTemperature: signedPercent(
+              beauty?.getAttribute('skin-temperature'),
+            ),
+            skinIntensity: percent(
+              beauty?.getAttribute('skin-intensity'),
+              60,
+            ),
+            smoothing: percent(beauty?.getAttribute('smoothing')),
+            whitening: percent(beauty?.getAttribute('whitening')),
+            stabilization: bool(beauty?.getAttribute('stabilization')),
+            oneClickBeauty: bool(beauty?.getAttribute('one-click')),
+          },
           x: n(position?.getAttribute('x')),
           y: n(position?.getAttribute('y')),
           width: n(childText(destination, 'width'), 1920),
@@ -277,6 +322,10 @@ export function parseXml(xmlText) {
     return {
       id: generateId(),
       name: clipNode.getAttribute('name') || `片段 ${clipIndex + 1}`,
+      materialType:
+        clipNode.getAttribute('material-type') === 'fixed'
+          ? 'fixed'
+          : 'variable',
       starttime: n(childText(clipNode, 'starttime')),
       duration: clipDuration,
       areas,
@@ -296,11 +345,13 @@ export function parseXml(xmlText) {
     duration: n(childText(video, 'duration')),
     resolution: childText(video, 'resolution', '1920*1080') || '1920*1080',
     videoStyle: childText(video, 'style', 'cinematic') || 'cinematic',
+    progress: progress(childText(video, 'progress')),
     demoPath: childText(video, 'demo-path'),
     tracks: {
       background: readTrackPath('bg'),
       overlay: readTrackPath('overlay'),
       audioBackground: readTrackPath('audio-bg'),
+      recording: readTrackPath('recording'),
     },
     mediaGroups,
     clips,

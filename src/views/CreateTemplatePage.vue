@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
@@ -22,6 +22,7 @@ import {
   Maximize2,
   Menu,
   MoreHorizontal,
+  Music2,
   Pencil,
   Play,
   Plus,
@@ -100,6 +101,22 @@ const fontOptions = [
   'Arial',
   'Helvetica',
 ];
+const DEFAULT_AREA_BEAUTY_SETTINGS = Object.freeze({
+  lutStyle: 'none',
+  lutIntensity: 100,
+  skinTone: 'off',
+  skinTemperature: 0,
+  skinIntensity: 60,
+  smoothing: 0,
+  whitening: 0,
+  stabilization: false,
+  oneClickBeauty: false,
+});
+const AREA_SKIN_TONE_OPTIONS = Object.freeze([
+  { value: 'off', label: '不设置', color: 'transparent' },
+  { value: 'natural', label: '白皙', color: '#fddcbe' },
+  { value: 'warm', label: '原生', color: '#d5a273' },
+]);
 const AREA_CANVAS_WIDTH = 1920;
 const AREA_CANVAS_HEIGHT = 1080;
 const AREA_ASPECT_WIDTH = 16;
@@ -117,6 +134,21 @@ const THUMBNAIL_CONCURRENCY = 2;
 const DROPPED_AREA_WIDTH = 960;
 const DROPPED_AREA_HEIGHT = 540;
 
+const createDefaultMediaGroups = () =>
+  [
+    { name: '人物镜头', mediaType: 'video' },
+    { name: '默认音频', mediaType: 'audio' },
+    { name: '录音音频', mediaType: 'audio' },
+  ].map(({ name, mediaType }) => ({
+    id: generateId(),
+    name,
+    mediaType,
+    minDuration: 3000,
+    maxDuration: 10000,
+    expanded: true,
+    assets: [],
+  }));
+
 const createInitialModel = () => ({
   id: generateId(),
   clipsId: generateId(),
@@ -124,13 +156,15 @@ const createInitialModel = () => ({
   duration: 0,
   resolution: '1920*1080',
   videoStyle: 'cinematic',
+  progress: 0,
   demoPath: '',
   tracks: {
     background: '',
     overlay: '',
     audioBackground: '',
+    recording: '',
   },
-  mediaGroups: [],
+  mediaGroups: createDefaultMediaGroups(),
   clips: [],
 });
 
@@ -140,11 +174,16 @@ const selectedFilePaths = reactive({
   background: '',
   overlay: '',
   audioBackground: '',
+  recording: '',
 });
 const selectedClipId = ref('');
 const areaDialogOpen = ref(false);
 const areaDraft = ref(null);
-const areaMainPaneRef = ref(null);
+const areaModalSectionsExpanded = reactive({
+  transform: true,
+  position: true,
+  beauty: true,
+});
 const areaAssetGroupFilter = ref('all');
 const areaCanvasDragOver = ref(false);
 const draggedAreaAssetId = ref('');
@@ -176,7 +215,6 @@ const areaContextMenu = reactive({
 let areaInteraction = null;
 let subtitleInteraction = null;
 let timelineEditSnapshot = null;
-let areaAssetDragScrollContainer = null;
 let activeThumbnailJobs = 0;
 let thumbnailPageDisposed = false;
 const thumbnailQueue = [];
@@ -195,26 +233,34 @@ const allAssets = computed(() =>
     })),
   ),
 );
+const allVideoAssets = computed(() =>
+  allAssets.value.filter((asset) => asset.mediaType !== 'audio'),
+);
 const areaAssetGroupTabs = computed(() => [
   {
     id: 'all',
     name: '全部',
-    count: allAssets.value.length,
+    count: allVideoAssets.value.length,
   },
-  ...model.mediaGroups.map((group) => ({
-    id: group.id,
-    name: group.name,
-    count: group.assets.length,
-  })),
+  ...model.mediaGroups
+    .filter((group) => !isAudioGroup(group))
+    .map((group) => ({
+      id: group.id,
+      name: group.name,
+      count: group.assets.length,
+    })),
 ]);
 const areaPickerAssets = computed(() => {
-  if (areaAssetGroupFilter.value === 'all') return allAssets.value;
+  if (areaAssetGroupFilter.value === 'all') return allVideoAssets.value;
   if (
-    !model.mediaGroups.some((group) => group.id === areaAssetGroupFilter.value)
+    !model.mediaGroups.some(
+      (group) =>
+        group.id === areaAssetGroupFilter.value && !isAudioGroup(group),
+    )
   ) {
-    return allAssets.value;
+    return allVideoAssets.value;
   }
-  return allAssets.value.filter(
+  return allVideoAssets.value.filter(
     (asset) => asset.groupId === areaAssetGroupFilter.value,
   );
 });
@@ -251,6 +297,18 @@ const invalidAreaCount = computed(() => {
       total + clip.areas.filter((area) => !ids.has(area.assetId)).length,
     0,
   );
+});
+const sequenceTimelineDuration = computed(() => {
+  const clipsEnd = model.clips.reduce(
+    (maximum, clip) =>
+      Math.max(
+        maximum,
+        Math.max(0, Number(clip.starttime) || 0) +
+          Math.max(0, Number(clip.duration) || 0),
+      ),
+    0,
+  );
+  return Math.max(1, Number(model.duration) || 0, clipsEnd);
 });
 const areaPreviewStyle = computed(() => {
   return areaRectStyle(areaDraft.value);
@@ -337,6 +395,7 @@ function createGroup(name = `新建目录 ${model.mediaGroups.length + 1}`) {
   const group = {
     id: generateId(),
     name,
+    mediaType: 'video',
     minDuration: 3000,
     maxDuration: 10000,
     expanded: true,
@@ -351,9 +410,32 @@ function createGroup(name = `新建目录 ${model.mediaGroups.length + 1}`) {
 }
 
 function getDefaultGroup() {
-  let group = model.mediaGroups.find((item) => item.name === '默认目录');
-  if (!group) group = createGroup('默认目录');
+  let group = model.mediaGroups.find((item) => item.name === '人物镜头');
+  if (!group) group = createGroup('人物镜头');
   return group;
+}
+
+function isAudioGroup(group) {
+  return (
+    group?.mediaType === 'audio' ||
+    group?.name === '默认音频' ||
+    group?.name === '录音音频'
+  );
+}
+
+function mediaPathExtension(path = '') {
+  return path.split('.').pop()?.toLowerCase() || '';
+}
+
+function acceptedMediaPaths(paths, audio) {
+  const extensions = audio ? AUDIO_EXTENSIONS : VIDEO_EXTENSIONS;
+  const accepted = paths.filter((path) =>
+    extensions.includes(mediaPathExtension(path)),
+  );
+  if (accepted.length !== paths.length) {
+    showToast(audio ? '音频目录只能上传音频文件' : '视频目录只能上传视频文件', 'warning');
+  }
+  return accepted;
 }
 
 async function pickMediaPaths({ multiple = false, audio = false } = {}) {
@@ -530,8 +612,11 @@ function disposeAssetGroups(groups = []) {
   groups.forEach((group) => group.assets?.forEach(disposeAsset));
 }
 
-function addVideoPathsToGroup(paths, group) {
-  const uniquePaths = [...new Set(paths.filter(Boolean))];
+function addMediaPathsToGroup(paths, group) {
+  const audio = isAudioGroup(group);
+  const uniquePaths = [
+    ...new Set(acceptedMediaPaths(paths.filter(Boolean), audio)),
+  ];
   if (!uniquePaths.length) return;
 
   const assets = uniquePaths.map((sourcePath) =>
@@ -540,8 +625,9 @@ function addVideoPathsToGroup(paths, group) {
       name: fileName(sourcePath),
       filepath: assetPath(fileName(sourcePath)),
       sourcePath,
+      mediaType: audio ? 'audio' : 'video',
       thumbnailUrl: '',
-      thumbnailStatus: 'loading',
+      thumbnailStatus: audio ? 'unavailable' : 'loading',
       durationMs: 0,
       width: 0,
       height: 0,
@@ -551,18 +637,21 @@ function addVideoPathsToGroup(paths, group) {
 
   group.assets.push(...assets);
   group.expanded = true;
-  assets.forEach(enqueueThumbnail);
+  if (!audio) assets.forEach(enqueueThumbnail);
   showToast(`已添加 ${assets.length} 个素材到“${group.name}”`);
 }
 
 async function uploadToDefault() {
   const paths = await pickMediaPaths({ multiple: true });
-  if (paths.length) addVideoPathsToGroup(paths, getDefaultGroup());
+  if (paths.length) addMediaPathsToGroup(paths, getDefaultGroup());
 }
 
 async function uploadToGroup(group) {
-  const paths = await pickMediaPaths({ multiple: true });
-  if (paths.length) addVideoPathsToGroup(paths, group);
+  const paths = await pickMediaPaths({
+    multiple: true,
+    audio: isAudioGroup(group),
+  });
+  if (paths.length) addMediaPathsToGroup(paths, group);
 }
 
 function clearAssetReferences(assetIds) {
@@ -620,6 +709,7 @@ function createClip() {
   const clip = {
     id: generateId(),
     name: `片段 ${model.clips.length + 1}`,
+    materialType: 'variable',
     starttime: previous
       ? Number(previous.starttime) + Number(previous.duration)
       : 0,
@@ -722,9 +812,11 @@ function appendArea({
   speed = 1,
   rotate = 0,
   opacity = 1,
+  beauty = null,
   isMirrorGenerated = false,
   mirrorSourceAreaId = '',
   mirrorDirection = '',
+  mirrorAxis = null,
   mirroredDirections = [],
   isTriptychGenerated = false,
   triptychGroupId = '',
@@ -753,9 +845,11 @@ function appendArea({
     speed,
     rotate,
     opacity: clampNumber(opacity, 0, 1),
+    beauty: createAreaBeautySettings(beauty),
     isMirrorGenerated,
     mirrorSourceAreaId,
     mirrorDirection,
+    mirrorAxis,
     mirroredDirections: [...mirroredDirections],
     isTriptychGenerated,
     triptychGroupId,
@@ -777,7 +871,6 @@ function appendArea({
   areaDraft.value = selectedClip.value.areas.at(-1);
   areaDialogOpen.value = true;
   showToast('画面区域已添加');
-  scrollAreaPaneToBottom();
   return areaDraft.value;
 }
 
@@ -787,34 +880,15 @@ function newArea() {
 }
 
 function startAreaAssetDrag(event, asset) {
-  areaAssetDragScrollContainer = event.currentTarget
-    .closest('.area-modal')
-    ?.querySelector('.area-main-pane');
   draggedAreaAssetId.value = asset.id;
   event.dataTransfer.effectAllowed = 'copy';
   event.dataTransfer.setData('application/x-aicut-asset-id', asset.id);
   event.dataTransfer.setData('text/plain', asset.id);
 }
 
-function scrollAreaPaneToBottom() {
-  const scrollContainer = areaMainPaneRef.value || areaAssetDragScrollContainer;
-  if (!scrollContainer) return;
-
-  const scrollToBottom = () => {
-    scrollContainer.scrollTop = scrollContainer.scrollHeight;
-  };
-  nextTick(() => {
-    window.requestAnimationFrame(() => {
-      scrollToBottom();
-      window.requestAnimationFrame(scrollToBottom);
-    });
-  });
-}
-
 function finishAreaAssetDrag() {
   draggedAreaAssetId.value = '';
   areaCanvasDragOver.value = false;
-  areaAssetDragScrollContainer = null;
 }
 
 function handleAreaCanvasDragOver(event) {
@@ -864,7 +938,6 @@ function dropAssetOnAreaCanvas(event) {
   if (areaDraft.value && !areaDraft.value.assetId) {
     areaDraft.value.assetId = assetId;
     showToast('素材已放入当前画面区域');
-    scrollAreaPaneToBottom();
   } else {
     appendArea({
       assetId,
@@ -877,6 +950,7 @@ function dropAssetOnAreaCanvas(event) {
 }
 
 function editArea(area) {
+  area.beauty = createAreaBeautySettings(area.beauty);
   areaDraft.value = area;
   normalizeAreaDraft();
   areaAssetGroupFilter.value = 'all';
@@ -947,9 +1021,29 @@ function isLayoutSourceArea(area) {
   return isTriptychSourceArea(area) || isQuadSourceArea(area);
 }
 
-function mirrorAreaGeometry(area, direction) {
+function mirrorAxisForGeometry(geometry, direction) {
+  if (direction === 'left') return geometry.x;
+  if (direction === 'right') return geometry.x + geometry.width;
+  if (direction === 'up') return geometry.y;
+  return geometry.y + geometry.height;
+}
+
+function mirrorAreaGeometry(area, direction, mirrorAxis = null) {
   const geometry = normalizedAreaGeometry(area);
   const target = { ...geometry };
+  if (
+    mirrorAxis !== null &&
+    mirrorAxis !== '' &&
+    Number.isFinite(Number(mirrorAxis))
+  ) {
+    const axis = Number(mirrorAxis);
+    if (direction === 'left' || direction === 'right') {
+      target.x = axis * 2 - geometry.x - geometry.width;
+    } else {
+      target.y = axis * 2 - geometry.y - geometry.height;
+    }
+    return target;
+  }
   if (direction === 'up') target.y = geometry.y - geometry.height;
   if (direction === 'down') target.y = geometry.y + geometry.height;
   if (direction === 'left') target.x = geometry.x - geometry.width;
@@ -1003,7 +1097,9 @@ function composeAreaMirror(area, direction) {
 function createMirroredArea(direction) {
   const sourceArea = areaForContextMenu();
   if (!sourceArea || !canMirrorArea(sourceArea.id, direction)) return;
-  const geometry = mirrorAreaGeometry(sourceArea, direction);
+  const sourceGeometry = normalizedAreaGeometry(sourceArea);
+  const mirrorAxis = mirrorAxisForGeometry(sourceGeometry, direction);
+  const geometry = mirrorAreaGeometry(sourceArea, direction, mirrorAxis);
   const transform = composeAreaMirror(sourceArea, direction);
   const directionLabel =
     mirrorDirections.find((item) => item.value === direction)?.label || '';
@@ -1014,9 +1110,11 @@ function createMirroredArea(direction) {
     speed: sourceArea.speed,
     rotate: transform.rotate,
     opacity: sourceArea.opacity ?? 1,
+    beauty: sourceArea.beauty,
     isMirrorGenerated: true,
     mirrorSourceAreaId: sourceArea.id,
     mirrorDirection: direction,
+    mirrorAxis,
     ...geometry,
   });
   sourceArea.mirroredDirections = [
@@ -1057,6 +1155,7 @@ function createTriptych(rotation) {
     speed: sourceArea.speed,
     rotate: rotation,
     opacity: sourceArea.opacity ?? 1,
+    beauty: sourceArea.beauty,
     isTriptychGenerated: true,
     triptychGroupId: groupId,
     triptychSourceAreaId: sourceArea.id,
@@ -1072,6 +1171,7 @@ function createTriptych(rotation) {
     speed: sourceArea.speed,
     rotate: rotation,
     opacity: sourceArea.opacity ?? 1,
+    beauty: sourceArea.beauty,
     isTriptychGenerated: true,
     triptychGroupId: groupId,
     triptychSourceAreaId: sourceArea.id,
@@ -1082,7 +1182,6 @@ function createTriptych(rotation) {
     height: 1080,
   });
   areaDraft.value = sourceArea;
-  scrollAreaPaneToBottom();
   showToast('三分屏区域已创建');
 }
 
@@ -1108,6 +1207,7 @@ function createQuad() {
     speed: sourceArea.speed,
     rotate: sourceArea.rotate,
     opacity: sourceArea.opacity ?? 1,
+    beauty: sourceArea.beauty,
     isQuadGenerated: true,
     quadGroupId: groupId,
     quadSourceAreaId: sourceArea.id,
@@ -1142,7 +1242,6 @@ function createQuad() {
     y: 540,
   });
   areaDraft.value = sourceArea;
-  scrollAreaPaneToBottom();
   showToast('四分屏区域已创建');
 }
 
@@ -1296,7 +1395,7 @@ function removeSubtitle(subtitle) {
 
 async function updateTrackFile(track) {
   const [sourcePath] = await pickMediaPaths({
-    audio: track === 'audioBackground',
+    audio: track === 'audioBackground' || track === 'recording',
   });
   if (!sourcePath) return;
   selectedFilePaths[track] = sourcePath;
@@ -1379,6 +1478,75 @@ function areaImageTransformStyle(area) {
   };
 }
 
+function createAreaBeautySettings(values = {}) {
+  const source = values && typeof values === 'object' ? values : {};
+  const skinTone = AREA_SKIN_TONE_OPTIONS.some(
+    (option) => option.value === source.skinTone,
+  )
+    ? source.skinTone
+    : 'off';
+  return {
+    lutStyle:
+      typeof source.lutStyle === 'string'
+        ? source.lutStyle
+        : DEFAULT_AREA_BEAUTY_SETTINGS.lutStyle,
+    lutIntensity: clampNumber(
+      source.lutIntensity ?? DEFAULT_AREA_BEAUTY_SETTINGS.lutIntensity,
+      0,
+      100,
+    ),
+    skinTone,
+    skinTemperature: clampNumber(
+      source.skinTemperature ?? DEFAULT_AREA_BEAUTY_SETTINGS.skinTemperature,
+      -100,
+      100,
+    ),
+    skinIntensity: clampNumber(
+      source.skinIntensity ?? DEFAULT_AREA_BEAUTY_SETTINGS.skinIntensity,
+      0,
+      100,
+    ),
+    smoothing: clampNumber(
+      source.smoothing ?? DEFAULT_AREA_BEAUTY_SETTINGS.smoothing,
+      0,
+      100,
+    ),
+    whitening: clampNumber(
+      source.whitening ?? DEFAULT_AREA_BEAUTY_SETTINGS.whitening,
+      0,
+      100,
+    ),
+    stabilization: Boolean(source.stabilization),
+    oneClickBeauty: Boolean(source.oneClickBeauty),
+  };
+}
+
+function normalizeAreaBeautyValue(key, min = 0, max = 100) {
+  if (!areaDraft.value?.beauty) return;
+  areaDraft.value.beauty[key] = clampNumber(
+    areaDraft.value.beauty[key],
+    min,
+    max,
+  );
+}
+
+function resetAreaBeauty() {
+  if (!areaDraft.value || isBoundGeneratedArea(areaDraft.value)) return;
+  areaDraft.value.beauty = createAreaBeautySettings();
+}
+
+function mirrorAxisForDirection(area, direction) {
+  const boundArea = selectedClip.value?.areas.find(
+    (candidate) =>
+      candidate.isMirrorGenerated &&
+      candidate.mirrorSourceAreaId === area.id &&
+      candidate.mirrorDirection === direction,
+  );
+  return boundArea
+    ? resolveMirrorAxis(area, boundArea)
+    : mirrorAxisForGeometry(normalizedAreaGeometry(area), direction);
+}
+
 function areaMirrorBindingBounds(area, width, height) {
   const directions = new Set(area?.mirroredDirections ?? []);
   const triptychSource = isTriptychSourceArea(area);
@@ -1397,6 +1565,39 @@ function areaMirrorBindingBounds(area, width, height) {
   const hasRight = triptychSource || directions.has('right');
   const hasUp = directions.has('up');
   const hasDown = directions.has('down');
+  if (!triptychSource && directions.size) {
+    let minX = 0;
+    let maxX = AREA_CANVAS_WIDTH - width;
+    let minY = 0;
+    let maxY = AREA_CANVAS_HEIGHT - height;
+    directions.forEach((direction) => {
+      const axis = mirrorAxisForDirection(area, direction);
+      if (direction === 'left') {
+        minX = Math.max(minX, axis);
+        maxX = Math.min(maxX, axis * 2 - width);
+      }
+      if (direction === 'right') {
+        minX = Math.max(minX, axis * 2 - AREA_CANVAS_WIDTH);
+        maxX = Math.min(maxX, axis - width);
+      }
+      if (direction === 'up') {
+        minY = Math.max(minY, axis);
+        maxY = Math.min(maxY, axis * 2 - height);
+      }
+      if (direction === 'down') {
+        minY = Math.max(minY, axis * 2 - AREA_CANVAS_HEIGHT);
+        maxY = Math.min(maxY, axis - height);
+      }
+    });
+    return {
+      minX,
+      maxX,
+      minY,
+      maxY,
+      horizontalSlots: 1 + Number(hasLeft) + Number(hasRight),
+      verticalSlots: 1 + Number(hasUp) + Number(hasDown),
+    };
+  }
   return {
     minX: hasLeft ? width : 0,
     maxX: AREA_CANVAS_WIDTH - width * (hasRight ? 2 : 1),
@@ -1407,6 +1608,32 @@ function areaMirrorBindingBounds(area, width, height) {
   };
 }
 
+function resolveMirrorAxis(sourceArea, boundArea) {
+  const storedAxis = Number(boundArea.mirrorAxis);
+  if (
+    boundArea.mirrorAxis !== null &&
+    boundArea.mirrorAxis !== '' &&
+    Number.isFinite(storedAxis)
+  ) {
+    return storedAxis;
+  }
+
+  const source = normalizedAreaGeometry(sourceArea);
+  const bound = normalizedAreaGeometry(boundArea);
+  let axis;
+  if (boundArea.mirrorDirection === 'left') {
+    axis = (source.x + bound.x + bound.width) / 2;
+  } else if (boundArea.mirrorDirection === 'right') {
+    axis = (source.x + source.width + bound.x) / 2;
+  } else if (boundArea.mirrorDirection === 'up') {
+    axis = (source.y + bound.y + bound.height) / 2;
+  } else {
+    axis = (source.y + source.height + bound.y) / 2;
+  }
+  boundArea.mirrorAxis = axis;
+  return axis;
+}
+
 function syncMirroredAreasForSource(sourceArea, clip = selectedClip.value) {
   if (!sourceArea || isBoundGeneratedArea(sourceArea) || !clip) return;
   clip.areas.forEach((boundArea) => {
@@ -1414,9 +1641,11 @@ function syncMirroredAreasForSource(sourceArea, clip = selectedClip.value) {
       boundArea.isMirrorGenerated &&
       boundArea.mirrorSourceAreaId === sourceArea.id
     ) {
+      const mirrorAxis = resolveMirrorAxis(sourceArea, boundArea);
       const geometry = mirrorAreaGeometry(
         sourceArea,
         boundArea.mirrorDirection,
+        mirrorAxis,
       );
       const transform = composeAreaMirror(
         sourceArea,
@@ -1426,6 +1655,7 @@ function syncMirroredAreasForSource(sourceArea, clip = selectedClip.value) {
         assetId: sourceArea.assetId,
         speed: sourceArea.speed,
         opacity: sourceArea.opacity ?? 1,
+        beauty: createAreaBeautySettings(sourceArea.beauty),
         mirror: transform.mirror,
         rotate: transform.rotate,
         ...geometry,
@@ -1441,6 +1671,7 @@ function syncMirroredAreasForSource(sourceArea, clip = selectedClip.value) {
         assetId: sourceArea.assetId,
         speed: sourceArea.speed,
         opacity: sourceArea.opacity ?? 1,
+        beauty: createAreaBeautySettings(sourceArea.beauty),
         mirror: sourceArea.mirror || 'none',
         rotate: sourceArea.rotate,
         x:
@@ -1464,6 +1695,7 @@ function syncMirroredAreasForSource(sourceArea, clip = selectedClip.value) {
         assetId: sourceArea.assetId,
         speed: sourceArea.speed,
         opacity: sourceArea.opacity ?? 1,
+        beauty: createAreaBeautySettings(sourceArea.beauty),
         mirror: sourceArea.mirror || 'none',
         rotate: sourceArea.rotate,
         x: geometry.x + (isRight ? geometry.width : 0),
@@ -1516,10 +1748,30 @@ function normalizeAreaDraft(sizeSource = 'width') {
   const verticalSlots = isQuadSourceArea(areaDraft.value)
     ? 2
     : 1 + Number(directions.has('up')) + Number(directions.has('down'));
+  let mirrorWidthLimit = AREA_CANVAS_WIDTH;
+  let mirrorHeightLimit = AREA_CANVAS_HEIGHT;
+  directions.forEach((direction) => {
+    const axis = mirrorAxisForDirection(areaDraft.value, direction);
+    if (direction === 'left' || direction === 'right') {
+      mirrorWidthLimit = Math.min(
+        mirrorWidthLimit,
+        axis,
+        AREA_CANVAS_WIDTH - axis,
+      );
+    } else {
+      mirrorHeightLimit = Math.min(
+        mirrorHeightLimit,
+        axis,
+        AREA_CANVAS_HEIGHT - axis,
+      );
+    }
+  });
   const bindingMaxScale = Math.floor(
     Math.min(
       AREA_CANVAS_WIDTH / horizontalSlots / AREA_ASPECT_WIDTH,
       AREA_CANVAS_HEIGHT / verticalSlots / AREA_ASPECT_HEIGHT,
+      mirrorWidthLimit / AREA_ASPECT_WIDTH,
+      mirrorHeightLimit / AREA_ASPECT_HEIGHT,
     ),
   );
   const scale = Math.round(
@@ -1876,6 +2128,30 @@ function formatMilliseconds(value) {
   return `${Math.max(0, Number(value) || 0)} ms`;
 }
 
+function clipMaterialType(clip) {
+  return clip?.materialType === 'fixed' ? 'fixed' : 'variable';
+}
+
+function setClipMaterialType(clip, materialType) {
+  if (!clip) return;
+  clip.materialType = materialType === 'fixed' ? 'fixed' : 'variable';
+}
+
+function sequenceClipStyle(clip) {
+  const total = sequenceTimelineDuration.value;
+  const start = clampNumber(Number(clip.starttime) || 0, 0, total);
+  const duration = Math.max(0, Number(clip.duration) || 0);
+  const end = clampNumber(start + duration, start, total);
+  return {
+    left: `${(start / total) * 100}%`,
+    width: `${Math.max(((end - start) / total) * 100, 0.8)}%`,
+  };
+}
+
+function sequenceTrackFileLabel(path) {
+  return path ? fileName(path) : '待上传';
+}
+
 watch(
   () =>
     model.clips.flatMap((clip) =>
@@ -1892,6 +2168,15 @@ watch(
           area.y,
           area.width,
           area.height,
+          area.beauty?.lutStyle,
+          area.beauty?.lutIntensity,
+          area.beauty?.skinTone,
+          area.beauty?.skinTemperature,
+          area.beauty?.skinIntensity,
+          area.beauty?.smoothing,
+          area.beauty?.whitening,
+          area.beauty?.stabilization,
+          area.beauty?.oneClickBeauty,
           ...(area.mirroredDirections ?? []),
         ]),
     ),
@@ -2066,51 +2351,15 @@ onBeforeUnmount(() => {
           />
         </div>
 
-        <div class="field-grid">
-          <div class="field">
-            <label for="template-duration">总时长 <small>ms</small></label>
-            <input
-              id="template-duration"
-              v-model.number="model.duration"
-              type="number"
-              min="0"
-              step="1"
-            />
-          </div>
-          <div class="field">
-            <label for="template-resolution">分辨率</label>
-            <select id="template-resolution" v-model="model.resolution">
-              <option value="1920*1080">1920 × 1080</option>
-            </select>
-          </div>
-        </div>
-
-        <div class="upload-field">
-          <div>
-            <label>示例视频</label>
-            <span>{{
-              model.demoPath ? fileName(model.demoPath) : '尚未上传'
-            }}</span>
-          </div>
-          <div class="upload-actions">
-            <button
-              v-if="model.demoPath"
-              class="plain-icon danger-hover"
-              type="button"
-              title="移除示例视频"
-              @click="clearDemoFile"
-            >
-              <X :size="14" />
-            </button>
-            <button
-              class="icon-button"
-              type="button"
-              title="上传示例视频"
-              @click="updateDemoFile"
-            >
-              <Upload :size="15" />
-            </button>
-          </div>
+        <div class="field">
+          <label for="template-duration">总时长 <small>ms</small></label>
+          <input
+            id="template-duration"
+            v-model.number="model.duration"
+            type="number"
+            min="0"
+            step="1"
+          />
         </div>
           </section>
 
@@ -2124,18 +2373,78 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="track-list">
-          <div class="track-item locked">
+          <div class="track-item">
             <span class="track-index">01</span>
             <div>
-              <strong>片段中间层</strong>
-              <small>固定生成 · 无需上传</small>
+              <strong>固定转场层</strong>
+              <small>{{
+                model.tracks.overlay
+                  ? fileName(model.tracks.overlay)
+                  : '尚未上传'
+              }}</small>
+            </div>
+            <div class="track-actions">
+              <button
+                v-if="model.tracks.overlay"
+                class="plain-icon danger-hover"
+                type="button"
+                title="移除固定转场素材"
+                @click="clearTrackFile('overlay')"
+              >
+                <X :size="13" />
+              </button>
+              <button
+                class="icon-button"
+                type="button"
+                title="上传固定转场素材"
+                @click="updateTrackFile('overlay')"
+              >
+                <Upload :size="14" />
+              </button>
+            </div>
+          </div>
+          <div class="track-item">
+            <span class="track-index">02</span>
+            <div>
+              <strong>固定素材层</strong>
+              <small>{{
+                model.tracks.background
+                  ? fileName(model.tracks.background)
+                  : '尚未上传'
+              }}</small>
+            </div>
+            <div class="track-actions">
+              <button
+                v-if="model.tracks.background"
+                class="plain-icon danger-hover"
+                type="button"
+                title="移除固定素材"
+                @click="clearTrackFile('background')"
+              >
+                <X :size="13" />
+              </button>
+              <button
+                class="icon-button"
+                type="button"
+                title="上传固定素材"
+                @click="updateTrackFile('background')"
+              >
+                <Upload :size="14" />
+              </button>
+            </div>
+          </div>
+          <div class="track-item locked">
+            <span class="track-index">03</span>
+            <div>
+              <strong>可变素材层</strong>
+              <small>默认生成 · 无需上传</small>
             </div>
             <Check :size="15" />
           </div>
           <div class="track-item">
-            <span class="track-index">AU</span>
+            <span class="track-index">04</span>
             <div>
-              <strong>音频背景 <em class="optional">可选</em></strong>
+              <strong>底板音频层</strong>
               <small>{{
                 model.tracks.audioBackground
                   ? fileName(model.tracks.audioBackground)
@@ -2147,7 +2456,7 @@ onBeforeUnmount(() => {
                 v-if="model.tracks.audioBackground"
                 class="plain-icon danger-hover"
                 type="button"
-                title="移除音频背景"
+                title="移除底板音频"
                 @click="clearTrackFile('audioBackground')"
               >
                 <X :size="13" />
@@ -2155,8 +2464,38 @@ onBeforeUnmount(() => {
               <button
                 class="icon-button"
                 type="button"
-                title="上传音频背景"
+                title="上传底板音频"
                 @click="updateTrackFile('audioBackground')"
+              >
+                <Upload :size="14" />
+              </button>
+            </div>
+          </div>
+          <div class="track-item">
+            <span class="track-index">05</span>
+            <div>
+              <strong>录音层</strong>
+              <small>{{
+                model.tracks.recording
+                  ? fileName(model.tracks.recording)
+                  : '未配置时不生成'
+              }}</small>
+            </div>
+            <div class="track-actions">
+              <button
+                v-if="model.tracks.recording"
+                class="plain-icon danger-hover"
+                type="button"
+                title="移除录音"
+                @click="clearTrackFile('recording')"
+              >
+                <X :size="13" />
+              </button>
+              <button
+                class="icon-button"
+                type="button"
+                title="上传录音"
+                @click="updateTrackFile('recording')"
               >
                 <Upload :size="14" />
               </button>
@@ -2185,6 +2524,30 @@ onBeforeUnmount(() => {
             </option>
           </select>
         </div>
+        <div class="field video-progress-field">
+          <label for="video-progress">LUT值</label>
+          <div class="video-progress-control">
+            <input
+              id="video-progress"
+              v-model.number="model.progress"
+              class="video-progress-range"
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+            />
+            <input
+              v-model.number="model.progress"
+              class="video-progress-number"
+              type="number"
+              min="0"
+              max="1"
+              step="0.01"
+              aria-label="视频风格进度"
+              @change="model.progress = clampNumber(model.progress, 0, 1)"
+            />
+          </div>
+        </div>
           </section>
         </div>
       </section>
@@ -2209,7 +2572,7 @@ onBeforeUnmount(() => {
             <button
               class="icon-button"
               type="button"
-              title="上传到默认目录"
+              title="上传到人物镜头"
               @click="uploadToDefault"
             >
               <Upload :size="16" />
@@ -2236,7 +2599,7 @@ onBeforeUnmount(() => {
         <div v-if="!model.mediaGroups.length" class="empty-library">
           <Folder :size="28" />
           <strong>素材库还是空的</strong>
-          <span>创建目录，或直接上传到默认目录</span>
+          <span>创建目录，或直接上传到人物镜头</span>
           <button
             class="button button-soft"
             type="button"
@@ -2275,7 +2638,7 @@ onBeforeUnmount(() => {
               <button
                 class="plain-icon"
                 type="button"
-                title="向此目录上传"
+                :title="isAudioGroup(group) ? '上传音频' : '上传视频'"
                 @click="uploadToGroup(group)"
               >
                 <Plus :size="15" />
@@ -2327,8 +2690,13 @@ onBeforeUnmount(() => {
                   class="asset-row"
                 >
                   <div class="asset-thumb">
+                    <Music2
+                      v-if="isAudioGroup(group)"
+                      :size="16"
+                      class="audio-asset-icon"
+                    />
                     <img
-                      v-if="asset.thumbnailUrl"
+                      v-else-if="asset.thumbnailUrl"
                       :src="asset.thumbnailUrl"
                       alt=""
                       draggable="false"
@@ -2367,7 +2735,11 @@ onBeforeUnmount(() => {
                 @click="uploadToGroup(group)"
               >
                 <Upload :size="15" />
-                <span>上传视频到此目录</span>
+                <span>{{
+                  isAudioGroup(group)
+                    ? '上传音频到此目录'
+                    : '上传视频到此目录'
+                }}</span>
               </button>
             </div>
           </article>
@@ -2450,6 +2822,17 @@ onBeforeUnmount(() => {
                 }}</span>
               </div>
               <div class="clip-tags">
+                <span
+                  class="material-type"
+                  :class="`is-${clipMaterialType(clip)}`"
+                >
+                  <Film :size="12" />
+                  {{
+                    clipMaterialType(clip) === 'fixed'
+                      ? '固定素材'
+                      : '可变素材'
+                  }}
+                </span>
                 <span :class="{ muted: !clip.areas.length }"
                   ><Layers3 :size="12" /> {{ clip.areas.length }} Area</span
                 >
@@ -2485,6 +2868,78 @@ onBeforeUnmount(() => {
               >{{ index + 1 }}</span
             >
           </div>
+          <div class="sequence-tracks-scroller">
+            <div class="sequence-tracks">
+              <div class="sequence-track-row">
+                <div class="sequence-track-label">
+                  <span>01</span><strong>固定转场层</strong>
+                </div>
+                <div class="sequence-track-lane">
+                  <div
+                    class="sequence-track-clip is-transition is-full"
+                    :class="{ 'is-empty': !model.tracks.overlay }"
+                  >
+                    {{ sequenceTrackFileLabel(model.tracks.overlay) }}
+                  </div>
+                </div>
+              </div>
+              <div class="sequence-track-row">
+                <div class="sequence-track-label">
+                  <span>02</span><strong>素材层</strong>
+                </div>
+                <div class="sequence-track-lane">
+                  <button
+                    v-for="(clip, index) in model.clips"
+                    :key="`sequence-track-${clip.id}`"
+                    class="sequence-track-clip"
+                    :class="{
+                      active: selectedClipId === clip.id,
+                      'is-fixed-material':
+                        clipMaterialType(clip) === 'fixed',
+                      'is-variable-material':
+                        clipMaterialType(clip) === 'variable',
+                    }"
+                    :style="sequenceClipStyle(clip)"
+                    type="button"
+                    :title="`${clip.name} · ${formatMilliseconds(clip.duration)}`"
+                    @click="selectedClipId = clip.id"
+                  >
+                    {{ index + 1 }} ·
+                    {{
+                      clipMaterialType(clip) === 'fixed' ? '固定' : '可变'
+                    }}
+                    · {{ clip.name }}
+                  </button>
+                </div>
+              </div>
+              <div class="sequence-track-row">
+                <div class="sequence-track-label">
+                  <span>03</span><strong>底板音频层</strong>
+                </div>
+                <div class="sequence-track-lane">
+                  <div
+                    class="sequence-track-clip is-audio is-full"
+                    :class="{ 'is-empty': !model.tracks.audioBackground }"
+                  >
+                    {{ sequenceTrackFileLabel(model.tracks.audioBackground) }}
+                  </div>
+                </div>
+              </div>
+              <div class="sequence-track-row">
+                <div class="sequence-track-label">
+                  <span>04</span><strong>录音层</strong>
+                </div>
+                <div class="sequence-track-lane">
+                  <div
+                    class="sequence-track-clip is-recording is-full"
+                    :class="{ 'is-empty': !model.tracks.recording }"
+                  >
+                    {{ sequenceTrackFileLabel(model.tracks.recording) }}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
     </main>
@@ -2515,6 +2970,29 @@ onBeforeUnmount(() => {
             <div class="field">
               <label>片段名称</label>
               <input v-model="selectedClip.name" type="text" />
+            </div>
+            <div class="field clip-material-type-field">
+              <label>素材类型</label>
+              <div class="segmented clip-material-segmented">
+                <button
+                  type="button"
+                  :class="{
+                    active: clipMaterialType(selectedClip) === 'variable',
+                  }"
+                  @click="setClipMaterialType(selectedClip, 'variable')"
+                >
+                  可变素材
+                </button>
+                <button
+                  type="button"
+                  :class="{
+                    active: clipMaterialType(selectedClip) === 'fixed',
+                  }"
+                  @click="setClipMaterialType(selectedClip, 'fixed')"
+                >
+                  固定素材
+                </button>
+              </div>
             </div>
             <div class="field-grid">
               <div class="field">
@@ -2718,12 +3196,13 @@ onBeforeUnmount(() => {
       </aside>
     </Transition>
 
-    <Transition name="modal">
-      <div
-        v-if="areaDialogOpen"
-        class="modal-backdrop"
-        @mousedown.self="closeAreaDialog"
-      >
+    <Teleport to="body">
+      <Transition name="modal">
+        <div
+          v-if="areaDialogOpen"
+          class="modal-backdrop"
+          @mousedown.self="closeAreaDialog"
+        >
         <div
           class="area-modal"
           role="dialog"
@@ -2862,7 +3341,7 @@ onBeforeUnmount(() => {
                 </section>
               </aside>
 
-              <div ref="areaMainPaneRef" class="area-main-pane">
+              <div class="area-main-pane">
                 <section class="area-dialog-manager">
                   <div class="area-dialog-manager-head">
                     <div>
@@ -2927,17 +3406,36 @@ onBeforeUnmount(() => {
                 </section>
 
                 <template v-if="areaDraft">
+                  <div class="area-settings-stack">
                   <div class="modal-columns">
                   <section
                     class="modal-section"
                     :class="{ bound: isBoundGeneratedArea(areaDraft) }"
                   >
-                    <div class="modal-section-head">
+                    <button
+                      class="modal-section-head modal-section-toggle"
+                      type="button"
+                      :aria-expanded="areaModalSectionsExpanded.transform"
+                      @click="
+                        areaModalSectionsExpanded.transform =
+                          !areaModalSectionsExpanded.transform
+                      "
+                    >
                       <div>
                         <span>02</span>
                         <h3>画面变换</h3>
                       </div>
-                    </div>
+                      <ChevronDown
+                        v-if="areaModalSectionsExpanded.transform"
+                        :size="15"
+                      />
+                      <ChevronRight v-else :size="15" />
+                    </button>
+                    <div
+                      v-show="areaModalSectionsExpanded.transform"
+                      class="modal-section-collapse"
+                    >
+                        <div class="modal-section-collapse-inner">
                     <div class="field">
                       <label>镜像方式</label>
                       <div class="segmented three">
@@ -3019,27 +3517,49 @@ onBeforeUnmount(() => {
                         <span>0</span><span>1</span>
                       </div>
                     </div>
+                        </div>
+                    </div>
                   </section>
 
                   <section
                     class="modal-section"
                     :class="{ bound: isBoundGeneratedArea(areaDraft) }"
                   >
-                    <div class="modal-section-head">
+                    <button
+                      class="modal-section-head modal-section-toggle"
+                      type="button"
+                      :aria-expanded="areaModalSectionsExpanded.position"
+                      @click="
+                        areaModalSectionsExpanded.position =
+                          !areaModalSectionsExpanded.position
+                      "
+                    >
                       <div>
                         <span>03</span>
                         <h3>位置与尺寸</h3>
                       </div>
-                      <small>{{
-                        isBoundGeneratedArea(areaDraft)
-                          ? '跟随原区域'
-                          : isQuadSourceArea(areaDraft)
-                            ? '四分屏联动'
-                          : isTriptychSourceArea(areaDraft)
-                            ? '三分屏联动'
-                            : '固定 16:9'
-                      }}</small>
-                    </div>
+                      <span class="modal-section-toggle-meta">
+                        <small>{{
+                          isBoundGeneratedArea(areaDraft)
+                            ? '跟随原区域'
+                            : isQuadSourceArea(areaDraft)
+                              ? '四分屏联动'
+                            : isTriptychSourceArea(areaDraft)
+                              ? '三分屏联动'
+                              : '固定 16:9'
+                        }}</small>
+                        <ChevronDown
+                          v-if="areaModalSectionsExpanded.position"
+                          :size="15"
+                        />
+                        <ChevronRight v-else :size="15" />
+                      </span>
+                    </button>
+                    <div
+                      v-show="areaModalSectionsExpanded.position"
+                      class="modal-section-collapse"
+                    >
+                        <div class="modal-section-collapse-inner">
                     <div class="position-grid">
                       <div class="field">
                         <label>X 横坐标</label
@@ -3096,6 +3616,230 @@ onBeforeUnmount(() => {
                           step="1"
                           @change="normalizeAreaIndex"
                         />
+                      </div>
+                    </div>
+                        </div>
+                    </div>
+                  </section>
+
+                  <section
+                    class="modal-section beauty-modal-section"
+                    :class="{ bound: isBoundGeneratedArea(areaDraft) }"
+                  >
+                    <button
+                      class="modal-section-head modal-section-toggle"
+                      type="button"
+                      :aria-expanded="areaModalSectionsExpanded.beauty"
+                      @click="
+                        areaModalSectionsExpanded.beauty =
+                          !areaModalSectionsExpanded.beauty
+                      "
+                    >
+                      <div>
+                        <span>04</span>
+                        <h3>美颜</h3>
+                      </div>
+                      <ChevronDown
+                        v-if="areaModalSectionsExpanded.beauty"
+                        :size="15"
+                      />
+                      <ChevronRight v-else :size="15" />
+                    </button>
+                    <div
+                      v-show="areaModalSectionsExpanded.beauty"
+                      class="modal-section-collapse"
+                    >
+                      <div class="modal-section-collapse-inner">
+                        <fieldset
+                          class="area-beauty-settings"
+                          :disabled="isBoundGeneratedArea(areaDraft)"
+                        >
+                          <div class="area-beauty-toolbar">
+                            <span>针对当前画面区域调整美颜效果</span>
+                            <button
+                              type="button"
+                              class="area-beauty-reset"
+                              @click="resetAreaBeauty"
+                            >
+                              恢复默认
+                            </button>
+                          </div>
+
+                          <div class="area-beauty-grid">
+                            <label class="area-beauty-control">
+                              <span>LUT 风格</span>
+                              <select v-model="areaDraft.beauty.lutStyle">
+                                <option value="none">无</option>
+                                <option value="clear">清透</option>
+                                <option value="warm">暖阳</option>
+                                <option value="cinematic">电影</option>
+                                <option value="vintage">复古</option>
+                                <option value="cool">冷调</option>
+                              </select>
+                            </label>
+
+                            <label class="area-beauty-control">
+                              <span>
+                                LUT 强度
+                                <strong
+                                  >{{ areaDraft.beauty.lutIntensity }}%</strong
+                                >
+                              </span>
+                              <input
+                                v-model.number="areaDraft.beauty.lutIntensity"
+                                type="range"
+                                min="0"
+                                max="100"
+                                step="1"
+                                @change="
+                                  normalizeAreaBeautyValue('lutIntensity')
+                                "
+                              />
+                            </label>
+
+                            <label class="area-beauty-control">
+                              <span>
+                                磨皮
+                                <strong
+                                  >{{ areaDraft.beauty.smoothing }}%</strong
+                                >
+                              </span>
+                              <input
+                                v-model.number="areaDraft.beauty.smoothing"
+                                type="range"
+                                min="0"
+                                max="100"
+                                step="1"
+                                @change="normalizeAreaBeautyValue('smoothing')"
+                              />
+                            </label>
+
+                            <label class="area-beauty-control">
+                              <span>
+                                美白
+                                <strong
+                                  >{{ areaDraft.beauty.whitening }}%</strong
+                                >
+                              </span>
+                              <input
+                                v-model.number="areaDraft.beauty.whitening"
+                                type="range"
+                                min="0"
+                                max="100"
+                                step="1"
+                                @change="normalizeAreaBeautyValue('whitening')"
+                              />
+                            </label>
+
+                            <div class="area-beauty-skin">
+                              <div class="area-beauty-skin-head">
+                                <span>肤色</span>
+                                <div
+                                  class="area-skin-tone-options"
+                                  role="group"
+                                  aria-label="肤色选择"
+                                >
+                                  <button
+                                    v-for="option in AREA_SKIN_TONE_OPTIONS"
+                                    :key="option.value"
+                                    type="button"
+                                    class="area-skin-tone-option"
+                                    :class="{
+                                      active:
+                                        areaDraft.beauty.skinTone ===
+                                        option.value,
+                                      off: option.value === 'off',
+                                    }"
+                                    :style="{ '--swatch-color': option.color }"
+                                    :title="option.label"
+                                    :aria-label="option.label"
+                                    :aria-pressed="
+                                      areaDraft.beauty.skinTone === option.value
+                                    "
+                                    @click="
+                                      areaDraft.beauty.skinTone = option.value
+                                    "
+                                  ></button>
+                                </div>
+                              </div>
+                              <div
+                                v-if="areaDraft.beauty.skinTone !== 'off'"
+                                class="area-skin-adjustments"
+                              >
+                                <label class="area-beauty-control">
+                                  <span>
+                                    冷暖
+                                    <strong>{{
+                                      areaDraft.beauty.skinTemperature
+                                    }}</strong>
+                                  </span>
+                                  <input
+                                    v-model.number="
+                                      areaDraft.beauty.skinTemperature
+                                    "
+                                    class="area-temperature-slider"
+                                    type="range"
+                                    min="-100"
+                                    max="100"
+                                    step="1"
+                                    @change="
+                                      normalizeAreaBeautyValue(
+                                        'skinTemperature',
+                                        -100,
+                                        100,
+                                      )
+                                    "
+                                  />
+                                </label>
+                                <label class="area-beauty-control">
+                                  <span>
+                                    程度
+                                    <strong
+                                      >{{
+                                        areaDraft.beauty.skinIntensity
+                                      }}%</strong
+                                    >
+                                  </span>
+                                  <input
+                                    v-model.number="
+                                      areaDraft.beauty.skinIntensity
+                                    "
+                                    type="range"
+                                    min="0"
+                                    max="100"
+                                    step="1"
+                                    @change="
+                                      normalizeAreaBeautyValue('skinIntensity')
+                                    "
+                                  />
+                                </label>
+                              </div>
+                            </div>
+
+                            <div class="area-beauty-switches">
+                              <label>
+                                <span>视频去抖动</span>
+                                <span class="switch">
+                                  <input
+                                    v-model="areaDraft.beauty.stabilization"
+                                    type="checkbox"
+                                  />
+                                  <span></span>
+                                </span>
+                              </label>
+                              <label>
+                                <span>一键美颜</span>
+                                <span class="switch">
+                                  <input
+                                    v-model="areaDraft.beauty.oneClickBeauty"
+                                    type="checkbox"
+                                  />
+                                  <span></span>
+                                </span>
+                              </label>
+                            </div>
+                          </div>
+                        </fieldset>
                       </div>
                     </div>
                   </section>
@@ -3197,6 +3941,7 @@ onBeforeUnmount(() => {
                     </div>
                   </div>
                   </section>
+                  </div>
                 </template>
                 <div v-else class="area-editor-empty">
                   <Maximize2 :size="24" />
@@ -3314,15 +4059,17 @@ onBeforeUnmount(() => {
             </button>
           </div>
         </div>
-      </div>
-    </Transition>
+        </div>
+      </Transition>
+    </Teleport>
 
-    <Transition name="modal">
-      <div
-        v-if="subtitleDialogOpen && subtitleDraft"
-        class="modal-backdrop"
-        @mousedown.self="subtitleDialogOpen = false"
-      >
+    <Teleport to="body">
+      <Transition name="modal">
+        <div
+          v-if="subtitleDialogOpen && subtitleDraft"
+          class="modal-backdrop"
+          @mousedown.self="subtitleDialogOpen = false"
+        >
         <div
           class="area-modal subtitle-modal"
           role="dialog"
@@ -3523,42 +4270,47 @@ onBeforeUnmount(() => {
             </button>
           </div>
         </div>
-      </div>
-    </Transition>
+        </div>
+      </Transition>
+    </Teleport>
 
-    <Transition name="modal">
-      <div v-if="confirmDialog.open" class="modal-backdrop confirm-backdrop">
-        <div class="confirm-modal" role="alertdialog" aria-modal="true">
-          <div class="confirm-icon"><AlertTriangle :size="22" /></div>
-          <h3>{{ confirmDialog.title }}</h3>
-          <p>{{ confirmDialog.message }}</p>
-          <div>
-            <button
-              class="button button-secondary"
-              type="button"
-              @click="confirmDialog.open = false"
-            >
-              取消
-            </button>
-            <button
-              class="button button-danger"
-              type="button"
-              @click="confirmAction"
-            >
-              {{ confirmDialog.confirmText }}
-            </button>
+    <Teleport to="body">
+      <Transition name="modal">
+        <div v-if="confirmDialog.open" class="modal-backdrop confirm-backdrop">
+          <div class="confirm-modal" role="alertdialog" aria-modal="true">
+            <div class="confirm-icon"><AlertTriangle :size="22" /></div>
+            <h3>{{ confirmDialog.title }}</h3>
+            <p>{{ confirmDialog.message }}</p>
+            <div>
+              <button
+                class="button button-secondary"
+                type="button"
+                @click="confirmDialog.open = false"
+              >
+                取消
+              </button>
+              <button
+                class="button button-danger"
+                type="button"
+                @click="confirmAction"
+              >
+                {{ confirmDialog.confirmText }}
+              </button>
+            </div>
           </div>
         </div>
-      </div>
-    </Transition>
+      </Transition>
+    </Teleport>
 
-    <Transition name="toast">
-      <div v-if="toast.visible" class="toast" :class="toast.type">
-        <Check v-if="toast.type === 'success'" :size="16" />
-        <AlertTriangle v-else :size="16" />
-        <span>{{ toast.message }}</span>
-      </div>
-    </Transition>
+    <Teleport to="body">
+      <Transition name="toast">
+        <div v-if="toast.visible" class="toast" :class="toast.type">
+          <Check v-if="toast.type === 'success'" :size="16" />
+          <AlertTriangle v-else :size="16" />
+          <span>{{ toast.message }}</span>
+        </div>
+      </Transition>
+    </Teleport>
   </div>
 </template>
 
@@ -3966,6 +4718,32 @@ label:focus-within {
   gap: 10px;
 }
 
+.video-progress-field {
+  margin-top: 12px;
+}
+
+.video-progress-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 64px;
+  align-items: center;
+  gap: 10px;
+}
+
+.field .video-progress-range {
+  height: 20px;
+  padding: 0;
+  border: 0;
+  accent-color: var(--accent);
+  background: transparent;
+  box-shadow: none;
+  cursor: pointer;
+}
+
+.field .video-progress-number {
+  padding: 0 7px;
+  text-align: center;
+}
+
 .upload-field {
   min-height: 45px;
   display: flex;
@@ -4068,7 +4846,7 @@ label:focus-within {
   background: #fbfbf9;
 }
 
-.track-item.locked > svg {
+.track-item > svg {
   margin-right: 8px;
   color: var(--green);
 }
@@ -4735,6 +5513,16 @@ label:focus-within {
   background: var(--accent-soft);
 }
 
+.clip-tags span.material-type.is-variable {
+  color: var(--accent-dark);
+  background: var(--accent-soft);
+}
+
+.clip-tags span.material-type.is-fixed {
+  color: #47749e;
+  background: #e7f0f7;
+}
+
 .selected-corner {
   position: absolute;
   top: 0;
@@ -4873,6 +5661,146 @@ label:focus-within {
 .sequence-line span.active {
   color: white;
   background: var(--accent);
+}
+
+.sequence-tracks-scroller {
+  margin-top: 12px;
+  overflow-x: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: #ecece7;
+  scrollbar-width: thin;
+  scrollbar-color: #c6c7c0 transparent;
+}
+
+.sequence-tracks {
+  min-width: 620px;
+  display: grid;
+  gap: 5px;
+  padding: 12px;
+}
+
+.sequence-track-row {
+  height: 34px;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: #fafaf7;
+}
+
+.sequence-track-label {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 9px;
+  color: #62635e;
+  border-right: 1px solid var(--line);
+  background: #fbfbf9;
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.sequence-track-label span {
+  width: 20px;
+  height: 20px;
+  display: grid;
+  flex: 0 0 20px;
+  place-items: center;
+  color: var(--accent-dark);
+  border-radius: 4px;
+  background: var(--accent-soft);
+  font-size: 8px;
+  font-weight: 800;
+}
+
+.sequence-track-label strong {
+  overflow: hidden;
+  font-size: 9px;
+  text-overflow: ellipsis;
+}
+
+.sequence-track-lane {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  background:
+    linear-gradient(90deg, rgba(32, 32, 30, 0.05) 1px, transparent 1px),
+    #f1f1ed;
+  background-size: 40px 100%;
+}
+
+.sequence-track-clip {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  min-width: 28px;
+  overflow: hidden;
+  padding: 0 7px;
+  color: #4f504b;
+  border-radius: 3px;
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 26px;
+  text-align: left;
+  text-overflow: ellipsis;
+  text-shadow: none;
+  white-space: nowrap;
+}
+
+button.sequence-track-clip {
+  border: 1px solid #e7aa95;
+  background: #f9e8e1;
+  cursor: pointer;
+}
+
+.sequence-track-clip.is-full {
+  right: 3px;
+  left: 3px;
+}
+
+.sequence-track-clip.is-transition {
+  border: 1px solid #cfb1dd;
+  background: #f1e8f5;
+}
+
+.sequence-track-clip.is-fixed-material {
+  border: 1px solid #abc6df;
+  background: #e7f0f7;
+}
+
+.sequence-track-clip.is-variable-material {
+  border: 1px solid #e7aa95;
+  background: #f9e8e1;
+}
+
+.sequence-track-clip.is-audio {
+  border: 1px solid #9bcdb5;
+  background: #e5f3ec;
+}
+
+.sequence-track-clip.is-recording {
+  border: 1px solid #ddaebf;
+  background: #f6e6ec;
+}
+
+.sequence-track-clip.is-empty {
+  color: #9a9b95;
+  border-style: dashed;
+  background: #f8f8f5;
+  text-shadow: none;
+}
+
+button.sequence-track-clip:hover,
+button.sequence-track-clip.active {
+  z-index: 2;
+  color: white;
+  border-color: var(--accent-dark);
+  background: var(--accent);
+  box-shadow: 0 0 0 1px rgba(242, 102, 69, 0.2);
 }
 
 .clip-drawer {
@@ -5350,6 +6278,10 @@ label:focus-within {
   margin: 0;
 }
 
+.clip-material-segmented {
+  margin-bottom: 0;
+}
+
 .segmented button {
   height: 29px;
   padding: 0 7px;
@@ -5478,13 +6410,31 @@ label:focus-within {
 
 .modal-backdrop {
   position: fixed;
-  z-index: 100;
+  z-index: 400;
   inset: 0;
   display: grid;
   place-items: center;
   padding: 28px;
+  color: #20201e;
   background: rgba(28, 28, 26, 0.46);
   backdrop-filter: blur(3px);
+  font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --ink: #20201e;
+  --muted: #777872;
+  --subtle: #a2a39d;
+  --line: #e3e3de;
+  --line-strong: #d5d5cf;
+  --paper: #ffffff;
+  --surface: #f8f8f5;
+  --canvas: #efefeb;
+  --accent: #f26645;
+  --accent-dark: #dc4d2c;
+  --accent-soft: #fff0eb;
+  --yellow: #f0bb4c;
+  --green: #319b68;
+  --red: #d64a43;
+  --shadow-sm: 0 4px 16px rgba(32, 32, 30, 0.06);
+  --shadow-lg: 0 22px 70px rgba(32, 32, 30, 0.18);
 }
 
 .area-modal {
@@ -5793,6 +6743,42 @@ label:focus-within {
   font-size: 8px;
 }
 
+.modal-section-toggle {
+  width: 100%;
+  padding: 0;
+  color: inherit;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.modal-section-toggle:hover h3 {
+  color: var(--accent);
+}
+
+.modal-section-toggle > svg,
+.modal-section-toggle-meta > svg {
+  flex: 0 0 auto;
+  color: var(--subtle);
+}
+
+.modal-section-toggle-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.modal-section-collapse {
+  display: grid;
+  grid-template-rows: 1fr;
+}
+
+.modal-section-collapse-inner {
+  min-height: 0;
+  overflow: hidden;
+}
+
 .asset-picker {
   max-height: 175px;
   display: grid;
@@ -5929,6 +6915,7 @@ label:focus-within {
 .modal-columns {
   display: grid;
   grid-template-columns: 1fr 1fr;
+  align-items: start;
   gap: 12px;
   margin-top: 12px;
 }
@@ -5938,6 +6925,21 @@ label:focus-within {
   margin-top: 0;
 }
 
+.area-settings-stack {
+  display: flex;
+  flex-direction: column;
+}
+
+.area-settings-stack > .canvas-preview-section {
+  order: 1;
+  margin-top: 0;
+}
+
+.area-settings-stack > .modal-columns {
+  order: 2;
+  margin-top: 8px;
+}
+
 .area-main-pane .modal-section {
   padding: 10px;
   border-radius: 9px;
@@ -5945,6 +6947,191 @@ label:focus-within {
 
 .area-main-pane .modal-section.bound {
   background: #f2f2ee;
+}
+
+.beauty-modal-section {
+  grid-column: 1 / -1;
+}
+
+.area-beauty-settings {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.area-beauty-settings:disabled {
+  opacity: 0.62;
+}
+
+.area-beauty-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  color: var(--subtle);
+  font-size: 9px;
+}
+
+.area-beauty-reset {
+  height: 25px;
+  padding: 0 9px;
+  flex: 0 0 auto;
+  color: var(--accent-dark);
+  border: 1px solid #f1c5b6;
+  border-radius: 6px;
+  background: #fff7f3;
+  cursor: pointer;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.area-beauty-reset:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.area-beauty-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.area-beauty-control,
+.area-beauty-skin,
+.area-beauty-switches {
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+}
+
+.area-beauty-control {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.area-beauty-control > span,
+.area-beauty-skin-head > span,
+.area-beauty-switches > label > span:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #5e5f59;
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.area-beauty-control strong {
+  color: var(--accent-dark);
+  font-size: 9px;
+}
+
+.area-beauty-control select {
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+  outline: none;
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 9px;
+}
+
+.area-beauty-control select:focus {
+  border-color: var(--accent);
+}
+
+.area-beauty-control input[type='range'] {
+  width: 100%;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.area-temperature-slider {
+  accent-color: #e39a72 !important;
+}
+
+.area-beauty-skin {
+  grid-column: span 2;
+}
+
+.area-beauty-skin-head {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.area-skin-tone-options {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.area-skin-tone-option {
+  position: relative;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 2px solid var(--paper);
+  border-radius: 50%;
+  outline: 1px solid var(--line-strong);
+  background: var(--swatch-color);
+  cursor: pointer;
+}
+
+.area-skin-tone-option:hover,
+.area-skin-tone-option.active {
+  outline-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.area-skin-tone-option.off {
+  background: var(--surface);
+}
+
+.area-skin-tone-option.off::after {
+  position: absolute;
+  top: 10px;
+  left: 3px;
+  width: 14px;
+  height: 1px;
+  background: var(--subtle);
+  content: '';
+  transform: rotate(45deg);
+}
+
+.area-skin-adjustments {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.area-skin-adjustments .area-beauty-control {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+}
+
+.area-beauty-switches {
+  display: grid;
+  align-content: center;
+  gap: 10px;
+}
+
+.area-beauty-switches > label {
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
 }
 
 .area-main-pane .modal-section.bound input:disabled,
@@ -5960,6 +7147,31 @@ label:focus-within {
 
 .area-main-pane .modal-section-head {
   margin-bottom: 8px;
+}
+
+.area-main-pane .modal-section-toggle {
+  padding: 8px 10px;
+  color: #3f3f3a;
+  border: 1px solid #ffd6c8;
+  border-radius: 7px;
+  background: var(--accent-soft);
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease;
+}
+
+.area-main-pane .modal-section-toggle:hover {
+  border-color: #f8b9a4;
+  background: #ffe4da;
+}
+
+.area-main-pane .modal-section-toggle > svg,
+.area-main-pane .modal-section-toggle-meta > svg {
+  color: var(--accent);
+}
+
+.area-main-pane .modal-section-toggle[aria-expanded='false'] {
+  margin-bottom: 0;
 }
 
 .area-main-pane .field {
@@ -6300,7 +7512,7 @@ label:focus-within {
 }
 
 .confirm-backdrop {
-  z-index: 120;
+  z-index: 420;
 }
 
 .confirm-modal {
@@ -6343,7 +7555,7 @@ label:focus-within {
 
 .toast {
   position: fixed;
-  z-index: 150;
+  z-index: 450;
   top: 82px;
   left: 50%;
   min-height: 42px;

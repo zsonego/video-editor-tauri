@@ -5253,13 +5253,13 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div class="flex-1"></div>
-        <!-- <button
+        <button
           class="h-9 w-24 text-on-surface-variant hover:text-electric-blue shrink-0 flex items-center justify-center gap-1.5 bg-surface-container-low/50 shadow-sm rounded-lg transition-all active:scale-95 hover:bg-surface-container-high border border-outline-variant/20"
           type="button"
           @click="showCreateTemplate"
         >
           <span class="text-[13px] font-bold whitespace-nowrap">创建模板</span>
-        </button> -->
+        </button>
         <button
           class="h-9 w-24 text-on-surface-variant hover:text-electric-blue shrink-0 flex items-center justify-center gap-1.5 bg-surface-container-low/50 shadow-sm rounded-lg transition-all active:scale-95 hover:bg-surface-container-high border border-outline-variant/20"
           type="button"
