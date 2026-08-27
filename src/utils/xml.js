@@ -31,8 +31,6 @@ const opacity = (value) => Math.min(1, Math.max(0, n(value, 1)));
 const progress = (value) => Math.min(1, Math.max(0, n(value, 0)));
 const percent = (value, fallback = 0) =>
   Math.min(100, Math.max(0, n(value, fallback)));
-const signedPercent = (value, fallback = 0) =>
-  Math.min(100, Math.max(-100, n(value, fallback)));
 const bool = (value) => value === true || value === 'true' || value === '1';
 
 const directChild = (node, tag) =>
@@ -140,7 +138,7 @@ export function buildXml(model) {
         `                        <speed>${n(area.speed, 1)}</speed>`,
         `                        <rotate>${n(area.rotate)}</rotate>`,
         '                    </transform>',
-        `                    <beauty lut-style="${attr(area.beauty?.lutStyle || 'none')}" lut-intensity="${attr(percent(area.beauty?.lutIntensity, 100))}" skin-tone="${attr(area.beauty?.skinTone || 'off')}" skin-temperature="${attr(signedPercent(area.beauty?.skinTemperature))}" skin-intensity="${attr(percent(area.beauty?.skinIntensity, 60))}" smoothing="${attr(percent(area.beauty?.smoothing))}" whitening="${attr(percent(area.beauty?.whitening))}" stabilization="${attr(Boolean(area.beauty?.stabilization))}" one-click="${attr(Boolean(area.beauty?.oneClickBeauty))}" />`,
+        `                    <beauty lut-style="${attr(area.beauty?.lutStyle || 'none')}" lut-intensity="${attr(percent(area.beauty?.lutIntensity, 100))}" skin-tone="${attr(area.beauty?.skinTone || 'off')}" skin-intensity="${attr(percent(area.beauty?.skinIntensity, 60))}" smoothing="${attr(percent(area.beauty?.smoothing))}" whitening="${attr(percent(area.beauty?.whitening))}" stabilization="${attr(Boolean(area.beauty?.stabilization))}" one-click="${attr(Boolean(area.beauty?.oneClickBeauty))}" />`,
         '                    <destination>',
         `                        <position x="${attr(n(area.x))}" y="${attr(n(area.y))}" />`,
         `                        <width>${n(area.width, 1920)}</width>`,
@@ -271,9 +269,6 @@ export function parseXml(xmlText) {
               100,
             ),
             skinTone: beauty?.getAttribute('skin-tone') || 'off',
-            skinTemperature: signedPercent(
-              beauty?.getAttribute('skin-temperature'),
-            ),
             skinIntensity: percent(
               beauty?.getAttribute('skin-intensity'),
               60,

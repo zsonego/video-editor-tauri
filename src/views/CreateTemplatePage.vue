@@ -105,7 +105,6 @@ const DEFAULT_AREA_BEAUTY_SETTINGS = Object.freeze({
   lutStyle: 'none',
   lutIntensity: 100,
   skinTone: 'off',
-  skinTemperature: 0,
   skinIntensity: 60,
   smoothing: 0,
   whitening: 0,
@@ -133,6 +132,12 @@ const THUMBNAIL_CAPTURE_SECONDS = 0.2;
 const THUMBNAIL_CONCURRENCY = 2;
 const DROPPED_AREA_WIDTH = 960;
 const DROPPED_AREA_HEIGHT = 540;
+const SEQUENCE_TIMELINE_BASE_PIXELS_PER_SECOND = 16;
+const SEQUENCE_TRACK_LABEL_WIDTH = 112;
+const SEQUENCE_TRACK_CLIP_MIN_WIDTH = 28;
+const SEQUENCE_TRACKS_HORIZONTAL_PADDING = 24;
+const SEQUENCE_TIMELINE_MIN_LANE_WIDTH = 484;
+const SEQUENCE_TIMELINE_TRAILING_DURATION = 10 * 1000;
 
 const createDefaultMediaGroups = () =>
   [
@@ -300,15 +305,83 @@ const invalidAreaCount = computed(() => {
 });
 const sequenceTimelineDuration = computed(() => {
   const clipsEnd = model.clips.reduce(
-    (maximum, clip) =>
-      Math.max(
-        maximum,
-        Math.max(0, Number(clip.starttime) || 0) +
-          Math.max(0, Number(clip.duration) || 0),
-      ),
+    (maximum, clip) => {
+      const duration = Math.max(0, Number(clip.duration) || 0);
+      const end = Math.max(0, Number(clip.starttime) || 0) + duration;
+      return Math.max(maximum, end);
+    },
     0,
   );
-  return Math.max(1, Number(model.duration) || 0, clipsEnd);
+  return Math.max(1, clipsEnd + SEQUENCE_TIMELINE_TRAILING_DURATION);
+});
+const sequenceTimelinePixelsPerSecond = computed(() =>
+  model.clips.reduce((pixelsPerSecond, clip) => {
+    const duration = Math.max(0, Number(clip.duration) || 0);
+    if (!duration) return pixelsPerSecond;
+    return Math.max(
+      pixelsPerSecond,
+      ((SEQUENCE_TRACK_CLIP_MIN_WIDTH + 4) * 1000) / duration,
+    );
+  }, SEQUENCE_TIMELINE_BASE_PIXELS_PER_SECOND),
+);
+const sequenceTimelineLaneWidth = computed(() =>
+  Math.max(
+    SEQUENCE_TIMELINE_MIN_LANE_WIDTH,
+    Math.ceil(
+      (sequenceTimelineDuration.value / 1000) *
+        sequenceTimelinePixelsPerSecond.value,
+    ),
+  ),
+);
+const sequenceTimelineEffectivePixelsPerSecond = computed(
+  () =>
+    sequenceTimelineLaneWidth.value /
+    (sequenceTimelineDuration.value / 1000),
+);
+const sequenceTracksStyle = computed(() => ({
+  width: `${
+    SEQUENCE_TRACKS_HORIZONTAL_PADDING +
+    SEQUENCE_TRACK_LABEL_WIDTH +
+    sequenceTimelineLaneWidth.value
+  }px`,
+}));
+const sequenceTimelineRulerScale = computed(() => {
+  const duration = sequenceTimelineDuration.value;
+  const targetStep =
+    (120 / sequenceTimelineEffectivePixelsPerSecond.value) * 1000;
+  const preferredSteps = [
+    1000, 2000, 5000, 10000, 15000, 30000, 60000, 120000, 300000,
+    600000,
+  ];
+  const majorStep =
+    preferredSteps.find((step) => step >= targetStep) ||
+    Math.ceil(targetStep / 600000) * 600000;
+  return {
+    duration,
+    majorStep,
+    minorStep: majorStep / 5,
+  };
+});
+const sequenceTimelineMajorTicks = computed(() => {
+  const { duration, majorStep } = sequenceTimelineRulerScale.value;
+  const ticks = [];
+  for (let value = 0; value <= duration; value += majorStep) {
+    ticks.push({ value, left: `${(value / duration) * 100}%` });
+  }
+  if (ticks.at(-1)?.value !== duration) {
+    ticks.push({ value: duration, left: '100%' });
+  }
+  return ticks;
+});
+const sequenceTimelineMinorTicks = computed(() => {
+  const { duration, majorStep, minorStep } = sequenceTimelineRulerScale.value;
+  const ticks = [];
+  for (let value = minorStep; value < duration; value += minorStep) {
+    if (Math.abs(value / majorStep - Math.round(value / majorStep)) > 0.0001) {
+      ticks.push({ value, left: `${(value / duration) * 100}%` });
+    }
+  }
+  return ticks;
 });
 const areaPreviewStyle = computed(() => {
   return areaRectStyle(areaDraft.value);
@@ -1496,11 +1569,6 @@ function createAreaBeautySettings(values = {}) {
       100,
     ),
     skinTone,
-    skinTemperature: clampNumber(
-      source.skinTemperature ?? DEFAULT_AREA_BEAUTY_SETTINGS.skinTemperature,
-      -100,
-      100,
-    ),
     skinIntensity: clampNumber(
       source.skinIntensity ?? DEFAULT_AREA_BEAUTY_SETTINGS.skinIntensity,
       0,
@@ -2137,6 +2205,32 @@ function setClipMaterialType(clip, materialType) {
   clip.materialType = materialType === 'fixed' ? 'fixed' : 'variable';
 }
 
+function clipTransitionDescription(clip) {
+  if (!clip?.transition?.enabled) return '';
+  const effect =
+    transitionEffects.find((item) => item.value === clip.transition.effect)
+      ?.label || clip.transition.effect || '转场';
+  return `${effect} · ${formatMilliseconds(clip.transition.duration)}`;
+}
+
+function sequenceClipTitle(clip) {
+  const details = [clip.name, formatMilliseconds(clip.duration)];
+  return details.join(' · ');
+}
+
+function sequenceTransitionStyle(clip) {
+  const total = sequenceTimelineDuration.value;
+  const boundary = clampNumber(
+    (Number(clip.starttime) || 0) + (Number(clip.duration) || 0),
+    0,
+    total,
+  );
+  return {
+    left: `${(boundary / total) * 100}%`,
+    width: '10px',
+  };
+}
+
 function sequenceClipStyle(clip) {
   const total = sequenceTimelineDuration.value;
   const start = clampNumber(Number(clip.starttime) || 0, 0, total);
@@ -2171,7 +2265,6 @@ watch(
           area.beauty?.lutStyle,
           area.beauty?.lutIntensity,
           area.beauty?.skinTone,
-          area.beauty?.skinTemperature,
           area.beauty?.skinIntensity,
           area.beauty?.smoothing,
           area.beauty?.whitening,
@@ -2524,28 +2617,31 @@ onBeforeUnmount(() => {
             </option>
           </select>
         </div>
-        <div class="field video-progress-field">
-          <label for="video-progress">LUT值</label>
-          <div class="video-progress-control">
+        <div class="video-progress-field">
+          <div class="area-inspector-row video-progress-control">
+            <label class="area-inspector-label" for="video-progress"
+              >LUT值</label
+            >
             <input
               id="video-progress"
               v-model.number="model.progress"
-              class="video-progress-range"
+              class="area-inspector-range"
               type="range"
               min="0"
               max="1"
               step="0.01"
             />
-            <input
-              v-model.number="model.progress"
-              class="video-progress-number"
-              type="number"
-              min="0"
-              max="1"
-              step="0.01"
-              aria-label="视频风格进度"
-              @change="model.progress = clampNumber(model.progress, 0, 1)"
-            />
+            <label class="area-inspector-value">
+              <input
+                v-model.number="model.progress"
+                type="number"
+                min="0"
+                max="1"
+                step="0.01"
+                aria-label="视频风格进度"
+                @change="model.progress = clampNumber(model.progress, 0, 1)"
+              />
+            </label>
           </div>
         </div>
           </section>
@@ -2869,7 +2965,36 @@ onBeforeUnmount(() => {
             >
           </div>
           <div class="sequence-tracks-scroller">
-            <div class="sequence-tracks">
+            <div class="sequence-tracks" :style="sequenceTracksStyle">
+              <div class="sequence-timeline-ruler-row">
+                <span aria-hidden="true"></span>
+                <div class="timeline-ruler sequence-timeline-ruler" aria-label="时间刻度">
+                  <span
+                    v-for="tick in sequenceTimelineMinorTicks"
+                    :key="`sequence-minor-${tick.value}`"
+                    class="timeline-ruler-tick is-minor"
+                    :style="{ left: tick.left }"
+                  ></span>
+                  <span
+                    v-for="tick in sequenceTimelineMajorTicks"
+                    :key="`sequence-major-${tick.value}`"
+                    class="timeline-ruler-tick is-major"
+                    :style="{ left: tick.left }"
+                  ></span>
+                  <span
+                    v-for="tick in sequenceTimelineMajorTicks"
+                    :key="`sequence-label-${tick.value}`"
+                    class="timeline-ruler-label"
+                    :class="{
+                      'is-start': tick.value === 0,
+                      'is-end': tick.value === sequenceTimelineDuration,
+                    }"
+                    :style="{ left: tick.left }"
+                  >
+                    {{ formatSeconds(tick.value) }}
+                  </span>
+                </div>
+              </div>
               <div class="sequence-track-row">
                 <div class="sequence-track-label">
                   <span>01</span><strong>固定转场层</strong>
@@ -2888,28 +3013,48 @@ onBeforeUnmount(() => {
                   <span>02</span><strong>素材层</strong>
                 </div>
                 <div class="sequence-track-lane">
-                  <button
+                  <template
                     v-for="(clip, index) in model.clips"
                     :key="`sequence-track-${clip.id}`"
-                    class="sequence-track-clip"
-                    :class="{
-                      active: selectedClipId === clip.id,
-                      'is-fixed-material':
-                        clipMaterialType(clip) === 'fixed',
-                      'is-variable-material':
-                        clipMaterialType(clip) === 'variable',
-                    }"
-                    :style="sequenceClipStyle(clip)"
-                    type="button"
-                    :title="`${clip.name} · ${formatMilliseconds(clip.duration)}`"
-                    @click="selectedClipId = clip.id"
                   >
-                    {{ index + 1 }} ·
-                    {{
-                      clipMaterialType(clip) === 'fixed' ? '固定' : '可变'
-                    }}
-                    · {{ clip.name }}
-                  </button>
+                    <button
+                      class="sequence-track-clip"
+                      :class="{
+                        active: selectedClipId === clip.id,
+                        'is-fixed-material':
+                          clipMaterialType(clip) === 'fixed',
+                        'is-variable-material':
+                          clipMaterialType(clip) === 'variable',
+                      }"
+                      :style="sequenceClipStyle(clip)"
+                      type="button"
+                      :title="sequenceClipTitle(clip)"
+                      @click="selectedClipId = clip.id"
+                    >
+                      <span class="sequence-track-clip-copy">
+                        {{ index + 1 }} ·
+                        {{
+                          clipMaterialType(clip) === 'fixed' ? '固定' : '可变'
+                        }}
+                        · {{ clip.name }}
+                      </span>
+                    </button>
+                    <button
+                      v-if="
+                        clip.transition?.enabled &&
+                        index < model.clips.length - 1
+                      "
+                      class="sequence-transition-bridge"
+                      :class="{ active: selectedClipId === clip.id }"
+                      :style="sequenceTransitionStyle(clip)"
+                      type="button"
+                      :title="`${clip.name} → ${model.clips[index + 1].name} · ${clipTransitionDescription(clip)}`"
+                      :aria-label="`${clip.name}与${model.clips[index + 1].name}之间的转场`"
+                      @click="selectedClipId = clip.id"
+                    >
+                      <span></span>
+                    </button>
+                  </template>
                 </div>
               </div>
               <div class="sequence-track-row">
@@ -3080,21 +3225,34 @@ onBeforeUnmount(() => {
                   </option>
                 </select>
               </div>
-              <div class="range-field">
-                <div>
-                  <label>转场时长</label
-                  ><strong>{{ selectedClip.transition.duration }} ms</strong>
-                </div>
+              <div class="area-inspector-row transition-duration-control">
+                <span class="area-inspector-label">转场时长</span>
                 <input
                   v-model.number="selectedClip.transition.duration"
+                  class="area-inspector-range"
                   type="range"
                   min="0"
                   max="2000"
                   step="10"
                 />
-                <div class="range-labels">
-                  <span>0ms</span><span>2000ms</span>
-                </div>
+                <label class="area-inspector-value">
+                  <input
+                    v-model.number="selectedClip.transition.duration"
+                    type="number"
+                    min="0"
+                    max="2000"
+                    step="10"
+                    aria-label="转场时长"
+                    @change="
+                      selectedClip.transition.duration = clampNumber(
+                        selectedClip.transition.duration,
+                        0,
+                        2000,
+                      )
+                    "
+                  />
+                  <small>ms</small>
+                </label>
               </div>
             </div>
             <p v-else class="disabled-hint">
@@ -3341,7 +3499,10 @@ onBeforeUnmount(() => {
                 </section>
               </aside>
 
-              <div class="area-main-pane">
+              <div
+                class="area-main-pane"
+                :class="{ 'has-area-draft': areaDraft }"
+              >
                 <section class="area-dialog-manager">
                   <div class="area-dialog-manager-head">
                     <div>
@@ -3436,8 +3597,8 @@ onBeforeUnmount(() => {
                       class="modal-section-collapse"
                     >
                         <div class="modal-section-collapse-inner">
-                    <div class="field">
-                      <label>镜像方式</label>
+                    <div class="area-inspector-choice-row">
+                      <span>镜像方式</span>
                       <div class="segmented three">
                         <button
                           :class="{ active: areaDraft.mirror === 'none' }"
@@ -3474,9 +3635,19 @@ onBeforeUnmount(() => {
                         </button>
                       </div>
                     </div>
-                    <div class="field-grid">
-                      <div class="field">
-                        <label>播放速度 <small>0–1</small></label>
+                    <div class="area-inspector-controls">
+                      <div class="area-inspector-row">
+                        <span class="area-inspector-label">播放速度</span>
+                        <input
+                          v-model.number="areaDraft.speed"
+                          class="area-inspector-range"
+                          type="range"
+                          :disabled="isBoundGeneratedArea(areaDraft)"
+                          min="0"
+                          max="1"
+                          step="0.01"
+                        />
+                        <label class="area-inspector-value">
                         <input
                           v-model.number="areaDraft.speed"
                           type="number"
@@ -3485,9 +3656,13 @@ onBeforeUnmount(() => {
                           max="1"
                           step="0.01"
                         />
+                          <small>x</small>
+                        </label>
                       </div>
-                      <div class="field">
-                        <label>旋转角度 <small>°</small></label>
+                      <div class="area-inspector-row">
+                        <span class="area-inspector-label">旋转角度</span>
+                        <span class="area-inspector-spacer"></span>
+                        <label class="area-inspector-value">
                         <input
                           v-model.number="areaDraft.rotate"
                           type="number"
@@ -3495,17 +3670,14 @@ onBeforeUnmount(() => {
                           min="-360"
                           max="360"
                         />
+                          <small>°</small>
+                        </label>
                       </div>
-                    </div>
-                    <div class="range-field area-opacity-field">
-                      <div>
-                        <label>透明度</label>
-                        <strong>{{
-                          clampNumber(areaDraft.opacity ?? 1, 0, 1).toFixed(2)
-                        }}</strong>
-                      </div>
+                      <div class="area-inspector-row">
+                        <span class="area-inspector-label">透明度</span>
                       <input
                         v-model.number="areaDraft.opacity"
+                        class="area-inspector-range"
                         type="range"
                         :disabled="isBoundGeneratedArea(areaDraft)"
                         min="0"
@@ -3513,8 +3685,17 @@ onBeforeUnmount(() => {
                         step="0.01"
                         @change="normalizeAreaOpacity()"
                       />
-                      <div class="range-labels">
-                        <span>0</span><span>1</span>
+                        <label class="area-inspector-value">
+                          <input
+                            v-model.number="areaDraft.opacity"
+                            type="number"
+                            :disabled="isBoundGeneratedArea(areaDraft)"
+                            min="0"
+                            max="1"
+                            step="0.01"
+                            @change="normalizeAreaOpacity()"
+                          />
+                        </label>
                       </div>
                     </div>
                         </div>
@@ -3560,62 +3741,75 @@ onBeforeUnmount(() => {
                       class="modal-section-collapse"
                     >
                         <div class="modal-section-collapse-inner">
-                    <div class="position-grid">
-                      <div class="field">
-                        <label>X 横坐标</label
-                        ><input
-                          v-model.number="areaDraft.x"
-                          type="number"
-                          :disabled="isBoundGeneratedArea(areaDraft)"
-                          min="0"
-                          max="1919"
-                          @change="normalizeAreaDraft"
-                        />
+                    <div class="area-inspector-controls">
+                      <div class="area-inspector-row area-inspector-pair-row">
+                        <span class="area-inspector-label">位置</span>
+                        <div class="area-inspector-pair">
+                          <label class="area-inspector-value has-prefix">
+                            <small>X</small>
+                            <input
+                              v-model.number="areaDraft.x"
+                              type="number"
+                              :disabled="isBoundGeneratedArea(areaDraft)"
+                              min="0"
+                              max="1919"
+                              @change="normalizeAreaDraft"
+                            />
+                          </label>
+                          <label class="area-inspector-value has-prefix">
+                            <small>Y</small>
+                            <input
+                              v-model.number="areaDraft.y"
+                              type="number"
+                              :disabled="isBoundGeneratedArea(areaDraft)"
+                              min="0"
+                              max="1079"
+                              @change="normalizeAreaDraft"
+                            />
+                          </label>
+                        </div>
                       </div>
-                      <div class="field">
-                        <label>Y 纵坐标</label
-                        ><input
-                          v-model.number="areaDraft.y"
-                          type="number"
-                          :disabled="isBoundGeneratedArea(areaDraft)"
-                          min="0"
-                          max="1079"
-                          @change="normalizeAreaDraft"
-                        />
+                      <div class="area-inspector-row area-inspector-pair-row">
+                        <span class="area-inspector-label">尺寸</span>
+                        <div class="area-inspector-pair">
+                          <label class="area-inspector-value has-prefix">
+                            <small>W</small>
+                            <input
+                              v-model.number="areaDraft.width"
+                              type="number"
+                              :disabled="isBoundGeneratedArea(areaDraft)"
+                              min="16"
+                              max="1920"
+                              step="16"
+                              @change="normalizeAreaDraft('width')"
+                            />
+                          </label>
+                          <label class="area-inspector-value has-prefix">
+                            <small>H</small>
+                            <input
+                              v-model.number="areaDraft.height"
+                              type="number"
+                              :disabled="isBoundGeneratedArea(areaDraft)"
+                              min="9"
+                              max="1080"
+                              step="9"
+                              @change="normalizeAreaDraft('height')"
+                            />
+                          </label>
+                        </div>
                       </div>
-                      <div class="field">
-                        <label>宽度 Width</label
-                        ><input
-                          v-model.number="areaDraft.width"
-                          type="number"
-                          :disabled="isBoundGeneratedArea(areaDraft)"
-                          min="16"
-                          max="1920"
-                          step="16"
-                          @change="normalizeAreaDraft('width')"
-                        />
-                      </div>
-                      <div class="field">
-                        <label>高度 Height</label
-                        ><input
-                          v-model.number="areaDraft.height"
-                          type="number"
-                          :disabled="isBoundGeneratedArea(areaDraft)"
-                          min="9"
-                          max="1080"
-                          step="9"
-                          @change="normalizeAreaDraft('height')"
-                        />
-                      </div>
-                      <div class="field">
-                        <label>层级 Index</label
-                        ><input
-                          v-model.number="areaDraft.index"
-                          type="number"
-                          min="0"
-                          step="1"
-                          @change="normalizeAreaIndex"
-                        />
+                      <div class="area-inspector-row">
+                        <span class="area-inspector-label">层级</span>
+                        <span class="area-inspector-spacer"></span>
+                        <label class="area-inspector-value">
+                          <input
+                            v-model.number="areaDraft.index"
+                            type="number"
+                            min="0"
+                            step="1"
+                            @change="normalizeAreaIndex"
+                          />
+                        </label>
                       </div>
                     </div>
                         </div>
@@ -3666,8 +3860,8 @@ onBeforeUnmount(() => {
                           </div>
 
                           <div class="area-beauty-grid">
-                            <label class="area-beauty-control">
-                              <span>LUT 风格</span>
+                            <div class="area-beauty-control is-select">
+                              <span class="area-inspector-label">LUT 风格</span>
                               <select v-model="areaDraft.beauty.lutStyle">
                                 <option value="none">无</option>
                                 <option value="clear">清透</option>
@@ -3676,17 +3870,13 @@ onBeforeUnmount(() => {
                                 <option value="vintage">复古</option>
                                 <option value="cool">冷调</option>
                               </select>
-                            </label>
+                            </div>
 
-                            <label class="area-beauty-control">
-                              <span>
-                                LUT 强度
-                                <strong
-                                  >{{ areaDraft.beauty.lutIntensity }}%</strong
-                                >
-                              </span>
+                            <div class="area-beauty-control">
+                              <span class="area-inspector-label">LUT 强度</span>
                               <input
                                 v-model.number="areaDraft.beauty.lutIntensity"
+                                class="area-inspector-range"
                                 type="range"
                                 min="0"
                                 max="100"
@@ -3695,41 +3885,66 @@ onBeforeUnmount(() => {
                                   normalizeAreaBeautyValue('lutIntensity')
                                 "
                               />
-                            </label>
+                              <label class="area-inspector-value">
+                                <input
+                                  v-model.number="areaDraft.beauty.lutIntensity"
+                                  type="number"
+                                  min="0"
+                                  max="100"
+                                  step="1"
+                                  @change="normalizeAreaBeautyValue('lutIntensity')"
+                                />
+                                <small>%</small>
+                              </label>
+                            </div>
 
-                            <label class="area-beauty-control">
-                              <span>
-                                磨皮
-                                <strong
-                                  >{{ areaDraft.beauty.smoothing }}%</strong
-                                >
-                              </span>
+                            <div class="area-beauty-control">
+                              <span class="area-inspector-label">磨皮</span>
                               <input
                                 v-model.number="areaDraft.beauty.smoothing"
+                                class="area-inspector-range"
                                 type="range"
                                 min="0"
                                 max="100"
                                 step="1"
                                 @change="normalizeAreaBeautyValue('smoothing')"
                               />
-                            </label>
+                              <label class="area-inspector-value">
+                                <input
+                                  v-model.number="areaDraft.beauty.smoothing"
+                                  type="number"
+                                  min="0"
+                                  max="100"
+                                  step="1"
+                                  @change="normalizeAreaBeautyValue('smoothing')"
+                                />
+                                <small>%</small>
+                              </label>
+                            </div>
 
-                            <label class="area-beauty-control">
-                              <span>
-                                美白
-                                <strong
-                                  >{{ areaDraft.beauty.whitening }}%</strong
-                                >
-                              </span>
+                            <div class="area-beauty-control">
+                              <span class="area-inspector-label">美白</span>
                               <input
                                 v-model.number="areaDraft.beauty.whitening"
+                                class="area-inspector-range"
                                 type="range"
                                 min="0"
                                 max="100"
                                 step="1"
                                 @change="normalizeAreaBeautyValue('whitening')"
                               />
-                            </label>
+                              <label class="area-inspector-value">
+                                <input
+                                  v-model.number="areaDraft.beauty.whitening"
+                                  type="number"
+                                  min="0"
+                                  max="100"
+                                  step="1"
+                                  @change="normalizeAreaBeautyValue('whitening')"
+                                />
+                                <small>%</small>
+                              </label>
+                            </div>
 
                             <div class="area-beauty-skin">
                               <div class="area-beauty-skin-head">
@@ -3766,44 +3981,13 @@ onBeforeUnmount(() => {
                                 v-if="areaDraft.beauty.skinTone !== 'off'"
                                 class="area-skin-adjustments"
                               >
-                                <label class="area-beauty-control">
-                                  <span>
-                                    冷暖
-                                    <strong>{{
-                                      areaDraft.beauty.skinTemperature
-                                    }}</strong>
-                                  </span>
-                                  <input
-                                    v-model.number="
-                                      areaDraft.beauty.skinTemperature
-                                    "
-                                    class="area-temperature-slider"
-                                    type="range"
-                                    min="-100"
-                                    max="100"
-                                    step="1"
-                                    @change="
-                                      normalizeAreaBeautyValue(
-                                        'skinTemperature',
-                                        -100,
-                                        100,
-                                      )
-                                    "
-                                  />
-                                </label>
-                                <label class="area-beauty-control">
-                                  <span>
-                                    程度
-                                    <strong
-                                      >{{
-                                        areaDraft.beauty.skinIntensity
-                                      }}%</strong
-                                    >
-                                  </span>
+                                <div class="area-beauty-control">
+                                  <span class="area-inspector-label">程度</span>
                                   <input
                                     v-model.number="
                                       areaDraft.beauty.skinIntensity
                                     "
+                                    class="area-inspector-range"
                                     type="range"
                                     min="0"
                                     max="100"
@@ -3812,7 +3996,18 @@ onBeforeUnmount(() => {
                                       normalizeAreaBeautyValue('skinIntensity')
                                     "
                                   />
-                                </label>
+                                  <label class="area-inspector-value">
+                                    <input
+                                      v-model.number="areaDraft.beauty.skinIntensity"
+                                      type="number"
+                                      min="0"
+                                      max="100"
+                                      step="1"
+                                      @change="normalizeAreaBeautyValue('skinIntensity')"
+                                    />
+                                    <small>%</small>
+                                  </label>
+                                </div>
                               </div>
                             </div>
 
@@ -3846,14 +4041,6 @@ onBeforeUnmount(() => {
                   </div>
 
                   <section class="canvas-preview-section">
-                  <div class="canvas-preview-copy">
-                    <strong>目标画布预览</strong>
-                    <span>{{
-                      isBoundGeneratedArea(areaDraft)
-                        ? '当前为绑定派生区域，请修改中间原区域的位置和尺寸'
-                        : '橙色为当前 Area，可拖动和缩放；点击其他区域可切换选择 · 尺寸固定 16:9'
-                    }}</span>
-                  </div>
                   <div
                     class="screen-preview"
                     :class="{ 'asset-drag-over': areaCanvasDragOver }"
@@ -4720,28 +4907,6 @@ label:focus-within {
 
 .video-progress-field {
   margin-top: 12px;
-}
-
-.video-progress-control {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 64px;
-  align-items: center;
-  gap: 10px;
-}
-
-.field .video-progress-range {
-  height: 20px;
-  padding: 0;
-  border: 0;
-  accent-color: var(--accent);
-  background: transparent;
-  box-shadow: none;
-  cursor: pointer;
-}
-
-.field .video-progress-number {
-  padding: 0 7px;
-  text-align: center;
 }
 
 .upload-field {
@@ -5674,10 +5839,73 @@ label:focus-within {
 }
 
 .sequence-tracks {
-  min-width: 620px;
+  min-width: 100%;
   display: grid;
   gap: 5px;
   padding: 12px;
+}
+
+.sequence-timeline-ruler-row {
+  height: 26px;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr);
+}
+
+.sequence-timeline-ruler-row > span {
+  position: sticky;
+  z-index: 6;
+  left: 0;
+  border-right: 1px solid var(--line);
+  background: #ecece7;
+}
+
+.sequence-timeline-ruler {
+  position: relative;
+  height: 26px;
+  overflow: hidden;
+  border-top: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: #f4f4f0;
+}
+
+.sequence-timeline-ruler .timeline-ruler-tick {
+  position: absolute;
+  top: 0;
+  width: 1px;
+  background: #b9bab4;
+  pointer-events: none;
+}
+
+.sequence-timeline-ruler .timeline-ruler-tick.is-minor {
+  height: 6px;
+  background: #d0d1cb;
+}
+
+.sequence-timeline-ruler .timeline-ruler-tick.is-major {
+  height: 11px;
+}
+
+.sequence-timeline-ruler .timeline-ruler-label {
+  position: absolute;
+  top: 12px;
+  color: #74756f;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 10px;
+  white-space: nowrap;
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+
+.sequence-timeline-ruler .timeline-ruler-label.is-start {
+  transform: none;
+}
+
+.sequence-timeline-ruler .timeline-ruler-label.is-end {
+  transform: translateX(-100%);
 }
 
 .sequence-track-row {
@@ -5685,13 +5913,16 @@ label:focus-within {
   min-width: 0;
   display: grid;
   grid-template-columns: 112px minmax(0, 1fr);
-  overflow: hidden;
+  overflow: visible;
   border: 1px solid var(--line);
   border-radius: 5px;
   background: #fafaf7;
 }
 
 .sequence-track-label {
+  position: sticky;
+  z-index: 6;
+  left: 0;
   min-width: 0;
   display: flex;
   align-items: center;
@@ -5752,9 +5983,70 @@ label:focus-within {
 }
 
 button.sequence-track-clip {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   border: 1px solid #e7aa95;
   background: #f9e8e1;
   cursor: pointer;
+}
+
+.sequence-track-clip-copy {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sequence-transition-bridge {
+  position: absolute;
+  z-index: 4;
+  top: 3px;
+  bottom: 3px;
+  min-width: 10px;
+  overflow: hidden;
+  padding: 0;
+  border: 1px solid #9565aa;
+  border-radius: 3px;
+  background:
+    linear-gradient(
+        135deg,
+        transparent 46%,
+        #a978bc 47%,
+        #a978bc 53%,
+        transparent 54%
+      )
+      left / 50% 100% no-repeat,
+    linear-gradient(
+        45deg,
+        transparent 46%,
+        #a978bc 47%,
+        #a978bc 53%,
+        transparent 54%
+      )
+      right / 50% 100% no-repeat,
+    #f3e8f7;
+  box-shadow: 0 1px 4px rgba(92, 53, 109, 0.2);
+  cursor: pointer;
+  transform: translateX(-50%);
+}
+
+.sequence-transition-bridge > span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  background: #815294;
+  transform: translateX(-50%);
+}
+
+.sequence-transition-bridge:hover,
+.sequence-transition-bridge.active {
+  border-color: #684078;
+  background-color: #e8d3ef;
+  box-shadow: 0 0 0 2px rgba(149, 101, 170, 0.22);
 }
 
 .sequence-track-clip.is-full {
@@ -6120,32 +6412,6 @@ button.sequence-track-clip.active {
   background: var(--surface);
 }
 
-.range-field > div:first-child {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 6px;
-  color: #5e5f59;
-  font-size: 10px;
-}
-
-.range-field strong {
-  color: var(--accent-dark);
-  font-size: 10px;
-}
-
-.range-field input {
-  width: 100%;
-  accent-color: var(--accent);
-}
-
-.range-labels {
-  display: flex;
-  justify-content: space-between;
-  color: var(--subtle);
-  font-size: 7px;
-}
-
 .disabled-hint {
   margin: 0;
   color: var(--subtle);
@@ -6438,7 +6704,7 @@ button.sequence-track-clip.active {
 }
 
 .area-modal {
-  width: min(1040px, 100%);
+  width: min(1320px, 100%);
   max-height: min(820px, calc(100vh - 56px));
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr) auto auto;
@@ -6564,14 +6830,14 @@ button.sequence-track-clip.active {
   height: 100%;
   min-height: 0;
   display: grid;
-  grid-template-columns: 320px minmax(0, 1fr);
+  grid-template-columns: 260px minmax(0, 1fr);
 }
 
 .area-asset-pane {
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-columns: 56px minmax(0, 1fr);
+  grid-template-columns: 50px minmax(0, 1fr);
   border-right: 1px solid var(--line);
   background: var(--surface);
 }
@@ -6643,7 +6909,7 @@ button.sequence-track-clip.active {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  padding: 18px 12px;
+  padding: 14px 9px;
 }
 
 .asset-picker-panel .modal-section-head {
@@ -6653,6 +6919,11 @@ button.sequence-track-clip.active {
 .area-main-pane {
   min-width: 0;
   min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 320px);
+  grid-template-rows: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 10px 12px;
   overflow-y: auto;
   overflow-anchor: none;
   padding: 14px 16px;
@@ -6661,6 +6932,8 @@ button.sequence-track-clip.active {
 }
 
 .area-dialog-manager {
+  grid-column: 1 / -1;
+  grid-row: 1;
   margin-bottom: 8px;
   padding: 8px;
   border: 1px solid var(--line);
@@ -6921,28 +7194,36 @@ button.sequence-track-clip.active {
 }
 
 .area-main-pane .modal-columns {
-  gap: 8px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
   margin-top: 0;
 }
 
+.area-main-pane.has-area-draft .area-dialog-manager {
+  grid-column: 1;
+}
+
 .area-settings-stack {
-  display: flex;
-  flex-direction: column;
+  display: contents;
 }
 
 .area-settings-stack > .canvas-preview-section {
-  order: 1;
+  grid-column: 1;
+  grid-row: 2;
   margin-top: 0;
 }
 
 .area-settings-stack > .modal-columns {
-  order: 2;
-  margin-top: 8px;
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: start;
+  padding-left: 9px;
+  border-left: 1px solid var(--line);
 }
 
 .area-main-pane .modal-section {
-  padding: 10px;
-  border-radius: 9px;
+  padding: 8px;
+  border-radius: 8px;
 }
 
 .area-main-pane .modal-section.bound {
@@ -6968,15 +7249,15 @@ button.sequence-track-clip.active {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 8px;
+  gap: 8px;
+  margin-bottom: 6px;
   color: var(--subtle);
   font-size: 9px;
 }
 
 .area-beauty-reset {
-  height: 25px;
-  padding: 0 9px;
+  height: 23px;
+  padding: 0 7px;
   flex: 0 0 auto;
   color: var(--accent-dark);
   border: 1px solid #f1c5b6;
@@ -6992,80 +7273,188 @@ button.sequence-track-clip.active {
   background: var(--accent-soft);
 }
 
-.area-beauty-grid {
+.area-inspector-choice-row {
+  min-height: 36px;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
+  grid-template-columns: 62px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  padding: 4px 2px;
+  border-bottom: 1px solid var(--line);
 }
 
-.area-beauty-control,
-.area-beauty-skin,
-.area-beauty-switches {
-  min-width: 0;
-  padding: 9px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--paper);
-}
-
-.area-beauty-control {
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-}
-
-.area-beauty-control > span,
+.area-inspector-choice-row > span,
+.area-inspector-label,
 .area-beauty-skin-head > span,
 .area-beauty-switches > label > span:first-child {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
   color: #5e5f59;
   font-size: 9px;
   font-weight: 600;
+  white-space: nowrap;
 }
 
-.area-beauty-control strong {
-  color: var(--accent-dark);
+.area-inspector-controls {
+  display: grid;
+}
+
+.area-inspector-row,
+.area-beauty-control {
+  min-width: 0;
+  min-height: 35px;
+  display: grid;
+  grid-template-columns: 62px minmax(60px, 1fr) 58px;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 2px;
+  border-bottom: 1px solid var(--line);
+}
+
+.area-inspector-controls > .area-inspector-row:last-child {
+  border-bottom: 0;
+}
+
+.transition-duration-control {
+  grid-template-columns: 62px minmax(60px, 1fr) 72px;
+}
+
+.area-inspector-pair-row {
+  grid-template-columns: 62px minmax(0, 1fr);
+}
+
+.area-inspector-pair {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.area-inspector-spacer {
+  min-width: 0;
+}
+
+.area-inspector-value {
+  min-width: 0;
+  height: 25px;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--paper);
+}
+
+.area-inspector-value:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.area-inspector-value input {
+  width: 100%;
+  min-width: 0;
+  height: 23px;
+  padding: 0 5px;
+  color: var(--ink);
+  border: 0;
+  outline: 0;
+  background: transparent;
   font-size: 9px;
+  text-align: center;
+}
+
+.area-inspector-value small {
+  padding-right: 5px;
+  color: var(--subtle);
+  font-size: 8px;
+}
+
+.area-inspector-value.has-prefix small {
+  padding-right: 0;
+  padding-left: 5px;
+  color: var(--accent-dark);
+  font-weight: 700;
+}
+
+.area-inspector-range {
+  width: 100%;
+  height: 18px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.area-inspector-range::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 999px;
+  background: var(--line-strong);
+}
+
+.area-inspector-range::-webkit-slider-thumb {
+  width: 11px;
+  height: 11px;
+  margin-top: -4px;
+  border: 2px solid white;
+  border-radius: 50%;
+  appearance: none;
+  background: var(--accent);
+  box-shadow: 0 1px 4px rgba(220, 77, 44, 0.28);
+}
+
+.area-inspector-range:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.area-inspector-range:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.area-beauty-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  border-top: 1px solid var(--line);
+}
+
+.area-beauty-control {
+  grid-template-columns: 62px minmax(60px, 1fr) 58px;
+}
+
+.area-beauty-control.is-select {
+  grid-template-columns: 62px minmax(0, 1fr);
 }
 
 .area-beauty-control select {
   width: 100%;
-  height: 28px;
+  height: 25px;
   padding: 0 8px;
   color: var(--ink);
   border: 1px solid var(--line-strong);
   outline: none;
   border-radius: 6px;
-  background: var(--surface);
+  background: var(--paper);
   font-size: 9px;
 }
 
 .area-beauty-control select:focus {
   border-color: var(--accent);
-}
-
-.area-beauty-control input[type='range'] {
-  width: 100%;
-  margin: 0;
-  accent-color: var(--accent);
-}
-
-.area-temperature-slider {
-  accent-color: #e39a72 !important;
+  box-shadow: 0 0 0 2px var(--accent-soft);
 }
 
 .area-beauty-skin {
-  grid-column: span 2;
+  min-width: 0;
+  border-bottom: 1px solid var(--line);
 }
 
 .area-beauty-skin-head {
   display: flex;
-  min-height: 28px;
+  min-height: 35px;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
+  padding: 4px 2px;
 }
 
 .area-skin-tone-options {
@@ -7076,8 +7465,8 @@ button.sequence-track-clip.active {
 
 .area-skin-tone-option {
   position: relative;
-  width: 24px;
-  height: 24px;
+  width: 21px;
+  height: 21px;
   padding: 0;
   border: 2px solid var(--paper);
   border-radius: 50%;
@@ -7098,7 +7487,7 @@ button.sequence-track-clip.active {
 
 .area-skin-tone-option.off::after {
   position: absolute;
-  top: 10px;
+  top: 8px;
   left: 3px;
   width: 14px;
   height: 1px;
@@ -7109,29 +7498,38 @@ button.sequence-track-clip.active {
 
 .area-skin-adjustments {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 8px;
+  grid-template-columns: minmax(0, 1fr);
+  border-top: 1px solid var(--line);
 }
 
 .area-skin-adjustments .area-beauty-control {
-  padding: 0;
+  padding: 4px 2px;
   border: 0;
+  border-bottom: 1px solid var(--line);
   border-radius: 0;
+}
+
+.area-skin-adjustments .area-beauty-control:last-child {
+  border-bottom: 0;
 }
 
 .area-beauty-switches {
   display: grid;
   align-content: center;
-  gap: 10px;
 }
 
 .area-beauty-switches > label {
   display: flex;
-  min-height: 24px;
+  min-height: 35px;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 7px;
+  padding: 4px 2px;
+  border-bottom: 1px solid var(--line);
+}
+
+.area-beauty-switches > label:last-child {
+  border-bottom: 0;
 }
 
 .area-main-pane .modal-section.bound input:disabled,
@@ -7146,11 +7544,11 @@ button.sequence-track-clip.active {
 }
 
 .area-main-pane .modal-section-head {
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 
 .area-main-pane .modal-section-toggle {
-  padding: 8px 10px;
+  padding: 6px 8px;
   color: #3f3f3a;
   border: 1px solid #ffd6c8;
   border-radius: 7px;
@@ -7197,6 +7595,7 @@ button.sequence-track-clip.active {
 }
 
 .area-editor-empty {
+  grid-column: 1 / -1;
   min-height: 280px;
   display: flex;
   flex-direction: column;
@@ -7226,32 +7625,16 @@ button.sequence-track-clip.active {
 }
 
 .canvas-preview-section {
-  display: grid;
-  grid-template-columns: 145px 1fr;
-  align-items: center;
-  gap: 18px;
+  display: block;
   margin-top: 12px;
-  padding: 15px;
+  padding: 10px;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: #292926;
 }
 
-.canvas-preview-copy {
-  display: flex;
-  flex-direction: column;
-}
-
-.canvas-preview-copy strong {
-  color: white;
+.area-main-pane .modal-section-toggle h3 {
   font-size: 11px;
-}
-
-.canvas-preview-copy span {
-  margin-top: 5px;
-  color: #96968e;
-  font-size: 8px;
-  line-height: 1.5;
 }
 
 .screen-preview {
@@ -7711,8 +8094,25 @@ button.sequence-track-clip.active {
 
   .area-main-pane {
     min-height: auto;
+    display: block;
     overflow: visible;
     padding: 18px;
+  }
+
+  .area-settings-stack {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .area-settings-stack > .canvas-preview-section {
+    order: 1;
+  }
+
+  .area-settings-stack > .modal-columns {
+    order: 2;
+    margin-top: 8px;
+    padding-left: 0;
+    border-left: 0;
   }
 }
 

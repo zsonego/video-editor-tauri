@@ -28,6 +28,11 @@ use std::{
 use libloading::Library;
 
 #[cfg(target_os = "windows")]
+const LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR: u32 = 0x0000_0100;
+#[cfg(target_os = "windows")]
+const LOAD_LIBRARY_SEARCH_DEFAULT_DIRS: u32 = 0x0000_1000;
+
+#[cfg(target_os = "windows")]
 const ES_SYSTEM_REQUIRED: u32 = 0x0000_0001;
 #[cfg(target_os = "windows")]
 const ES_DISPLAY_REQUIRED: u32 = 0x0000_0002;
@@ -453,7 +458,7 @@ impl ComposerRuntime {
                 "[composer] loading dynamic library: {}",
                 library_path.display()
             ));
-            let library = unsafe { Library::new(&library_path) }
+            let library = load_composer_library(&library_path)
                 .map_err(|error| format!("加载 Composer 动态库失败: {error}"))?;
             app_log_info("[composer] resolving composer_init");
             let init: ComposerInitFn = unsafe {
@@ -722,6 +727,22 @@ extern "C" fn composer_progress_callback(
     let progress = percent.clamp(0, 100) as u8;
 
     emit_composer_progress(&context.app, &context.export_id, progress, status);
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn load_composer_library(library_path: &Path) -> Result<Library, libloading::Error> {
+    #[cfg(target_os = "windows")]
+    {
+        let flags = LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS;
+        return unsafe {
+            libloading::os::windows::Library::load_with_flags(library_path, flags).map(Into::into)
+        };
+    }
+
+    #[cfg(target_os = "macos")]
+    unsafe {
+        Library::new(library_path)
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]

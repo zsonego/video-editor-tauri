@@ -2,7 +2,8 @@
   "productName": "aicut",
   "bundle": {
     "resources": {
-      "libs/windows/libcomposer.dll": "libcomposer.dll"
+      "libs/windows/libcomposer.dll": "libcomposer.dll",
+      "libs/windows/gpupixel.dll": "gpupixel.dll"
     }
   }
 }

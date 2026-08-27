@@ -43,7 +43,6 @@ const DEFAULT_BEAUTY_SETTINGS = Object.freeze({
   lutStyle: 'none',
   lutIntensity: 100,
   skinTone: 'off',
-  skinTemperature: 0,
   skinIntensity: 60,
   smoothing: 0,
   whitening: 0,
@@ -163,10 +162,6 @@ function syncBeautySettings(values) {
     const value = Number(values[key]);
     if (Number.isFinite(value)) beauty[key] = Math.min(100, Math.max(0, value));
   }
-  const skinTemperature = Number(values.skinTemperature);
-  if (Number.isFinite(skinTemperature)) {
-    beauty.skinTemperature = Math.min(100, Math.max(-100, skinTemperature));
-  }
   if (typeof values.stabilization === 'boolean') {
     beauty.stabilization = values.stabilization;
   }
@@ -179,13 +174,6 @@ function setBeautyPercent(key, event) {
   const value = Number(event.target.value);
   if (!Number.isFinite(value)) return;
   beauty[key] = Math.min(100, Math.max(0, value));
-  emitTransform();
-}
-
-function setSkinTemperature(event) {
-  const value = Number(event.target.value);
-  if (!Number.isFinite(value)) return;
-  beauty.skinTemperature = Math.min(100, Math.max(-100, value));
   emitTransform();
 }
 
@@ -759,31 +747,6 @@ defineExpose({
                 </div>
 
                 <template v-if="beauty.skinTone !== 'off'">
-                  <div class="property-row skin-adjustment-row">
-                    <span class="property-label">冷暖</span>
-                    <div class="range-control">
-                      <input
-                        class="effect-slider temperature-slider"
-                        type="range"
-                        min="-100"
-                        max="100"
-                        step="1"
-                        :value="beauty.skinTemperature"
-                        @input="setSkinTemperature"
-                      />
-                      <label class="value-field compact-value">
-                        <input
-                          type="number"
-                          min="-100"
-                          max="100"
-                          step="1"
-                          :value="beauty.skinTemperature"
-                          @input="setSkinTemperature"
-                        />
-                      </label>
-                    </div>
-                  </div>
-
                   <div class="property-row skin-adjustment-row">
                     <span class="property-label">程度</span>
                     <div class="range-control">
@@ -1429,10 +1392,6 @@ defineExpose({
   border-radius: 3px;
   background: #f4f4f4;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
-}
-
-.temperature-slider {
-  background: linear-gradient(90deg, #82d8e4 0%, #d7e1dd 50%, #e8a379 100%);
 }
 
 .skin-tone-settings {
