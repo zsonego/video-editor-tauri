@@ -415,9 +415,13 @@ let offsetPersistTimer = null;
 let projectUpdateTimer = null;
 let pendingProjectUpdate = null;
 let pendingMainVideoSeekTime = null;
+let beautyPreviewTimer = null;
+let pendingBeautyPreview = null;
+let beautyPreviewGeneration = 0;
 const canceledTemplateDownloadIds = new Set();
 const VIDEO_FRAME_REVEAL_TIME = 0.001;
 const VIDEO_FRAME_REVEAL_TIMEOUT = 2000;
+const BEAUTY_PREVIEW_DEBOUNCE_MS = 300;
 const VIDEO_SOURCE_TYPES = {
   mp4: 'video/mp4',
   m4v: 'video/mp4',
@@ -460,6 +464,8 @@ const modalPlaybackRate = ref(1);
 const modalPreviewProgressDragging = ref(false);
 const selectedVideoDuration = ref('00:00');
 const selectedVideoSource = ref('');
+const selectedVideoPath = ref('');
+const beautyPreviewLoading = ref(false);
 const importedVideoObjectUrls = new Set();
 
 // 时间线选区使用秒作为统一单位。
@@ -888,6 +894,7 @@ function statusMeta(status) {
 }
 
 function goHome() {
+  invalidateBeautyPreview();
   resetDraftBatchDelete();
   activeCategory.value = -1;
   templateSearchKeyword.value = '';
@@ -919,6 +926,7 @@ function goHome() {
   activeProjectExported.value = false;
   editingFromDraftLibrary.value = false;
   selectedVideoSource.value = '';
+  selectedVideoPath.value = '';
 
   resetModalPreviewVideo();
   resetMainPlayer();
@@ -2085,6 +2093,7 @@ async function initializeDefaultTemplateAssets() {
 }
 
 function clearProjectEditingState() {
+  invalidateBeautyPreview();
   videoTransformerRef.value?.pause?.();
   if (offsetPersistTimer) {
     window.clearTimeout(offsetPersistTimer);
@@ -2104,6 +2113,7 @@ function clearProjectEditingState() {
   selectedVideoKey.value = '';
   selectedVideoAssetId.value = '';
   selectedVideoSource.value = '';
+  selectedVideoPath.value = '';
   selectedVideoDuration.value = '00:00';
   selectedStyleName.value = '';
   subtitleText.value = defaultSubtitleText;
@@ -2545,6 +2555,7 @@ async function openReplaceFilePicker(segment, videoIndex) {
 
 // 选择素材后恢复其时间线状态，播放指针始终从 0 秒开始。
 function selectVideoForTimeline(video, styleName = '') {
+  invalidateBeautyPreview();
   cacheCurrentVideoTimelineState();
 
   const videoInfo =
@@ -2558,6 +2569,7 @@ function selectVideoForTimeline(video, styleName = '') {
   selectedVideoKey.value = nextVideoKey;
   selectedVideoDuration.value = videoInfo.duration || '00:00';
   selectedVideoSource.value = videoInfo.source || '';
+  selectedVideoPath.value = videoInfo.localPath || '';
   playerCurrentTime.value = 0;
   timelinePlayheadTime.value = 0;
   timelinePreviewSeeking.value = false;
@@ -2616,6 +2628,7 @@ function updateTransformerVideoControls(state = {}) {
     updatePlayerControls();
   }
   if (state.paused === false) {
+    invalidateBeautyPreview();
     timelinePreviewSeeking.value = false;
   }
   playerCurrentTime.value = currentTime;
@@ -2635,6 +2648,116 @@ function handleTimelineVideoTransformChange(values) {
   const key = selectedVideoKey.value;
   if (!key) return;
   videoTransformStateCache[key] = { ...values };
+  scheduleBeautyPreview(values);
+}
+
+function clampBeautyUnit(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.min(1, Math.max(0, number / 100));
+}
+
+function buildBeautyFrameParams(values = {}) {
+  const beauty = values.beauty || {};
+  const skinIntensity = clampBeautyUnit(beauty.skinIntensity);
+  const skinTone =
+    beauty.skinTone === 'natural'
+      ? -skinIntensity
+      : beauty.skinTone === 'warm'
+        ? skinIntensity
+        : 0;
+  const lutFile = String(beauty.lutFile || '').trim();
+
+  return {
+    whiteness: clampBeautyUnit(beauty.whitening),
+    smoothing: clampBeautyUnit(beauty.smoothing),
+    skin_tone: skinTone,
+    face_detect: 1,
+    rotation: Number(values.angle) || 0,
+    lut_file: lutFile || null,
+    lut_intensity: lutFile ? clampBeautyUnit(beauty.lutIntensity) : 0,
+    positionX: Number(values.x) || 0,
+    positionY: Number(values.y) || 0,
+    scale: Number(values.scale) || 1,
+    stabilization: Boolean(beauty.stabilization),
+    one_click_beauty: Boolean(beauty.oneClickBeauty),
+  };
+}
+
+function invalidateBeautyPreview() {
+  beautyPreviewGeneration += 1;
+  pendingBeautyPreview = null;
+  if (beautyPreviewTimer) {
+    window.clearTimeout(beautyPreviewTimer);
+    beautyPreviewTimer = null;
+  }
+}
+
+function scheduleBeautyPreview(values, delay = BEAUTY_PREVIEW_DEBOUNCE_MS) {
+  if (!selectedVideoPath.value) return;
+
+  videoTransformerRef.value?.pause?.();
+  beautyPreviewGeneration += 1;
+  pendingBeautyPreview = {
+    generation: beautyPreviewGeneration,
+    videoKey: selectedVideoKey.value,
+    videoPath: selectedVideoPath.value,
+    timestampMs: Math.max(
+      0,
+      Math.round((Number(timelinePlayheadTime.value) || 0) * 1000),
+    ),
+    values: {
+      ...values,
+      beauty: { ...(values?.beauty || {}) },
+    },
+  };
+
+  if (beautyPreviewTimer) window.clearTimeout(beautyPreviewTimer);
+  beautyPreviewTimer = window.setTimeout(() => {
+    beautyPreviewTimer = null;
+    void processPendingBeautyPreview();
+  }, delay);
+}
+
+function handleBeautyPreviewRequest(values) {
+  scheduleBeautyPreview(values, 0);
+}
+
+async function processPendingBeautyPreview() {
+  if (beautyPreviewLoading.value || !pendingBeautyPreview) return;
+
+  const request = pendingBeautyPreview;
+  pendingBeautyPreview = null;
+  beautyPreviewLoading.value = true;
+  try {
+    const result = await invoke('preview_composer_beauty_frame', {
+      inputVideoPath: request.videoPath,
+      timestampMs: request.timestampMs,
+      params: buildBeautyFrameParams(request.values),
+    });
+    if (
+      request.generation !== beautyPreviewGeneration ||
+      request.videoKey !== selectedVideoKey.value ||
+      request.videoPath !== selectedVideoPath.value
+    ) {
+      return;
+    }
+
+    await videoTransformerRef.value?.showBeautyPreview?.(
+      convertFileSrc(result.outputImagePath),
+    );
+  } catch (error) {
+    if (request.generation === beautyPreviewGeneration) {
+      systemMessage.error(
+        error?.message || String(error || '美颜预览生成失败'),
+      );
+    }
+  } finally {
+    beautyPreviewLoading.value = false;
+    if (pendingBeautyPreview && !beautyPreviewTimer) {
+      void processPendingBeautyPreview();
+    }
+  }
 }
 
 function clampTimelineStart(startTime) {
@@ -2654,6 +2777,7 @@ function syncPlayheadToTimelineStart() {
 }
 
 function seekMainPlayerToTimelineTime(targetTime) {
+  invalidateBeautyPreview();
   const video = mainVideoRef.value;
   if (video) {
     const duration = Number.isFinite(video.duration) ? video.duration : 0;
@@ -5147,6 +5271,7 @@ onMounted(() => {
 
 // 离开页面时释放全局监听、定时器和本地视频 URL。
 onBeforeUnmount(() => {
+  invalidateBeautyPreview();
   cacheCurrentVideoTimelineState();
   document.documentElement.classList.remove('dark');
   window.removeEventListener('resize', schedulePlayerResize);
@@ -5898,10 +6023,12 @@ onBeforeUnmount(() => {
                 :source="selectedVideoSource"
                 :source-name="selectedVideoName"
                 :initial-transform="selectedVideoTransform"
+                :preview-loading="beautyPreviewLoading"
                 @change="handleTimelineVideoTransformChange"
                 @video-loaded="handleTransformerVideoLoaded"
                 @playback-change="updateTransformerVideoControls"
                 @timeupdate="updateTransformerVideoControls"
+                @preview-request="handleBeautyPreviewRequest"
                 @error="systemMessage.error($event)"
               >
                 <template #timeline>

@@ -12,6 +12,7 @@ dist
 dist-ssr
 *.local
 src-tauri/target
+src-tauri/libs/macos-bundle
 video-editor-v4
 
 # Editor directories and files

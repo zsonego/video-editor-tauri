@@ -1,12 +1,32 @@
 {
   "bundle": {
-    "targets": ["app"],
+    "targets": [
+      "app"
+    ],
     "category": "Video",
     "resources": {
-      "infoplist/": ""
+      "infoplist/": "",
+      "resources/luts/": "luts/"
     },
     "macOS": {
-      "frameworks": ["libs/macos-bundle/libcomposer.dylib"],
+      "frameworks": [
+        "libs/macos-bundle/libcomposer.dylib",
+        "libs/macos-bundle/gpupixel.framework",
+        "libs/macos-bundle/libfontconfig.1.dylib",
+        "libs/macos-bundle/libfreetype.6.dylib",
+        "libs/macos-bundle/libglib-2.0.0.dylib",
+        "libs/macos-bundle/libgraphite2.3.2.1.dylib",
+        "libs/macos-bundle/libharfbuzz.0.dylib",
+        "libs/macos-bundle/libintl.8.dylib",
+        "libs/macos-bundle/libmp3lame.0.dylib",
+        "libs/macos-bundle/libpcre2-8.0.dylib",
+        "libs/macos-bundle/libpng16.16.dylib",
+        "libs/macos-bundle/libX11.6.dylib",
+        "libs/macos-bundle/libXau.6.dylib",
+        "libs/macos-bundle/libxcb.1.1.0.dylib",
+        "libs/macos-bundle/libXdmcp.6.dylib",
+        "libs/macos-bundle/libzimg.2.dylib"
+      ],
       "minimumSystemVersion": "12.0",
       "signingIdentity": "Apple Distribution: Loogear Co., Ltd. (PMBZKYYRRP)",
       "entitlements": "./Entitlements.appstore.plist",

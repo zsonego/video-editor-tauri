@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import SessionExpiredDialogHost from './components/SessionExpiredDialogHost.vue';
 import SystemMessageHost from './components/SystemMessageHost.vue';
@@ -33,6 +33,16 @@ function handleSessionExpiredConfirm() {
   sessionStorage.clear();
   router.replace('/login');
 }
+
+const routeViewListeners = computed(() => {
+  if (router.currentRoute.value.name === 'login') {
+    return { login: handleLoginSuccess };
+  }
+  if (router.currentRoute.value.name === 'home') {
+    return { logout: handleLogout };
+  }
+  return {};
+});
 </script>
 
 <template>
@@ -45,11 +55,7 @@ function handleSessionExpiredConfirm() {
     </div>
   </Transition>
   <RouterView v-slot="{ Component }">
-    <component
-      :is="Component"
-      @login="handleLoginSuccess"
-      @logout="handleLogout"
-    />
+    <component :is="Component" v-on="routeViewListeners" />
   </RouterView>
   <SessionExpiredDialogHost @confirm="handleSessionExpiredConfirm" />
   <SystemMessageHost />

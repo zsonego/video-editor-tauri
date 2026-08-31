@@ -1,7 +1,8 @@
 <script setup>
-import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
-import { convertFileSrc } from '@tauri-apps/api/core';
+import { convertFileSrc, invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import {
   AlertTriangle,
@@ -224,6 +225,12 @@ let activeThumbnailJobs = 0;
 let thumbnailPageDisposed = false;
 const thumbnailQueue = [];
 const activeThumbnailCancels = new Set();
+let prBridgeSessionId = '';
+let stopPrBridgeEventListener = null;
+let prBridgePageActive = false;
+let prBridgePollTimer = null;
+let prBridgePolling = false;
+const handledPrBridgeEventIds = new Set();
 
 const selectedClip = computed(
   () => model.clips.find((clip) => clip.id === selectedClipId.value) ?? null,
@@ -427,9 +434,15 @@ const subtitlePreviewText = computed(
 );
 
 function replaceModel(next) {
-  disposeAssetGroups(model.mediaGroups);
-  Object.keys(model).forEach((key) => delete model[key]);
+  if (!next || !Array.isArray(next.clips) || !Array.isArray(next.mediaGroups)) {
+    throw new Error('模板数据缺少片段或素材目录。');
+  }
+  disposeAssetGroups(Array.isArray(model.mediaGroups) ? model.mediaGroups : []);
+  const nextKeys = new Set(Object.keys(next));
   Object.assign(model, next);
+  Object.keys(model).forEach((key) => {
+    if (!nextKeys.has(key)) delete model[key];
+  });
   Object.keys(selectedFilePaths).forEach((key) => {
     selectedFilePaths[key] = '';
   });
@@ -787,6 +800,8 @@ function createClip() {
       ? Number(previous.starttime) + Number(previous.duration)
       : 0,
     duration: 3000,
+    topVideo: '',
+    topVideoSourcePath: '',
     areas: [],
     subtitles: [],
     transition: {
@@ -1487,6 +1502,20 @@ function clearTrackFile(track) {
   model.tracks[track] = '';
 }
 
+async function updateSelectedClipTopVideo() {
+  if (!selectedClip.value) return;
+  const [sourcePath] = await pickMediaPaths();
+  if (!sourcePath) return;
+  selectedClip.value.topVideo = assetPath(fileName(sourcePath));
+  selectedClip.value.topVideoSourcePath = sourcePath;
+}
+
+function clearSelectedClipTopVideo() {
+  if (!selectedClip.value) return;
+  selectedClip.value.topVideo = '';
+  selectedClip.value.topVideoSourcePath = '';
+}
+
 function clearDemoFile() {
   selectedFilePaths.demo = '';
   model.demoPath = '';
@@ -2068,7 +2097,7 @@ function validateModel() {
     return '视频总时长需填写为正整数。';
   }
   if (!model.demoPath) return '请先上传模板示例视频。';
-  if (!model.tracks.overlay) return '请先上传必需的顶层视频。';
+  if (!model.tracks.background) return '请先上传必需的固定素材视频。';
 
   const assetIds = new Set(allAssets.value.map((asset) => asset.id));
   for (const group of model.mediaGroups) {
@@ -2084,7 +2113,10 @@ function validateModel() {
 
   for (const clip of model.clips) {
     if (!clip.name.trim()) return '片段名称不能为空。';
-    if (!clip.areas.length) {
+    if (clipMaterialType(clip) === 'fixed' && !clip.topVideo) {
+      return `固定片段“${clip.name}”需要设置顶层视频。`;
+    }
+    if (clipMaterialType(clip) === 'variable' && !clip.areas.length) {
       return `片段“${clip.name}”至少需要添加一个 Area 才能导出。`;
     }
     if (
@@ -2174,6 +2206,150 @@ async function importXml(event) {
   }
 }
 
+function resolvePrBridgeResourcePath(projectRoot, resourcePath) {
+  const root = String(projectRoot || '').trim().replace(/[\\/]+$/, '');
+  let relative = String(resourcePath || '').trim().replaceAll('\\', '/');
+  if (!root || !relative) return '';
+  if (/^(?:[a-zA-Z]:\/|\/|file:)/.test(relative)) return '';
+  relative = relative.replace(/^\.\//, '');
+  if (relative.startsWith('template/')) relative = relative.slice(9);
+  const parts = relative.split('/').filter(Boolean);
+  if (!parts.length || parts.some((part) => part === '.' || part === '..')) {
+    return '';
+  }
+  const separator = root.includes('\\') ? '\\' : '/';
+  return `${root}${separator}${parts.join(separator)}`;
+}
+
+function applyPrTemplateExport(payload) {
+  if (!payload?.xmlContent || !payload?.projectRoot) {
+    throw new Error('PR 导出通知缺少模板内容或项目目录。');
+  }
+
+  const nextModel = parseXml(payload.xmlContent);
+  const resolvedSelections = {
+    demo: resolvePrBridgeResourcePath(payload.projectRoot, nextModel.demoPath),
+    background: resolvePrBridgeResourcePath(
+      payload.projectRoot,
+      nextModel.tracks.background,
+    ),
+    overlay: resolvePrBridgeResourcePath(
+      payload.projectRoot,
+      nextModel.tracks.overlay,
+    ),
+    audioBackground: resolvePrBridgeResourcePath(
+      payload.projectRoot,
+      nextModel.tracks.audioBackground,
+    ),
+    recording: resolvePrBridgeResourcePath(
+      payload.projectRoot,
+      nextModel.tracks.recording,
+    ),
+  };
+
+  nextModel.mediaGroups.forEach((group) => {
+    group.assets.forEach((asset) => {
+      asset.sourcePath = resolvePrBridgeResourcePath(
+        payload.projectRoot,
+        asset.filepath,
+      );
+      if (asset.sourcePath && asset.mediaType !== 'audio') {
+        asset.thumbnailStatus = 'loading';
+      }
+    });
+  });
+  nextModel.clips.forEach((clip) => {
+    clip.topVideoSourcePath = resolvePrBridgeResourcePath(
+      payload.projectRoot,
+      clip.topVideo,
+    );
+  });
+  nextModel.clips.sort(
+    (left, right) => Number(left.starttime) - Number(right.starttime),
+  );
+
+  replaceModel(nextModel);
+  Object.assign(selectedFilePaths, resolvedSelections);
+  const videoAssets = model.mediaGroups.flatMap((group) =>
+    group.assets.filter(
+      (asset) => asset.sourcePath && asset.mediaType !== 'audio',
+    ),
+  );
+  videoAssets.forEach(enqueueThumbnail);
+  selectedClipId.value = model.clips[0]?.id || '';
+  showToast(`已接收 PR 模板“${model.name}”`);
+}
+
+function handlePrTemplateExport(payload) {
+  if (!prBridgePageActive) return;
+  const eventId = String(payload?.eventId || '');
+  if (eventId && handledPrBridgeEventIds.has(eventId)) return;
+  try {
+    applyPrTemplateExport(payload);
+  } catch (error) {
+    console.error('读取 PR 导出模板失败', error, payload);
+    showToast(error?.message || '读取 PR 导出模板失败。', 'error');
+  } finally {
+    if (eventId) {
+      if (handledPrBridgeEventIds.size >= 256) {
+        handledPrBridgeEventIds.clear();
+      }
+      handledPrBridgeEventIds.add(eventId);
+    }
+  }
+}
+
+async function pollPrTemplateExports() {
+  if (!prBridgePageActive || prBridgePolling) return;
+  prBridgePolling = true;
+  try {
+    const exports = await invoke('take_pr_template_exports');
+    if (prBridgePageActive && Array.isArray(exports)) {
+      exports.forEach(handlePrTemplateExport);
+    }
+  } catch (error) {
+    console.error('读取 PR 导出通知失败', error);
+  } finally {
+    prBridgePolling = false;
+  }
+}
+
+async function startPrBridgeForPage() {
+  try {
+    const stopListening = await listen(
+      'pr-template-exported',
+      ({ payload }) => {
+        handlePrTemplateExport(payload);
+      },
+    );
+    if (!prBridgePageActive) {
+      stopListening();
+      return;
+    }
+    stopPrBridgeEventListener = stopListening;
+    const bridge = await invoke('start_pr_bridge');
+    const sessionId = bridge?.sessionId || '';
+    if (!prBridgePageActive) {
+      stopListening();
+      stopPrBridgeEventListener = null;
+      if (sessionId) await invoke('stop_pr_bridge', { sessionId });
+      return;
+    }
+    prBridgeSessionId = sessionId;
+    await pollPrTemplateExports();
+    if (prBridgePageActive) {
+      prBridgePollTimer = window.setInterval(pollPrTemplateExports, 500);
+    }
+  } catch (error) {
+    if (prBridgePageActive) {
+      showToast(
+        error?.message || String(error) || 'PR 对接服务启动失败。',
+        'error',
+      );
+    }
+  }
+}
+
 function assetName(assetId) {
   return (
     allAssets.value.find((asset) => asset.id === assetId)?.name ||
@@ -2248,8 +2424,8 @@ function sequenceTrackFileLabel(path) {
 
 watch(
   () =>
-    model.clips.flatMap((clip) =>
-      clip.areas
+    (Array.isArray(model.clips) ? model.clips : []).flatMap((clip) =>
+      (Array.isArray(clip.areas) ? clip.areas : [])
         .filter((area) => !isBoundGeneratedArea(area))
         .map((area) => [
           area.id,
@@ -2277,7 +2453,28 @@ watch(
   { deep: true, flush: 'sync' },
 );
 
+onMounted(() => {
+  prBridgePageActive = true;
+  startPrBridgeForPage();
+});
+
 onBeforeUnmount(() => {
+  prBridgePageActive = false;
+  if (prBridgePollTimer) {
+    window.clearInterval(prBridgePollTimer);
+    prBridgePollTimer = null;
+  }
+  prBridgePolling = false;
+  handledPrBridgeEventIds.clear();
+  const bridgeSessionId = prBridgeSessionId;
+  prBridgeSessionId = '';
+  if (bridgeSessionId) {
+    invoke('stop_pr_bridge', { sessionId: bridgeSessionId }).catch((error) => {
+      console.error('关闭 PR 对接服务失败', error);
+    });
+  }
+  stopPrBridgeEventListener?.();
+  stopPrBridgeEventListener = null;
   thumbnailPageDisposed = true;
   closeAreaContextMenu();
   thumbnailQueue.splice(0).forEach(disposeAsset);
@@ -2886,7 +3083,7 @@ onBeforeUnmount(() => {
               <div class="preview-number">
                 {{ String(index + 1).padStart(2, '0') }}
               </div>
-              <div v-if="clip.areas.length" class="preview-content">
+              <div v-if="clip.topVideo || clip.areas.length" class="preview-content">
                 <Play :size="22" fill="currentColor" />
               </div>
               <div v-else class="preview-placeholder">
@@ -2929,7 +3126,11 @@ onBeforeUnmount(() => {
                       : '可变素材'
                   }}
                 </span>
-                <span :class="{ muted: !clip.areas.length }"
+                <span
+                  v-if="clipMaterialType(clip) === 'fixed' && clip.topVideo"
+                  ><Video :size="12" /> 顶层视频</span
+                >
+                <span v-else :class="{ muted: !clip.areas.length }"
                   ><Layers3 :size="12" /> {{ clip.areas.length }} Area</span
                 >
                 <span v-if="clip.subtitles.length"
@@ -3382,35 +3583,35 @@ onBeforeUnmount(() => {
             </button>
           </div>
 
-          <div class="area-track-upload area-track-upload-required">
+          <div class="area-track-upload">
             <div class="area-track-upload-copy">
               <span class="area-track-upload-icon"><Video :size="17" /></span>
               <div>
-                <strong>顶层视频 <em>必需</em></strong>
-                <span :title="model.tracks.overlay || ''">{{
-                  model.tracks.overlay
-                    ? fileName(model.tracks.overlay)
-                    : '请上传一个透明前景视频'
+                <strong>顶层视频 <em>可选</em></strong>
+                <span :title="selectedClip.topVideoSourcePath || selectedClip.topVideo || ''">{{
+                  selectedClip.topVideo
+                    ? fileName(selectedClip.topVideo)
+                    : '当前片段没有顶层切片'
                 }}</span>
               </div>
             </div>
             <div class="upload-actions">
               <button
-                v-if="model.tracks.overlay"
+                v-if="selectedClip.topVideo"
                 class="plain-icon danger-hover"
                 type="button"
                 title="移除顶层视频"
-                @click="clearTrackFile('overlay')"
+                @click="clearSelectedClipTopVideo"
               >
                 <X :size="14" />
               </button>
               <button
                 class="button button-secondary area-track-upload-button"
                 type="button"
-                @click="updateTrackFile('overlay')"
+                @click="updateSelectedClipTopVideo"
               >
                 <Upload :size="14" />
-                {{ model.tracks.overlay ? '重新上传' : '上传视频' }}
+                {{ selectedClip.topVideo ? '重新上传' : '上传视频' }}
               </button>
             </div>
           </div>

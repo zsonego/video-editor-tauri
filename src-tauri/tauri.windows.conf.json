@@ -3,7 +3,8 @@
   "bundle": {
     "resources": {
       "libs/windows/libcomposer.dll": "libcomposer.dll",
-      "libs/windows/gpupixel.dll": "gpupixel.dll"
+      "libs/windows/gpupixel.dll": "gpupixel.dll",
+      "resources/luts/": "luts/"
     }
   }
 }

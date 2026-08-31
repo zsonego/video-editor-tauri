@@ -8,11 +8,13 @@ import {
   watch,
 } from 'vue';
 import { Canvas, Control, FabricImage, controlsUtils } from 'fabric';
+import lutManifest from '../../src-tauri/resources/luts/luts.json';
 
 const props = defineProps({
   source: { type: String, default: '' },
   sourceName: { type: String, default: '' },
   initialTransform: { type: Object, default: null },
+  previewLoading: { type: Boolean, default: false },
 });
 
 const emit = defineEmits([
@@ -21,6 +23,7 @@ const emit = defineEmits([
   'playback-change',
   'timeupdate',
   'error',
+  'preview-request',
 ]);
 
 const CANVAS_WIDTH = 960;
@@ -50,6 +53,10 @@ const DEFAULT_BEAUTY_SETTINGS = Object.freeze({
   oneClickBeauty: false,
 });
 const beauty = reactive({ ...DEFAULT_BEAUTY_SETTINGS });
+const LUT_OPTIONS = Object.freeze(
+  lutManifest.luts.map((lut) => Object.freeze({ ...lut })),
+);
+const LUT_OPTION_IDS = new Set(LUT_OPTIONS.map((lut) => lut.id));
 const SKIN_TONE_OPTIONS = Object.freeze([
   { value: 'off', label: '不设置', color: 'transparent' },
   { value: 'natural', label: '白皙', color: '#fddcbe' },
@@ -61,6 +68,8 @@ let videoObject = null;
 let videoElement = null;
 let animationFrameId = 0;
 let sourceRevision = 0;
+let beautyPreviewRevision = 0;
+const beautyPreviewSource = ref('');
 
 function round(value, precision = 1) {
   const multiplier = 10 ** precision;
@@ -134,20 +143,31 @@ function emitTimeUpdate() {
   });
 }
 
+function getBeautySettings() {
+  const selectedLut = LUT_OPTIONS.find((lut) => lut.id === beauty.lutStyle);
+  return {
+    ...beauty,
+    lutFile: selectedLut?.file || '',
+  };
+}
+
 function emitTransform() {
+  clearBeautyPreview();
   emit('change', {
     x: transform.x,
     y: transform.y,
     angle: transform.angle,
     scale: transform.scale,
     scalePercent: round(transform.scale * 100),
-    beauty: { ...beauty },
+    beauty: getBeautySettings(),
   });
 }
 
 function syncBeautySettings(values) {
   if (!values || typeof values !== 'object') return;
-  if (typeof values.lutStyle === 'string') beauty.lutStyle = values.lutStyle;
+  if (values.lutStyle === 'none' || LUT_OPTION_IDS.has(values.lutStyle)) {
+    beauty.lutStyle = values.lutStyle;
+  }
   if (SKIN_TONE_OPTIONS.some((option) => option.value === values.skinTone)) {
     beauty.skinTone = values.skinTone;
   } else if (values.skinTone === 'healthy') {
@@ -298,6 +318,7 @@ function onVideoPause() {
 
 function disposeVideo() {
   sourceRevision += 1;
+  clearBeautyPreview();
   cancelAnimationFrame(animationFrameId);
   animationFrameId = 0;
   if (videoObject && fabricCanvas) fabricCanvas.remove(videoObject);
@@ -373,6 +394,7 @@ function resetTransform() {
 
 async function togglePlayback() {
   if (!videoElement || !isReady.value) return;
+  clearBeautyPreview();
   try {
     if (videoElement.paused) await videoElement.play();
     else videoElement.pause();
@@ -387,6 +409,7 @@ function pause() {
 
 function seekTo(value) {
   if (!videoElement) return;
+  clearBeautyPreview();
   const duration = Number.isFinite(videoElement.duration)
     ? videoElement.duration
     : 0;
@@ -409,7 +432,47 @@ function getCurrentTime() {
 }
 
 function getTransform() {
-  return { ...transform, beauty: { ...beauty } };
+  return { ...transform, beauty: getBeautySettings() };
+}
+
+function clearBeautyPreview() {
+  beautyPreviewRevision += 1;
+  beautyPreviewSource.value = '';
+}
+
+function showBeautyPreview(source) {
+  clearBeautyPreview();
+  if (!source || !fabricCanvas || !videoObject) {
+    return Promise.reject(new Error('当前视频尚未准备好'));
+  }
+
+  const revision = beautyPreviewRevision;
+  const image = new Image();
+  image.crossOrigin = 'anonymous';
+
+  return new Promise((resolve, reject) => {
+    image.onload = () => {
+      if (
+        revision !== beautyPreviewRevision ||
+        !fabricCanvas ||
+        !videoObject
+      ) {
+        resolve(false);
+        return;
+      }
+
+      beautyPreviewSource.value = source;
+      resolve(true);
+    };
+    image.onerror = () => reject(new Error('美颜预览图片加载失败'));
+    image.src = source;
+  });
+}
+
+function requestBeautyPreview() {
+  if (!isReady.value || props.previewLoading) return;
+  videoElement?.pause();
+  emit('preview-request', getTransform());
 }
 
 onMounted(async () => {
@@ -469,6 +532,7 @@ onBeforeUnmount(() => {
 });
 
 defineExpose({
+  clearBeautyPreview,
   getCurrentTime,
   getTransform,
   pause,
@@ -477,6 +541,7 @@ defineExpose({
   resetTransform,
   seekTo,
   setTransform: applyTransform,
+  showBeautyPreview,
   togglePlayback,
 });
 </script>
@@ -490,6 +555,12 @@ defineExpose({
       <div class="canvas-column">
         <div class="canvas-shell" :class="{ empty: !isReady }">
           <canvas ref="canvasElement" />
+          <img
+            v-if="beautyPreviewSource"
+            class="beauty-preview-image"
+            :src="beautyPreviewSource"
+            alt="美颜预览"
+          />
           <div v-if="!isReady" class="empty-state">
             <strong>{{ source ? '正在加载视频…' : '请选择视频素材' }}</strong>
             <span>拖动改变位置 · 拉动圆点缩放 · 使用顶部控制点旋转</span>
@@ -686,11 +757,13 @@ defineExpose({
                   @change="emitTransform"
                 >
                   <option value="none">无</option>
-                  <option value="clear">清透</option>
-                  <option value="warm">暖阳</option>
-                  <option value="cinematic">电影</option>
-                  <option value="vintage">复古</option>
-                  <option value="cool">冷调</option>
+                  <option
+                    v-for="lut in LUT_OPTIONS"
+                    :key="lut.id"
+                    :value="lut.id"
+                  >
+                    {{ lut.name }}
+                  </option>
                 </select>
               </label>
 
@@ -838,7 +911,7 @@ defineExpose({
                 </span>
               </label>
 
-              <label class="property-row one-click-beauty-row">
+              <label v-if="false" class="property-row one-click-beauty-row">
                 <span class="property-label">一键美颜</span>
                 <span class="checkbox-control">
                   <input
@@ -857,6 +930,8 @@ defineExpose({
           <button
             class="property-footer-button property-footer-button-primary"
             type="button"
+            :disabled="!isReady || previewLoading"
+            @click="requestBeautyPreview"
           >
             预览
           </button>
@@ -977,6 +1052,16 @@ defineExpose({
 .canvas-shell :deep(.upper-canvas) {
   width: 100% !important;
   height: 100% !important;
+}
+
+.beauty-preview-image {
+  position: absolute;
+  z-index: 4;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  object-fit: cover;
 }
 
 .empty-state {

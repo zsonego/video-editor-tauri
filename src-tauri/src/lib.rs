@@ -1,22 +1,24 @@
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     fs,
     fs::OpenOptions,
     hash::{DefaultHasher, Hasher},
     io,
     io::Read,
     io::Write,
+    net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, OnceLock,
     },
+    thread::{self, JoinHandle},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tauri::{utils::config::Color, AppHandle, Emitter, Manager, WindowEvent};
+use tauri::{utils::config::Color, AppHandle, Emitter, Manager, State, WindowEvent};
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::{
@@ -83,6 +85,529 @@ unsafe extern "C" {
 }
 
 static DOWNLOAD_CANCEL_FLAGS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
+
+const PR_BRIDGE_PORT: u16 = 32145;
+const PR_BRIDGE_PROTOCOL_VERSION: u8 = 1;
+const PR_BRIDGE_MAX_REQUEST_BYTES: usize = 64 * 1024;
+const PR_BRIDGE_MAX_XML_BYTES: u64 = 8 * 1024 * 1024;
+const PR_BRIDGE_EVENT_NAME: &str = "pr-template-exported";
+
+type PrBridgeState = Arc<Mutex<Option<PrBridgeRuntime>>>;
+type PrBridgeInbox = Arc<Mutex<VecDeque<PrTemplateExportEvent>>>;
+
+struct PrBridgeRuntime {
+    session_id: String,
+    running: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PrBridgeInfo {
+    service: &'static str,
+    protocol_version: u8,
+    page: &'static str,
+    session_id: String,
+    port: u16,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PrTemplateExportRequest {
+    event_id: String,
+    plugin_version: Option<String>,
+    exported_at: Option<String>,
+    template_path: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PrTemplateExportEvent {
+    event_id: String,
+    plugin_version: Option<String>,
+    exported_at: Option<String>,
+    template_path: String,
+    project_root: String,
+    xml_content: String,
+}
+
+struct PrBridgeHttpRequest {
+    method: String,
+    path: String,
+    headers: HashMap<String, String>,
+    body: Vec<u8>,
+}
+
+fn pr_bridge_info(session_id: &str) -> PrBridgeInfo {
+    PrBridgeInfo {
+        service: "aicut-template-bridge",
+        protocol_version: PR_BRIDGE_PROTOCOL_VERSION,
+        page: "create-template",
+        session_id: session_id.to_string(),
+        port: PR_BRIDGE_PORT,
+    }
+}
+
+fn new_pr_bridge_session_id() -> String {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{}-{timestamp}", std::process::id())
+}
+
+fn http_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn read_pr_bridge_http_request(stream: &mut TcpStream) -> Result<PrBridgeHttpRequest, String> {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|error| error.to_string())?;
+
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    let mut expected_length = None;
+
+    loop {
+        let read_count = stream.read(&mut chunk).map_err(|error| error.to_string())?;
+        if read_count == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read_count]);
+        if buffer.len() > PR_BRIDGE_MAX_REQUEST_BYTES {
+            return Err("request is too large".to_string());
+        }
+
+        if expected_length.is_none() {
+            if let Some(header_end) = http_header_end(&buffer) {
+                let header_text = std::str::from_utf8(&buffer[..header_end])
+                    .map_err(|_| "request headers are not UTF-8".to_string())?;
+                let content_length = header_text
+                    .lines()
+                    .skip(1)
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.trim()
+                            .eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>())
+                    })
+                    .transpose()
+                    .map_err(|_| "invalid content-length".to_string())?
+                    .unwrap_or(0);
+                expected_length = Some(header_end + 4 + content_length);
+            }
+        }
+
+        if expected_length.is_some_and(|length| buffer.len() >= length) {
+            break;
+        }
+    }
+
+    let header_end = http_header_end(&buffer).ok_or_else(|| "incomplete headers".to_string())?;
+    let header_text = std::str::from_utf8(&buffer[..header_end])
+        .map_err(|_| "request headers are not UTF-8".to_string())?;
+    let mut lines = header_text.lines();
+    let request_line = lines
+        .next()
+        .ok_or_else(|| "missing request line".to_string())?;
+    let mut request_parts = request_line.split_whitespace();
+    let method = request_parts
+        .next()
+        .ok_or_else(|| "missing method".to_string())?
+        .to_string();
+    let path = request_parts
+        .next()
+        .ok_or_else(|| "missing path".to_string())?
+        .split('?')
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let mut headers = HashMap::new();
+    for line in lines {
+        if let Some((name, value)) = line.split_once(':') {
+            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+        }
+    }
+    let content_length = headers
+        .get("content-length")
+        .map(|value| value.parse::<usize>())
+        .transpose()
+        .map_err(|_| "invalid content-length".to_string())?
+        .unwrap_or(0);
+    let body_start = header_end + 4;
+    let body_end = body_start.saturating_add(content_length);
+    if buffer.len() < body_end {
+        return Err("incomplete request body".to_string());
+    }
+
+    Ok(PrBridgeHttpRequest {
+        method,
+        path,
+        headers,
+        body: buffer[body_start..body_end].to_vec(),
+    })
+}
+
+fn write_pr_bridge_http_response(
+    stream: &mut TcpStream,
+    status: u16,
+    body: &str,
+) -> Result<(), String> {
+    let reason = match status {
+        200 => "OK",
+        204 => "No Content",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        404 => "Not Found",
+        409 => "Conflict",
+        413 => "Payload Too Large",
+        422 => "Unprocessable Entity",
+        _ => "Internal Server Error",
+    };
+    let response = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, X-AICut-Protocol, X-AICut-Session\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{body}",
+        body.as_bytes().len()
+    );
+    stream
+        .write_all(response.as_bytes())
+        .map_err(|error| error.to_string())
+}
+
+fn pr_bridge_error_body(message: impl AsRef<str>) -> String {
+    serde_json::json!({ "ok": false, "error": message.as_ref() }).to_string()
+}
+
+fn prepare_pr_template_export(
+    request: PrTemplateExportRequest,
+) -> Result<PrTemplateExportEvent, String> {
+    let event_id = request.event_id.trim();
+    if event_id.is_empty() || event_id.len() > 128 {
+        return Err("eventId is invalid".to_string());
+    }
+
+    let template_path_text = request.template_path.trim();
+    let template_path = PathBuf::from(template_path_text);
+    if !template_path.is_absolute() {
+        return Err("templatePath must be absolute".to_string());
+    }
+    if template_path.file_name().and_then(|value| value.to_str()) != Some("template.xml") {
+        return Err("templatePath must point to template.xml".to_string());
+    }
+
+    let metadata = fs::metadata(&template_path)
+        .map_err(|error| format!("template.xml is unavailable: {error}"))?;
+    if !metadata.is_file() {
+        return Err("templatePath is not a file".to_string());
+    }
+    if metadata.len() > PR_BRIDGE_MAX_XML_BYTES {
+        return Err("template.xml is too large".to_string());
+    }
+
+    let canonical_template = fs::canonicalize(&template_path)
+        .map_err(|error| format!("failed to resolve template.xml: {error}"))?;
+    let canonical_root = canonical_template
+        .parent()
+        .ok_or_else(|| "template.xml has no project directory".to_string())?;
+    if !canonical_root.join("assets").is_dir() {
+        return Err("the exported project is missing its assets directory".to_string());
+    }
+
+    let xml_content = fs::read_to_string(&canonical_template)
+        .map_err(|error| format!("failed to read template.xml: {error}"))?;
+    if !xml_content.contains("<template") {
+        return Err("template.xml does not contain a template node".to_string());
+    }
+
+    let project_root = template_path
+        .parent()
+        .ok_or_else(|| "template.xml has no project directory".to_string())?
+        .to_string_lossy()
+        .to_string();
+
+    Ok(PrTemplateExportEvent {
+        event_id: event_id.to_string(),
+        plugin_version: request.plugin_version,
+        exported_at: request.exported_at,
+        template_path: template_path_text.to_string(),
+        project_root,
+        xml_content,
+    })
+}
+
+fn handle_pr_bridge_connection(
+    mut stream: TcpStream,
+    app: &AppHandle,
+    info: &PrBridgeInfo,
+    processed_event_ids: &Arc<Mutex<HashSet<String>>>,
+) {
+    let request = match read_pr_bridge_http_request(&mut stream) {
+        Ok(request) => request,
+        Err(error) => {
+            let status = if error == "request is too large" {
+                413
+            } else {
+                400
+            };
+            let _ =
+                write_pr_bridge_http_response(&mut stream, status, &pr_bridge_error_body(error));
+            return;
+        }
+    };
+
+    if request.method == "OPTIONS" {
+        let _ = write_pr_bridge_http_response(&mut stream, 204, "");
+        return;
+    }
+
+    if request.method == "GET" && request.path == "/v1/health" {
+        let body = serde_json::to_string(info).unwrap_or_else(|_| "{}".to_string());
+        let _ = write_pr_bridge_http_response(&mut stream, 200, &body);
+        return;
+    }
+
+    if request.method != "POST" || request.path != "/v1/template-exports" {
+        let _ = write_pr_bridge_http_response(
+            &mut stream,
+            404,
+            &pr_bridge_error_body("endpoint not found"),
+        );
+        return;
+    }
+
+    let protocol_ok = request
+        .headers
+        .get("x-aicut-protocol")
+        .is_some_and(|value| value == &PR_BRIDGE_PROTOCOL_VERSION.to_string());
+    let session_ok = request
+        .headers
+        .get("x-aicut-session")
+        .is_some_and(|value| value == &info.session_id);
+    if !protocol_ok || !session_ok {
+        let _ = write_pr_bridge_http_response(
+            &mut stream,
+            401,
+            &pr_bridge_error_body("bridge protocol or session is invalid"),
+        );
+        return;
+    }
+
+    let content_type_ok = request
+        .headers
+        .get("content-type")
+        .is_some_and(|value| value.to_ascii_lowercase().starts_with("application/json"));
+    if !content_type_ok {
+        let _ = write_pr_bridge_http_response(
+            &mut stream,
+            400,
+            &pr_bridge_error_body("content-type must be application/json"),
+        );
+        return;
+    }
+
+    let export_request = match serde_json::from_slice::<PrTemplateExportRequest>(&request.body) {
+        Ok(request) => request,
+        Err(error) => {
+            let _ = write_pr_bridge_http_response(
+                &mut stream,
+                400,
+                &pr_bridge_error_body(format!("invalid JSON: {error}")),
+            );
+            return;
+        }
+    };
+
+    let export_event = match prepare_pr_template_export(export_request) {
+        Ok(event) => event,
+        Err(error) => {
+            let _ = write_pr_bridge_http_response(&mut stream, 422, &pr_bridge_error_body(error));
+            return;
+        }
+    };
+
+    let duplicate = match processed_event_ids.lock() {
+        Ok(mut event_ids) => {
+            if event_ids.contains(&export_event.event_id) {
+                true
+            } else {
+                if event_ids.len() >= 256 {
+                    event_ids.clear();
+                }
+                event_ids.insert(export_event.event_id.clone());
+                false
+            }
+        }
+        Err(_) => {
+            let _ = write_pr_bridge_http_response(
+                &mut stream,
+                500,
+                &pr_bridge_error_body("failed to lock bridge event state"),
+            );
+            return;
+        }
+    };
+
+    if !duplicate {
+        let pending_count = match app.try_state::<PrBridgeInbox>() {
+            Some(inbox) => match inbox.lock() {
+                Ok(mut inbox) => {
+                    if inbox.len() >= 16 {
+                        inbox.pop_front();
+                    }
+                    inbox.push_back(export_event.clone());
+                    inbox.len()
+                }
+                Err(_) => {
+                    let _ = write_pr_bridge_http_response(
+                        &mut stream,
+                        500,
+                        &pr_bridge_error_body("failed to lock bridge inbox"),
+                    );
+                    return;
+                }
+            },
+            None => {
+                let _ = write_pr_bridge_http_response(
+                    &mut stream,
+                    500,
+                    &pr_bridge_error_body("bridge inbox is unavailable"),
+                );
+                return;
+            }
+        };
+        app_log_info(format!(
+            "[pr-bridge] accepted event={} template={} pending={pending_count}",
+            export_event.event_id, export_event.template_path
+        ));
+        if let Err(error) = app.emit(PR_BRIDGE_EVENT_NAME, export_event.clone()) {
+            let _ = write_pr_bridge_http_response(
+                &mut stream,
+                500,
+                &pr_bridge_error_body(format!("failed to notify the app: {error}")),
+            );
+            return;
+        }
+    }
+
+    let body = serde_json::json!({
+        "ok": true,
+        "accepted": true,
+        "duplicate": duplicate,
+        "eventId": export_event.event_id,
+    })
+    .to_string();
+    let _ = write_pr_bridge_http_response(&mut stream, 200, &body);
+}
+
+fn run_pr_bridge_server(
+    listener: TcpListener,
+    app: AppHandle,
+    info: PrBridgeInfo,
+    running: Arc<AtomicBool>,
+) {
+    let processed_event_ids = Arc::new(Mutex::new(HashSet::new()));
+    app_log_info(format!(
+        "[pr-bridge] listening on 127.0.0.1:{} session={}",
+        info.port, info.session_id
+    ));
+    while running.load(Ordering::SeqCst) {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                handle_pr_bridge_connection(stream, &app, &info, &processed_event_ids)
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(40));
+            }
+            Err(error) => {
+                app_log_error(format!("[pr-bridge] accept failed: {error}"));
+                break;
+            }
+        }
+    }
+    app_log_info("[pr-bridge] stopped");
+}
+
+fn shutdown_pr_bridge(runtime: &mut PrBridgeRuntime) {
+    runtime.running.store(false, Ordering::SeqCst);
+    if let Some(thread) = runtime.thread.take() {
+        let _ = thread.join();
+    }
+}
+
+#[tauri::command]
+fn start_pr_bridge(
+    app: AppHandle,
+    state: State<'_, PrBridgeState>,
+    inbox: State<'_, PrBridgeInbox>,
+) -> Result<PrBridgeInfo, String> {
+    let mut runtime = state
+        .lock()
+        .map_err(|_| "failed to lock PR bridge state".to_string())?;
+    if let Some(existing) = runtime.as_mut() {
+        shutdown_pr_bridge(existing);
+        *runtime = None;
+    }
+    inbox
+        .lock()
+        .map_err(|_| "failed to lock PR bridge inbox".to_string())?
+        .clear();
+
+    let listener = TcpListener::bind(("127.0.0.1", PR_BRIDGE_PORT))
+        .map_err(|error| format!("无法监听 127.0.0.1:{PR_BRIDGE_PORT}：{error}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| format!("无法配置 PR 对接服务：{error}"))?;
+
+    let session_id = new_pr_bridge_session_id();
+    let info = pr_bridge_info(&session_id);
+    let running = Arc::new(AtomicBool::new(true));
+    let thread_running = running.clone();
+    let thread_info = info.clone();
+    let server_thread = thread::Builder::new()
+        .name("aicut-pr-bridge".to_string())
+        .spawn(move || run_pr_bridge_server(listener, app, thread_info, thread_running))
+        .map_err(|error| format!("无法启动 PR 对接服务线程：{error}"))?;
+
+    *runtime = Some(PrBridgeRuntime {
+        session_id,
+        running,
+        thread: Some(server_thread),
+    });
+    Ok(info)
+}
+
+#[tauri::command]
+fn stop_pr_bridge(session_id: String, state: State<'_, PrBridgeState>) -> Result<(), String> {
+    let mut runtime = state
+        .lock()
+        .map_err(|_| "failed to lock PR bridge state".to_string())?;
+    let Some(active) = runtime.as_mut() else {
+        return Ok(());
+    };
+    if active.session_id != session_id {
+        return Ok(());
+    }
+    shutdown_pr_bridge(active);
+    *runtime = None;
+    Ok(())
+}
+
+#[tauri::command]
+fn take_pr_template_exports(
+    inbox: State<'_, PrBridgeInbox>,
+) -> Result<Vec<PrTemplateExportEvent>, String> {
+    let mut inbox = inbox
+        .lock()
+        .map_err(|_| "failed to lock PR bridge inbox".to_string())?;
+    let exports = inbox.drain(..).collect::<Vec<_>>();
+    if !exports.is_empty() {
+        app_log_info(format!(
+            "[pr-bridge] frontend took {} pending export(s)",
+            exports.len()
+        ));
+    }
+    Ok(exports)
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -151,6 +676,33 @@ struct ComposerExportProgress {
 #[serde(rename_all = "camelCase")]
 struct ComposerExportResult {
     output_path: String,
+}
+
+#[derive(Deserialize, Serialize, Default)]
+struct ComposerBeautyFrameParams {
+    whiteness: f64,
+    smoothing: f64,
+    skin_tone: f64,
+    face_detect: i32,
+    rotation: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lut_file: Option<String>,
+    lut_intensity: f64,
+    #[serde(rename = "positionX")]
+    position_x: f64,
+    #[serde(rename = "positionY")]
+    position_y: f64,
+    scale: f64,
+    stabilization: bool,
+    one_click_beauty: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ComposerBeautyFrameResult {
+    output_image_path: String,
+    params_json_path: String,
+    timestamp_ms: i64,
 }
 
 #[derive(Serialize)]
@@ -313,11 +865,15 @@ struct ComposerRuntime {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     get_last_cmd: Option<ComposerGetLastCmdFn>,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
+    beauty_process_frame: Option<ComposerBeautyProcessFrameFn>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    beauty_get_last_error: Option<ComposerBeautyGetLastErrorFn>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     initialized: bool,
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-type ComposerInitFn = unsafe extern "C" fn() -> c_int;
+type ComposerInitFn = unsafe extern "C" fn(*const c_char) -> c_int;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 type ComposerCleanupFn = unsafe extern "C" fn();
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -334,6 +890,11 @@ type ComposerComposeFn = unsafe extern "C" fn(
 type ComposerGetLastErrorFn = unsafe extern "C" fn(*mut c_void) -> *const c_char;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 type ComposerGetLastCmdFn = unsafe extern "C" fn() -> *const c_char;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+type ComposerBeautyProcessFrameFn =
+    unsafe extern "C" fn(*const c_char, i64, *const c_char, *const c_char) -> c_int;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+type ComposerBeautyGetLastErrorFn = unsafe extern "C" fn() -> *const c_char;
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 struct ComposerCallbackContext {
@@ -445,6 +1006,10 @@ impl ComposerRuntime {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             get_last_cmd: None,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
+            beauty_process_frame: None,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            beauty_get_last_error: None,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             initialized: false,
         }
     }
@@ -457,6 +1022,27 @@ impl ComposerRuntime {
             app_log_info(format!(
                 "[composer] loading dynamic library: {}",
                 library_path.display()
+            ));
+            #[cfg(target_os = "macos")]
+            let beauty_resource_path = fs::canonicalize(
+                library_path
+                    .parent()
+                    .ok_or_else(|| "无法确定 Composer 动态库目录".to_string())?
+                    .join("gpupixel.framework")
+                    .join("Resources"),
+            )
+            .map_err(|error| format!("GPU Pixel 资源目录不可用: {error}"))?
+            .to_string_lossy()
+            .to_string();
+            #[cfg(target_os = "windows")]
+            let beauty_resource_path = String::new();
+            app_log_info(format!(
+                "[composer] beauty resource path: {}",
+                if beauty_resource_path.is_empty() {
+                    "<auto>"
+                } else {
+                    &beauty_resource_path
+                }
             ));
             let library = load_composer_library(&library_path)
                 .map_err(|error| format!("加载 Composer 动态库失败: {error}"))?;
@@ -508,8 +1094,40 @@ impl ComposerRuntime {
                     }
                 }
             };
+            app_log_info("[composer] resolving composer_beauty_process_frame");
+            let beauty_process_frame: Option<ComposerBeautyProcessFrameFn> = unsafe {
+                match library.get(b"composer_beauty_process_frame\0") {
+                    Ok(symbol) => {
+                        app_log_info("[composer] composer_beauty_process_frame resolved");
+                        Some(*symbol)
+                    }
+                    Err(error) => {
+                        app_log_error(format!(
+                            "[composer] composer_beauty_process_frame unavailable: {error}"
+                        ));
+                        None
+                    }
+                }
+            };
+            app_log_info("[composer] resolving composer_beauty_get_last_error");
+            let beauty_get_last_error: Option<ComposerBeautyGetLastErrorFn> = unsafe {
+                match library.get(b"composer_beauty_get_last_error\0") {
+                    Ok(symbol) => {
+                        app_log_info("[composer] composer_beauty_get_last_error resolved");
+                        Some(*symbol)
+                    }
+                    Err(error) => {
+                        app_log_error(format!(
+                            "[composer] composer_beauty_get_last_error unavailable: {error}"
+                        ));
+                        None
+                    }
+                }
+            };
             app_log_info("[composer] calling composer_init");
-            let init_result = unsafe { init() };
+            let beauty_resource_path = CString::new(beauty_resource_path)
+                .map_err(|_| "GPU Pixel 资源路径包含非法字符".to_string())?;
+            let init_result = unsafe { init(beauty_resource_path.as_ptr()) };
 
             if init_result != 0 {
                 app_log_error(format!(
@@ -527,6 +1145,8 @@ impl ComposerRuntime {
                 cleanup: Some(cleanup),
                 get_last_error,
                 get_last_cmd,
+                beauty_process_frame,
+                beauty_get_last_error,
                 initialized: true,
             })
         }
@@ -660,6 +1280,77 @@ impl ComposerRuntime {
         }
 
         unsafe { CStr::from_ptr(cmd) }
+            .to_string_lossy()
+            .trim()
+            .to_string()
+    }
+
+    fn beauty_process_frame(
+        &self,
+        input_video_path: &str,
+        timestamp_ms: i64,
+        output_image_path: &str,
+        json_params: &str,
+    ) -> Result<(), String> {
+        if let Some(error) = &self.init_error {
+            return Err(error.clone());
+        }
+
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            let Some(process_frame) = self.beauty_process_frame else {
+                return Err("composer_beauty_process_frame 函数未加载".to_string());
+            };
+            let input_video_path = CString::new(input_video_path)
+                .map_err(|_| "输入视频路径包含非法字符".to_string())?;
+            let output_image_path = CString::new(output_image_path)
+                .map_err(|_| "预览图片路径包含非法字符".to_string())?;
+            let json_params =
+                CString::new(json_params).map_err(|_| "美颜参数包含非法字符".to_string())?;
+            let result = unsafe {
+                process_frame(
+                    input_video_path.as_ptr(),
+                    timestamp_ms,
+                    output_image_path.as_ptr(),
+                    json_params.as_ptr(),
+                )
+            };
+
+            if result == 0 {
+                return Ok(());
+            }
+
+            let last_error = self.beauty_last_error_text();
+            if last_error.is_empty() {
+                Err(composer_error_message(result))
+            } else {
+                Err(format!("{}: {last_error}", composer_error_message(result)))
+            }
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (
+                input_video_path,
+                timestamp_ms,
+                output_image_path,
+                json_params,
+            );
+            Err("Composer 动态库当前只支持 macOS 和 Windows".to_string())
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn beauty_last_error_text(&self) -> String {
+        let Some(get_last_error) = self.beauty_get_last_error else {
+            return String::new();
+        };
+        let error = unsafe { get_last_error() };
+        if error.is_null() {
+            return String::new();
+        }
+
+        unsafe { CStr::from_ptr(error) }
             .to_string_lossy()
             .trim()
             .to_string()
@@ -3253,6 +3944,201 @@ async fn compose_project_video(
     })
 }
 
+fn sanitize_preview_file_stem(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|character| {
+            if character.is_control()
+                || matches!(
+                    character,
+                    '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+                )
+            {
+                '_'
+            } else {
+                character
+            }
+        })
+        .collect();
+    let sanitized = sanitized.trim().trim_matches('.');
+
+    if sanitized.is_empty() {
+        "video".to_string()
+    } else {
+        sanitized.to_string()
+    }
+}
+
+fn reset_image_temp_dir(image_temp_dir: &Path) -> Result<(), String> {
+    if image_temp_dir.exists() {
+        let metadata = fs::symlink_metadata(image_temp_dir)
+            .map_err(|error| format!("读取 imageTemp 目录失败: {error}"))?;
+        if metadata.file_type().is_symlink() {
+            return Err("imageTemp 不能是软链接".to_string());
+        }
+        if !metadata.is_dir() {
+            return Err("imageTemp 路径不是目录".to_string());
+        }
+
+        for entry in fs::read_dir(image_temp_dir)
+            .map_err(|error| format!("读取 imageTemp 目录失败: {error}"))?
+        {
+            let entry = entry.map_err(|error| format!("读取 imageTemp 内容失败: {error}"))?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|error| format!("读取旧预览文件失败: {error}"))?;
+            if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                fs::remove_dir_all(&path)
+                    .map_err(|error| format!("清理旧预览目录失败: {error}"))?;
+            } else {
+                fs::remove_file(&path).map_err(|error| format!("清理旧预览文件失败: {error}"))?;
+            }
+        }
+    } else {
+        fs::create_dir_all(image_temp_dir)
+            .map_err(|error| format!("创建 imageTemp 目录失败: {error}"))?;
+    }
+
+    Ok(())
+}
+
+fn finite_or(value: f64, fallback: f64) -> f64 {
+    if value.is_finite() {
+        value
+    } else {
+        fallback
+    }
+}
+
+fn prepare_beauty_frame_params(
+    app: &AppHandle,
+    mut params: ComposerBeautyFrameParams,
+) -> Result<ComposerBeautyFrameParams, String> {
+    params.whiteness = finite_or(params.whiteness, 0.0).clamp(0.0, 1.0);
+    params.smoothing = finite_or(params.smoothing, 0.0).clamp(0.0, 1.0);
+    params.skin_tone = finite_or(params.skin_tone, 0.0).clamp(-1.0, 1.0);
+    params.face_detect = 1;
+    params.rotation = finite_or(params.rotation, 0.0).rem_euclid(360.0);
+    params.lut_intensity = finite_or(params.lut_intensity, 0.0).clamp(0.0, 1.0);
+    params.position_x = finite_or(params.position_x, 0.0);
+    params.position_y = finite_or(params.position_y, 0.0);
+    params.scale = finite_or(params.scale, 1.0).clamp(0.01, 10.0);
+
+    let lut_file = params
+        .lut_file
+        .take()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let Some(lut_file) = lut_file else {
+        params.lut_intensity = 0.0;
+        return Ok(params);
+    };
+
+    let relative_path = Path::new(&lut_file);
+    if relative_path.is_absolute()
+        || relative_path.components().any(|component| {
+            !matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+    {
+        return Err("LUT 文件路径无效".to_string());
+    }
+
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|error| error.to_string())?;
+    let lut_root = fs::canonicalize(resource_dir.join("luts"))
+        .map_err(|error| format!("LUT 资源目录不可用: {error}"))?;
+    let relative_lut_path = relative_path.strip_prefix("luts").unwrap_or(relative_path);
+    let lut_path = fs::canonicalize(lut_root.join(relative_lut_path))
+        .map_err(|error| format!("LUT 文件不存在: {error}"))?;
+    if !lut_path.starts_with(&lut_root) || !lut_path.is_file() {
+        return Err("LUT 文件路径无效".to_string());
+    }
+    let extension = lut_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !matches!(extension.as_str(), "cube" | "3dl" | "dat" | "m3d" | "csp") {
+        return Err("LUT 文件格式不受支持".to_string());
+    }
+
+    params.lut_file = Some(lut_path.to_string_lossy().to_string());
+    Ok(params)
+}
+
+#[tauri::command]
+async fn preview_composer_beauty_frame(
+    app: AppHandle,
+    composer: tauri::State<'_, ComposerState>,
+    input_video_path: String,
+    timestamp_ms: i64,
+    params: ComposerBeautyFrameParams,
+) -> Result<ComposerBeautyFrameResult, String> {
+    if timestamp_ms < 0 {
+        return Err("预览时间不能小于 0".to_string());
+    }
+
+    let input_video_path = fs::canonicalize(PathBuf::from(input_video_path))
+        .map_err(|error| format!("输入视频不存在: {error}"))?;
+    if !input_video_path.is_file() {
+        return Err("输入视频路径不是文件".to_string());
+    }
+    let video_dir = input_video_path
+        .parent()
+        .ok_or_else(|| "无法确定输入视频所在目录".to_string())?;
+    let image_temp_dir = video_dir.join("imageTemp");
+    reset_image_temp_dir(&image_temp_dir)?;
+
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_millis();
+    let video_name = input_video_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(sanitize_preview_file_stem)
+        .unwrap_or_else(|| "video".to_string());
+    let output_stem = format!("{now_ms}_{video_name}");
+    let output_image_path = image_temp_dir.join(format!("{output_stem}.png"));
+    let params_json_path = image_temp_dir.join(format!("{output_stem}.json"));
+    let params = prepare_beauty_frame_params(&app, params)?;
+    let json_params = serde_json::to_string_pretty(&params).map_err(|error| error.to_string())?;
+    fs::write(&params_json_path, &json_params)
+        .map_err(|error| format!("保存美颜参数失败: {error}"))?;
+
+    let input_video_path_text = input_video_path.to_string_lossy().to_string();
+    let output_image_path_text = output_image_path.to_string_lossy().to_string();
+    let params_json_path_text = params_json_path.to_string_lossy().to_string();
+    let composer = composer.inner().clone();
+    let output_image_path_for_call = output_image_path_text.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let composer = composer.lock().map_err(|error| error.to_string())?;
+        composer.beauty_process_frame(
+            &input_video_path_text,
+            timestamp_ms,
+            &output_image_path_for_call,
+            &json_params,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+
+    if !output_image_path.is_file() {
+        return Err("美颜接口执行成功，但未生成预览图片".to_string());
+    }
+
+    Ok(ComposerBeautyFrameResult {
+        output_image_path: output_image_path_text,
+        params_json_path: params_json_path_text,
+        timestamp_ms,
+    })
+}
+
 #[tauri::command]
 fn read_project_cover(project_dir: String) -> Result<tauri::ipc::Response, String> {
     let (_, project_root) = ensure_aicut_dirs()?;
@@ -3696,6 +4582,12 @@ pub fn run() {
             let composer = ComposerRuntime::initialize();
             app.manage(Arc::new(Mutex::new(composer)));
             app_log_info("[app] composer state managed");
+            app.manage(Arc::new(Mutex::new(None::<PrBridgeRuntime>)));
+            app_log_info("[app] PR bridge state managed");
+            app.manage(Arc::new(Mutex::new(
+                VecDeque::<PrTemplateExportEvent>::new(),
+            )));
+            app_log_info("[app] PR bridge inbox managed");
 
             if let Some(window) = app.get_webview_window("main") {
                 app_log_info("[app] configuring main window");
@@ -3716,9 +4608,22 @@ pub fn run() {
                 } else {
                     app_log_error("[app] composer state not found during close");
                 }
+                if let Some(bridge) = window.try_state::<PrBridgeState>() {
+                    if let Ok(mut bridge) = bridge.lock() {
+                        if let Some(runtime) = bridge.as_mut() {
+                            shutdown_pr_bridge(runtime);
+                        }
+                        *bridge = None;
+                    } else {
+                        app_log_error("[app] failed to lock PR bridge during close");
+                    }
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
+            start_pr_bridge,
+            stop_pr_bridge,
+            take_pr_template_exports,
             get_cached_template_assets,
             prepare_template_assets,
             cancel_template_download,
@@ -3730,6 +4635,7 @@ pub fn run() {
             update_project_asset_offset,
             apply_project_subtitle,
             compose_project_video,
+            preview_composer_beauty_frame,
             read_project_cover,
             delete_project_asset_files,
             delete_project_workspaces,
@@ -4097,6 +5003,33 @@ mod tests {
         }
         assert_eq!(composer_step_status(-1), "正在合成视频...");
         assert_eq!(composer_step_status(8), "正在合成视频...");
+    }
+
+    #[test]
+    fn clears_previous_beauty_preview_files() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let image_temp_dir = std::env::temp_dir().join(format!(
+            "aicut-image-temp-test-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(image_temp_dir.join("old-directory")).expect("create test directory");
+        fs::write(image_temp_dir.join("old.png"), b"old image").expect("write old image");
+        fs::write(image_temp_dir.join("old.json"), b"{}").expect("write old json");
+        fs::write(image_temp_dir.join("old-directory/old.txt"), b"old").expect("write nested file");
+
+        reset_image_temp_dir(&image_temp_dir).expect("reset imageTemp");
+
+        assert!(image_temp_dir.is_dir());
+        assert_eq!(
+            fs::read_dir(&image_temp_dir)
+                .expect("read imageTemp")
+                .count(),
+            0
+        );
+        fs::remove_dir_all(image_temp_dir).expect("remove test directory");
     }
 
     #[test]

@@ -1,8 +1,11 @@
 import {
   chmodSync,
+  cpSync,
   copyFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -24,12 +27,13 @@ const sourceLibsDir = join(tauriDir, 'libs', 'macos');
 const bundleLibsDir = join(tauriDir, 'libs', 'macos-bundle');
 const entrySourceDylib = join(sourceLibsDir, 'libcomposer.dylib');
 const tauriConfigPaths = [
+  join(tauriDir, 'tauri.macos.conf.json'),
   join(tauriDir, 'tauri.dmg.conf.json'),
   join(tauriDir, 'tauri.appstore.conf.json'),
 ];
 const dependencySigningIdentity =
   process.env.APPLE_DYLIB_SIGNING_IDENTITY ||
-  'Apple Distribution: Loogear Co., Ltd. (PMBZKYYRRP)';
+  '-';
 const systemPrefixes = [
   '/usr/lib/',
   '/System/Library/',
@@ -170,6 +174,55 @@ function ensureInsideBundleLibsDir(filePath) {
   );
 }
 
+function findFrameworkRoot(filePath) {
+  let current = resolve(filePath);
+  while (true) {
+    if (basename(current).endsWith('.framework')) {
+      return current;
+    }
+    const parent = dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+function describeDependency(sourcePath) {
+  const sourceRealPath = realpathSync(sourcePath);
+  const frameworkRoot = findFrameworkRoot(sourceRealPath);
+
+  if (frameworkRoot) {
+    const sourceBundlePath = realpathSync(frameworkRoot);
+    const binaryRelativePath = relative(sourceBundlePath, sourceRealPath);
+    const destBundlePath = join(bundleLibsDir, basename(sourceBundlePath));
+    return {
+      kind: 'framework',
+      sourcePath: sourceRealPath,
+      sourceRealPath,
+      sourceBundlePath,
+      destBundlePath,
+      destPath: join(destBundlePath, binaryRelativePath),
+      destKey: basename(destBundlePath),
+    };
+  }
+
+  const destPath = join(bundleLibsDir, basename(sourceRealPath));
+  return {
+    kind: 'dylib',
+    sourcePath: sourceRealPath,
+    sourceRealPath,
+    sourceBundlePath: sourceRealPath,
+    destBundlePath: destPath,
+    destPath,
+    destKey: basename(destPath),
+  };
+}
+
+function loaderPathReference(consumer, dependency) {
+  const relativePath = relative(dirname(consumer.destPath), dependency.destPath)
+    .replaceAll('\\', '/');
+  return `@loader_path/${relativePath}`;
+}
+
 function assertArm64(filePath) {
   const output = run('lipo', ['-info', filePath]);
   if (!output.includes('arm64')) {
@@ -193,17 +246,15 @@ function discoverDependencies() {
   const unresolved = [];
 
   function addItem(sourcePath, requestedBy = null) {
-    const sourceRealPath = realpathSync(sourcePath);
-    const destPath = join(bundleLibsDir, basename(sourcePath));
-    const destKey = basename(destPath);
-    const existing = itemsByDest.get(destKey);
+    const descriptor = describeDependency(sourcePath);
+    const existing = itemsByDest.get(descriptor.destKey);
 
-    if (existing && existing.sourceRealPath !== sourceRealPath) {
+    if (existing && existing.sourceRealPath !== descriptor.sourceRealPath) {
       throw new Error(
         [
-          `Found duplicate dylib names from different sources: ${destKey}`,
-          `Existing: ${existing.sourcePath}`,
-          `New: ${sourcePath}`,
+          `Found duplicate native dependency names from different sources: ${descriptor.destKey}`,
+          `Existing: ${existing.sourceBundlePath}`,
+          `New: ${descriptor.sourceBundlePath}`,
           requestedBy ? `Referenced by: ${requestedBy}` : '',
         ]
           .filter(Boolean)
@@ -216,14 +267,12 @@ function discoverDependencies() {
     }
 
     const item = {
-      sourcePath,
-      sourceRealPath,
-      destPath,
+      ...descriptor,
       dependencies: [],
       scanned: false,
     };
 
-    itemsByDest.set(destKey, item);
+    itemsByDest.set(descriptor.destKey, item);
     pending.push(item);
     return item;
   }
@@ -258,7 +307,7 @@ function discoverDependencies() {
       const dep = addItem(resolved, item.sourcePath);
       item.dependencies.push({
         originalRef: ref,
-        replacementRef: `@loader_path/${basename(dep.destPath)}`,
+        replacementRef: loaderPathReference(item, dep),
       });
     }
   }
@@ -280,24 +329,52 @@ function resetBundleLibsDir() {
   mkdirSync(bundleLibsDir, { recursive: true });
 }
 
-function copyDylibs(items) {
+function removeCopiedBundleMetadata(directoryPath) {
+  for (const name of readdirSync(directoryPath)) {
+    const childPath = join(directoryPath, name);
+    if (name === '.DS_Store' || name === '_CodeSignature') {
+      rmSync(childPath, { recursive: true, force: true });
+      continue;
+    }
+    const stat = lstatSync(childPath);
+    if (stat.isDirectory() && !stat.isSymbolicLink()) {
+      removeCopiedBundleMetadata(childPath);
+    }
+  }
+}
+
+function copyNativeDependencies(items) {
   for (const item of items) {
-    if (!ensureInsideBundleLibsDir(item.destPath)) {
+    if (!ensureInsideBundleLibsDir(item.destBundlePath)) {
       throw new Error(
-        `Destination is outside libs/macos-bundle: ${item.destPath}`,
+        `Destination is outside libs/macos-bundle: ${item.destBundlePath}`,
       );
     }
 
-    copyFileSync(item.sourcePath, item.destPath);
+    if (item.kind === 'framework') {
+      cpSync(item.sourceBundlePath, item.destBundlePath, {
+        recursive: true,
+        dereference: false,
+        preserveTimestamps: true,
+        verbatimSymlinks: true,
+      });
+      removeCopiedBundleMetadata(item.destBundlePath);
+    } else {
+      copyFileSync(item.sourcePath, item.destPath);
+    }
     chmodSync(item.destPath, 0o755);
-    console.log(`Copied dependency: ${item.sourcePath} -> ${item.destPath}`);
+    console.log(
+      `Copied ${item.kind}: ${item.sourceBundlePath} -> ${item.destBundlePath}`,
+    );
   }
 }
 
 function rewriteInstallNames(items) {
   for (const item of items) {
     chmodSync(item.destPath, 0o755);
-    const id = `@rpath/${basename(item.destPath)}`;
+    const id = item.kind === 'framework'
+      ? `@rpath/${basename(item.destBundlePath)}/${relative(item.destBundlePath, item.destPath).replaceAll('\\', '/')}`
+      : `@rpath/${basename(item.destPath)}`;
     run('install_name_tool', ['-id', id, item.destPath]);
 
     for (const dep of item.dependencies) {
@@ -314,19 +391,25 @@ function rewriteInstallNames(items) {
   }
 }
 
-function signBundledDependencyDylibs(items) {
-  for (const item of items) {
-    if (basename(item.destPath) === 'libcomposer.dylib') {
-      continue;
-    }
-
+function signBundledNativeDependencies(items) {
+  for (const item of items.filter((candidate) => candidate.kind === 'dylib')) {
     run('codesign', [
       '--force',
       '--sign',
       dependencySigningIdentity,
       item.destPath,
     ]);
-    console.log(`Signed dependency dylib: ${item.destPath}`);
+    console.log(`Signed prepared dylib: ${item.destPath}`);
+  }
+
+  for (const item of items.filter((candidate) => candidate.kind === 'framework')) {
+    run('codesign', [
+      '--force',
+      '--sign',
+      dependencySigningIdentity,
+      item.destBundlePath,
+    ]);
+    console.log(`Signed framework: ${item.destBundlePath}`);
   }
 }
 
@@ -334,7 +417,7 @@ function main() {
   console.log(`Scanning entry dylib: ${entrySourceDylib}`);
   const items = discoverDependencies();
   const frameworks = items
-    .map((item) => item.destPath)
+    .map((item) => item.destBundlePath)
     .sort((a, b) => {
       if (basename(a) === 'libcomposer.dylib') return -1;
       if (basename(b) === 'libcomposer.dylib') return 1;
@@ -342,13 +425,13 @@ function main() {
     });
 
   resetBundleLibsDir();
-  copyDylibs(items);
+  copyNativeDependencies(items);
   rewriteInstallNames(items);
 
-  for (const filePath of frameworks) {
-    assertArm64(filePath);
+  for (const item of items) {
+    assertArm64(item.destPath);
   }
-  signBundledDependencyDylibs(items);
+  signBundledNativeDependencies(items);
 
   const frameworkPaths = frameworks.map(toFrameworkPath);
   for (const configPath of tauriConfigPaths) {

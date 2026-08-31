@@ -36,6 +36,9 @@
   "bundle": {
     "active": true,
     "targets": ["nsis", "msi"],
+    "resources": {
+      "resources/luts/": "luts/"
+    },
     "windows": {
       "nsis": {
         "installerIcon": "icons/icon.ico",

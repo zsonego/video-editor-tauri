@@ -74,11 +74,13 @@ export function buildXml(model) {
   }
 
   lines.push('            <track id="clips" z-index="1" />');
-  lines.push(
-    '            <track id="overlay" z-index="2">',
-    `                <filepath>${text(model.tracks.overlay)}</filepath>`,
-    '            </track>',
-  );
+  if (model.tracks.overlay) {
+    lines.push(
+      '            <track id="overlay" z-index="2">',
+      `                <filepath>${text(model.tracks.overlay)}</filepath>`,
+      '            </track>',
+    );
+  }
 
   if (model.tracks.audioBackground) {
     lines.push(
@@ -126,6 +128,10 @@ export function buildXml(model) {
       `                <starttime>${n(clip.starttime)}</starttime>`,
       `                <duration>${n(clip.duration)}</duration>`,
     );
+
+    if (clip.topVideo) {
+      lines.push(`                <top-video>${text(clip.topVideo)}</top-video>`);
+    }
 
     clip.areas.forEach((area) => {
       lines.push(
@@ -323,6 +329,8 @@ export function parseXml(xmlText) {
           : 'variable',
       starttime: n(childText(clipNode, 'starttime')),
       duration: clipDuration,
+      topVideo: childText(clipNode, 'top-video'),
+      topVideoSourcePath: '',
       areas,
       subtitles,
       transition: {
@@ -331,7 +339,7 @@ export function parseXml(xmlText) {
         duration: n(childText(filter, 'duration'), 500),
       },
     };
-  });
+  }).sort((left, right) => left.starttime - right.starttime);
 
   return {
     id: generateId(),
