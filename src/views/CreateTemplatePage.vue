@@ -38,6 +38,7 @@ import {
 } from '@lucide/vue';
 import logoImage from '../assets/logo.png';
 import { assetPath, buildXml, generateId, parseXml } from '../utils/xml';
+import lutManifest from '../../src-tauri/resources/luts/luts.json';
 
 const router = useRouter();
 
@@ -84,16 +85,16 @@ const triptychRotations = [
   { value: -90, label: '-90 度' },
 ];
 
-const videoStyleOptions = [
-  { value: 'cinematic', label: '电影质感' },
-  { value: 'clean', label: '简约清新' },
-  { value: 'warm', label: '温暖治愈' },
-  { value: 'vintage', label: '复古胶片' },
-  { value: 'cyberpunk', label: '赛博霓虹' },
-  { value: 'documentary', label: '纪实自然' },
-  { value: 'energetic', label: '活力动感' },
-  { value: 'minimal', label: '极简高级' },
-];
+const LUT_OPTIONS = Object.freeze(
+  lutManifest.luts.map((lut) => Object.freeze({ ...lut })),
+);
+const LUT_OPTION_IDS = new Set(LUT_OPTIONS.map((lut) => lut.id));
+const videoStyleOptions = Object.freeze([
+  Object.freeze({ value: 'none', label: '无' }),
+  ...LUT_OPTIONS.map((lut) =>
+    Object.freeze({ value: lut.id, label: lut.name }),
+  ),
+]);
 
 const fontOptions = [
   'Songti SC',
@@ -109,6 +110,7 @@ const DEFAULT_AREA_BEAUTY_SETTINGS = Object.freeze({
   skinIntensity: 60,
   smoothing: 0,
   whitening: 0,
+  saturation: 100,
   stabilization: false,
   oneClickBeauty: false,
 });
@@ -161,7 +163,7 @@ const createInitialModel = () => ({
   name: '我的视频模板',
   duration: 0,
   resolution: '1920*1080',
-  videoStyle: 'cinematic',
+  videoStyle: 'none',
   progress: 0,
   demoPath: '',
   tracks: {
@@ -436,6 +438,9 @@ const subtitlePreviewText = computed(
 function replaceModel(next) {
   if (!next || !Array.isArray(next.clips) || !Array.isArray(next.mediaGroups)) {
     throw new Error('模板数据缺少片段或素材目录。');
+  }
+  if (next.videoStyle !== 'none' && !LUT_OPTION_IDS.has(next.videoStyle)) {
+    next.videoStyle = 'none';
   }
   disposeAssetGroups(Array.isArray(model.mediaGroups) ? model.mediaGroups : []);
   const nextKeys = new Set(Object.keys(next));
@@ -1582,16 +1587,17 @@ function areaImageTransformStyle(area) {
 
 function createAreaBeautySettings(values = {}) {
   const source = values && typeof values === 'object' ? values : {};
+  const lutStyle =
+    source.lutStyle === 'none' || LUT_OPTION_IDS.has(source.lutStyle)
+      ? source.lutStyle
+      : DEFAULT_AREA_BEAUTY_SETTINGS.lutStyle;
   const skinTone = AREA_SKIN_TONE_OPTIONS.some(
     (option) => option.value === source.skinTone,
   )
     ? source.skinTone
     : 'off';
   return {
-    lutStyle:
-      typeof source.lutStyle === 'string'
-        ? source.lutStyle
-        : DEFAULT_AREA_BEAUTY_SETTINGS.lutStyle,
+    lutStyle,
     lutIntensity: clampNumber(
       source.lutIntensity ?? DEFAULT_AREA_BEAUTY_SETTINGS.lutIntensity,
       0,
@@ -1612,6 +1618,11 @@ function createAreaBeautySettings(values = {}) {
       source.whitening ?? DEFAULT_AREA_BEAUTY_SETTINGS.whitening,
       0,
       100,
+    ),
+    saturation: clampNumber(
+      source.saturation ?? DEFAULT_AREA_BEAUTY_SETTINGS.saturation,
+      0,
+      200,
     ),
     stabilization: Boolean(source.stabilization),
     oneClickBeauty: Boolean(source.oneClickBeauty),
@@ -2444,6 +2455,7 @@ watch(
           area.beauty?.skinIntensity,
           area.beauty?.smoothing,
           area.beauty?.whitening,
+          area.beauty?.saturation,
           area.beauty?.stabilization,
           area.beauty?.oneClickBeauty,
           ...(area.mirroredDirections ?? []),
@@ -3583,7 +3595,10 @@ onBeforeUnmount(() => {
             </button>
           </div>
 
-          <div class="area-track-upload">
+          <div
+            class="area-track-upload"
+            :class="{ 'is-filled': Boolean(selectedClip.topVideo) }"
+          >
             <div class="area-track-upload-copy">
               <span class="area-track-upload-icon"><Video :size="17" /></span>
               <div>
@@ -3771,6 +3786,7 @@ onBeforeUnmount(() => {
                   <div class="area-settings-stack">
                   <div class="modal-columns">
                   <section
+                    v-if="false"
                     class="modal-section"
                     :class="{ bound: isBoundGeneratedArea(areaDraft) }"
                   >
@@ -4065,11 +4081,13 @@ onBeforeUnmount(() => {
                               <span class="area-inspector-label">LUT 风格</span>
                               <select v-model="areaDraft.beauty.lutStyle">
                                 <option value="none">无</option>
-                                <option value="clear">清透</option>
-                                <option value="warm">暖阳</option>
-                                <option value="cinematic">电影</option>
-                                <option value="vintage">复古</option>
-                                <option value="cool">冷调</option>
+                                <option
+                                  v-for="lut in LUT_OPTIONS"
+                                  :key="lut.id"
+                                  :value="lut.id"
+                                >
+                                  {{ lut.name }}
+                                </option>
                               </select>
                             </div>
 
@@ -4147,6 +4165,30 @@ onBeforeUnmount(() => {
                               </label>
                             </div>
 
+                            <div class="area-beauty-control">
+                              <span class="area-inspector-label">饱和度</span>
+                              <input
+                                v-model.number="areaDraft.beauty.saturation"
+                                class="area-inspector-range"
+                                type="range"
+                                min="0"
+                                max="200"
+                                step="1"
+                                @change="normalizeAreaBeautyValue('saturation', 0, 200)"
+                              />
+                              <label class="area-inspector-value">
+                                <input
+                                  v-model.number="areaDraft.beauty.saturation"
+                                  type="number"
+                                  min="0"
+                                  max="200"
+                                  step="1"
+                                  @change="normalizeAreaBeautyValue('saturation', 0, 200)"
+                                />
+                                <small>%</small>
+                              </label>
+                            </div>
+
                             <div class="area-beauty-skin">
                               <div class="area-beauty-skin-head">
                                 <span>肤色</span>
@@ -4212,7 +4254,7 @@ onBeforeUnmount(() => {
                               </div>
                             </div>
 
-                            <div class="area-beauty-switches">
+                            <div v-if="false" class="area-beauty-switches">
                               <label>
                                 <span>视频去抖动</span>
                                 <span class="switch">
@@ -4340,7 +4382,7 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
-          <div class="area-track-upload area-track-upload-optional">
+          <div v-if="false" class="area-track-upload area-track-upload-optional">
             <div class="area-track-upload-copy">
               <span class="area-track-upload-icon"><Film :size="17" /></span>
               <div>
@@ -6945,6 +6987,10 @@ button.sequence-track-clip.active {
   gap: 16px;
   padding: 9px 22px;
   background: #fbfbf9;
+}
+
+.area-track-upload.is-filled {
+  background: #fef1eb;
 }
 
 .area-track-upload-required {

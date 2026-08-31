@@ -15,6 +15,7 @@ const props = defineProps({
   sourceName: { type: String, default: '' },
   initialTransform: { type: Object, default: null },
   previewLoading: { type: Boolean, default: false },
+  videoPreviewLoading: { type: Boolean, default: false },
 });
 
 const emit = defineEmits([
@@ -70,6 +71,8 @@ let animationFrameId = 0;
 let sourceRevision = 0;
 let beautyPreviewRevision = 0;
 const beautyPreviewSource = ref('');
+const beautyPreviewVideoSource = ref('');
+const beautyPreviewVideoElement = ref(null);
 
 function round(value, precision = 1) {
   const multiplier = 10 ** precision;
@@ -394,6 +397,16 @@ function resetTransform() {
 
 async function togglePlayback() {
   if (!videoElement || !isReady.value) return;
+  const previewVideo = beautyPreviewVideoElement.value;
+  if (beautyPreviewVideoSource.value && previewVideo) {
+    try {
+      if (previewVideo.paused) await previewVideo.play();
+      else previewVideo.pause();
+    } catch {
+      errorMessage.value = '浏览器阻止了预览视频播放，请再次点击播放。';
+    }
+    return;
+  }
   clearBeautyPreview();
   try {
     if (videoElement.paused) await videoElement.play();
@@ -437,7 +450,15 @@ function getTransform() {
 
 function clearBeautyPreview() {
   beautyPreviewRevision += 1;
+  const previewVideo = beautyPreviewVideoElement.value;
+  if (previewVideo) {
+    previewVideo.pause();
+    previewVideo.removeAttribute('src');
+    previewVideo.load();
+  }
   beautyPreviewSource.value = '';
+  beautyPreviewVideoSource.value = '';
+  isPlaying.value = videoElement ? !videoElement.paused : false;
 }
 
 function showBeautyPreview(source) {
@@ -467,6 +488,26 @@ function showBeautyPreview(source) {
     image.onerror = () => reject(new Error('美颜预览图片加载失败'));
     image.src = source;
   });
+}
+
+async function showBeautyVideoPreview(source) {
+  clearBeautyPreview();
+  if (!source || !fabricCanvas || !videoObject) {
+    throw new Error('当前视频尚未准备好');
+  }
+
+  beautyPreviewVideoSource.value = source;
+  await nextTick();
+  const previewVideo = beautyPreviewVideoElement.value;
+  if (!previewVideo) return false;
+
+  previewVideo.currentTime = 0;
+  try {
+    await previewVideo.play();
+  } catch {
+    // 自动播放被限制时保留首帧，用户可以点击画面中央继续播放。
+  }
+  return true;
 }
 
 function requestBeautyPreview() {
@@ -542,6 +583,7 @@ defineExpose({
   seekTo,
   setTransform: applyTransform,
   showBeautyPreview,
+  showBeautyVideoPreview,
   togglePlayback,
 });
 </script>
@@ -557,10 +599,39 @@ defineExpose({
           <canvas ref="canvasElement" />
           <img
             v-if="beautyPreviewSource"
-            class="beauty-preview-image"
+            class="beauty-preview-media"
             :src="beautyPreviewSource"
             alt="美颜预览"
           />
+          <video
+            v-if="beautyPreviewVideoSource"
+            ref="beautyPreviewVideoElement"
+            class="beauty-preview-media"
+            :src="beautyPreviewVideoSource"
+            preload="auto"
+            playsinline
+            @play="isPlaying = true"
+            @pause="isPlaying = false"
+            @ended="isPlaying = false"
+          ></video>
+          <div
+            v-if="videoPreviewLoading"
+            class="beauty-video-loading-overlay"
+            role="status"
+            aria-live="polite"
+          >
+            <svg
+              class="beauty-video-loading-hourglass"
+              aria-hidden="true"
+              viewBox="0 0 48 48"
+            >
+              <path d="M14 7h20M14 41h20" />
+              <path d="M16 8c0 8 3.2 11.2 8 16-4.8 4.8-8 8-8 16" />
+              <path d="M32 8c0 8-3.2 11.2-8 16 4.8 4.8 8 8 8 16" />
+              <path class="hourglass-sand" d="M19 14h10l-5 6zM18 37h12l-6-8z" />
+            </svg>
+            <span>正在生成视频预览…</span>
+          </div>
           <div v-if="!isReady" class="empty-state">
             <strong>{{ source ? '正在加载视频…' : '请选择视频素材' }}</strong>
             <span>拖动改变位置 · 拉动圆点缩放 · 使用顶部控制点旋转</span>
@@ -1054,7 +1125,7 @@ defineExpose({
   height: 100% !important;
 }
 
-.beauty-preview-image {
+.beauty-preview-media {
   position: absolute;
   z-index: 4;
   inset: 0;
@@ -1062,6 +1133,67 @@ defineExpose({
   height: 100%;
   pointer-events: none;
   object-fit: cover;
+}
+
+.beauty-video-loading-overlay {
+  position: absolute;
+  z-index: 7;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: #f4f7ff;
+  background: rgba(3, 8, 20, 0.72);
+  backdrop-filter: blur(3px);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.beauty-video-loading-hourglass {
+  width: 46px;
+  height: 46px;
+  overflow: visible;
+  fill: none;
+  stroke: #75a9ff;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 0 9px rgba(74, 142, 255, 0.65));
+  animation: beauty-hourglass-flip 1.6s ease-in-out infinite;
+}
+
+.beauty-video-loading-hourglass .hourglass-sand {
+  fill: #75a9ff;
+  stroke: none;
+  animation: beauty-hourglass-sand 1.6s ease-in-out infinite;
+}
+
+@keyframes beauty-hourglass-flip {
+  0%,
+  42% {
+    transform: rotate(0deg);
+  }
+  58%,
+  100% {
+    transform: rotate(180deg);
+  }
+}
+
+@keyframes beauty-hourglass-sand {
+  0%,
+  35% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+  65%,
+  100% {
+    opacity: 1;
+  }
 }
 
 .empty-state {

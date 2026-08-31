@@ -31,6 +31,8 @@ const opacity = (value) => Math.min(1, Math.max(0, n(value, 1)));
 const progress = (value) => Math.min(1, Math.max(0, n(value, 0)));
 const percent = (value, fallback = 0) =>
   Math.min(100, Math.max(0, n(value, fallback)));
+const saturationPercent = (value, fallback = 100) =>
+  Math.min(200, Math.max(0, n(value, fallback)));
 const bool = (value) => value === true || value === 'true' || value === '1';
 
 const directChild = (node, tag) =>
@@ -58,7 +60,7 @@ export function buildXml(model) {
     '        <video>',
     `            <duration>${n(model.duration)}</duration>`,
     `            <resolution>${text(model.resolution)}</resolution>`,
-    `            <style>${text(model.videoStyle || 'cinematic')}</style>`,
+    `            <style>${text(model.videoStyle || 'none')}</style>`,
     `            <progress>${progress(model.progress)}</progress>`,
     `            <demo-path>${text(model.demoPath)}</demo-path>`,
     '        </video>',
@@ -144,7 +146,7 @@ export function buildXml(model) {
         `                        <speed>${n(area.speed, 1)}</speed>`,
         `                        <rotate>${n(area.rotate)}</rotate>`,
         '                    </transform>',
-        `                    <beauty lut-style="${attr(area.beauty?.lutStyle || 'none')}" lut-intensity="${attr(percent(area.beauty?.lutIntensity, 100))}" skin-tone="${attr(area.beauty?.skinTone || 'off')}" skin-intensity="${attr(percent(area.beauty?.skinIntensity, 60))}" smoothing="${attr(percent(area.beauty?.smoothing))}" whitening="${attr(percent(area.beauty?.whitening))}" stabilization="${attr(Boolean(area.beauty?.stabilization))}" one-click="${attr(Boolean(area.beauty?.oneClickBeauty))}" />`,
+        `                    <beauty lut-style="${attr(area.beauty?.lutStyle || 'none')}" lut-intensity="${attr(percent(area.beauty?.lutIntensity, 100))}" skin-tone="${attr(area.beauty?.skinTone || 'off')}" skin-intensity="${attr(percent(area.beauty?.skinIntensity, 60))}" smoothing="${attr(percent(area.beauty?.smoothing))}" whitening="${attr(percent(area.beauty?.whitening))}" saturation="${attr(saturationPercent(area.beauty?.saturation))}" stabilization="${attr(Boolean(area.beauty?.stabilization))}" one-click="${attr(Boolean(area.beauty?.oneClickBeauty))}" />`,
         '                    <destination>',
         `                        <position x="${attr(n(area.x))}" y="${attr(n(area.y))}" />`,
         `                        <width>${n(area.width, 1920)}</width>`,
@@ -281,6 +283,7 @@ export function parseXml(xmlText) {
             ),
             smoothing: percent(beauty?.getAttribute('smoothing')),
             whitening: percent(beauty?.getAttribute('whitening')),
+            saturation: saturationPercent(beauty?.getAttribute('saturation')),
             stabilization: bool(beauty?.getAttribute('stabilization')),
             oneClickBeauty: bool(beauty?.getAttribute('one-click')),
           },
@@ -347,7 +350,7 @@ export function parseXml(xmlText) {
     name: template.getAttribute('name') || '未命名模板',
     duration: n(childText(video, 'duration')),
     resolution: childText(video, 'resolution', '1920*1080') || '1920*1080',
-    videoStyle: childText(video, 'style', 'cinematic') || 'cinematic',
+    videoStyle: childText(video, 'style', 'none') || 'none',
     progress: progress(childText(video, 'progress')),
     demoPath: childText(video, 'demo-path'),
     tracks: {

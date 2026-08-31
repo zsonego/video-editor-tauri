@@ -707,6 +707,15 @@ struct ComposerBeautyFrameResult {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ComposerBeautyFileResult {
+    output_video_path: String,
+    params_json_path: String,
+    start_time_ms: i64,
+    duration_ms: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct TerminalInfo {
     terminal_type: u8,
     terminal_name: String,
@@ -867,6 +876,8 @@ struct ComposerRuntime {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     beauty_process_frame: Option<ComposerBeautyProcessFrameFn>,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
+    beauty_process_file: Option<ComposerBeautyProcessFileFn>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     beauty_get_last_error: Option<ComposerBeautyGetLastErrorFn>,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     initialized: bool,
@@ -893,6 +904,9 @@ type ComposerGetLastCmdFn = unsafe extern "C" fn() -> *const c_char;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 type ComposerBeautyProcessFrameFn =
     unsafe extern "C" fn(*const c_char, i64, *const c_char, *const c_char) -> c_int;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+type ComposerBeautyProcessFileFn =
+    unsafe extern "C" fn(*const c_char, *const c_char, i64, i64, *const c_char) -> c_int;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 type ComposerBeautyGetLastErrorFn = unsafe extern "C" fn() -> *const c_char;
 
@@ -1008,6 +1022,8 @@ impl ComposerRuntime {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             beauty_process_frame: None,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
+            beauty_process_file: None,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             beauty_get_last_error: None,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             initialized: false,
@@ -1109,6 +1125,21 @@ impl ComposerRuntime {
                     }
                 }
             };
+            app_log_info("[composer] resolving composer_beauty_process_file");
+            let beauty_process_file: Option<ComposerBeautyProcessFileFn> = unsafe {
+                match library.get(b"composer_beauty_process_file\0") {
+                    Ok(symbol) => {
+                        app_log_info("[composer] composer_beauty_process_file resolved");
+                        Some(*symbol)
+                    }
+                    Err(error) => {
+                        app_log_error(format!(
+                            "[composer] composer_beauty_process_file unavailable: {error}"
+                        ));
+                        None
+                    }
+                }
+            };
             app_log_info("[composer] resolving composer_beauty_get_last_error");
             let beauty_get_last_error: Option<ComposerBeautyGetLastErrorFn> = unsafe {
                 match library.get(b"composer_beauty_get_last_error\0") {
@@ -1146,6 +1177,7 @@ impl ComposerRuntime {
                 get_last_error,
                 get_last_cmd,
                 beauty_process_frame,
+                beauty_process_file,
                 beauty_get_last_error,
                 initialized: true,
             })
@@ -1334,6 +1366,64 @@ impl ComposerRuntime {
                 input_video_path,
                 timestamp_ms,
                 output_image_path,
+                json_params,
+            );
+            Err("Composer 动态库当前只支持 macOS 和 Windows".to_string())
+        }
+    }
+
+    fn beauty_process_file(
+        &self,
+        input_video_path: &str,
+        output_video_path: &str,
+        start_time_ms: i64,
+        duration_ms: i64,
+        json_params: &str,
+    ) -> Result<(), String> {
+        if let Some(error) = &self.init_error {
+            return Err(error.clone());
+        }
+
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            let Some(process_file) = self.beauty_process_file else {
+                return Err("composer_beauty_process_file 函数未加载".to_string());
+            };
+            let input_video_path = CString::new(input_video_path)
+                .map_err(|_| "输入视频路径包含非法字符".to_string())?;
+            let output_video_path = CString::new(output_video_path)
+                .map_err(|_| "预览视频路径包含非法字符".to_string())?;
+            let json_params =
+                CString::new(json_params).map_err(|_| "美颜参数包含非法字符".to_string())?;
+            let result = unsafe {
+                process_file(
+                    input_video_path.as_ptr(),
+                    output_video_path.as_ptr(),
+                    start_time_ms,
+                    duration_ms,
+                    json_params.as_ptr(),
+                )
+            };
+
+            if result == 0 {
+                return Ok(());
+            }
+
+            let last_error = self.beauty_last_error_text();
+            if last_error.is_empty() {
+                Err(composer_error_message(result))
+            } else {
+                Err(format!("{}: {last_error}", composer_error_message(result)))
+            }
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (
+                input_video_path,
+                output_video_path,
+                start_time_ms,
+                duration_ms,
                 json_params,
             );
             Err("Composer 动态库当前只支持 macOS 和 Windows".to_string())
@@ -4140,6 +4230,75 @@ async fn preview_composer_beauty_frame(
 }
 
 #[tauri::command]
+async fn preview_composer_beauty_file(
+    app: AppHandle,
+    composer: tauri::State<'_, ComposerState>,
+    input_video_path: String,
+    start_time_ms: i64,
+    duration_ms: i64,
+    params: ComposerBeautyFrameParams,
+) -> Result<ComposerBeautyFileResult, String> {
+    let start_time_ms = start_time_ms.max(0);
+    let duration_ms = duration_ms.max(0);
+    let input_video_path = fs::canonicalize(PathBuf::from(input_video_path))
+        .map_err(|error| format!("输入视频不存在: {error}"))?;
+    if !input_video_path.is_file() {
+        return Err("输入视频路径不是文件".to_string());
+    }
+    let video_dir = input_video_path
+        .parent()
+        .ok_or_else(|| "无法确定输入视频所在目录".to_string())?;
+    let image_temp_dir = video_dir.join("imageTemp");
+    reset_image_temp_dir(&image_temp_dir)?;
+
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_millis();
+    let video_name = input_video_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(sanitize_preview_file_stem)
+        .unwrap_or_else(|| "video".to_string());
+    let output_stem = format!("{now_ms}_{video_name}");
+    let output_video_path = image_temp_dir.join(format!("{output_stem}.mp4"));
+    let params_json_path = image_temp_dir.join(format!("{output_stem}.json"));
+    let params = prepare_beauty_frame_params(&app, params)?;
+    let json_params = serde_json::to_string_pretty(&params).map_err(|error| error.to_string())?;
+    fs::write(&params_json_path, &json_params)
+        .map_err(|error| format!("保存美颜参数失败: {error}"))?;
+
+    let input_video_path_text = input_video_path.to_string_lossy().to_string();
+    let output_video_path_text = output_video_path.to_string_lossy().to_string();
+    let params_json_path_text = params_json_path.to_string_lossy().to_string();
+    let composer = composer.inner().clone();
+    let output_video_path_for_call = output_video_path_text.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let composer = composer.lock().map_err(|error| error.to_string())?;
+        composer.beauty_process_file(
+            &input_video_path_text,
+            &output_video_path_for_call,
+            start_time_ms,
+            duration_ms,
+            &json_params,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+
+    if !output_video_path.is_file() {
+        return Err("美颜接口执行成功，但未生成预览视频".to_string());
+    }
+
+    Ok(ComposerBeautyFileResult {
+        output_video_path: output_video_path_text,
+        params_json_path: params_json_path_text,
+        start_time_ms,
+        duration_ms,
+    })
+}
+
+#[tauri::command]
 fn read_project_cover(project_dir: String) -> Result<tauri::ipc::Response, String> {
     let (_, project_root) = ensure_aicut_dirs()?;
     let project_root = fs::canonicalize(project_root).map_err(|error| error.to_string())?;
@@ -4636,6 +4795,7 @@ pub fn run() {
             apply_project_subtitle,
             compose_project_video,
             preview_composer_beauty_frame,
+            preview_composer_beauty_file,
             read_project_cover,
             delete_project_asset_files,
             delete_project_workspaces,
