@@ -11,7 +11,11 @@ import {
 import { useRouter } from 'vue-router';
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { dirname, join } from '@tauri-apps/api/path';
+import {
+  open as openDialog,
+  save as saveDialog,
+} from '@tauri-apps/plugin-dialog';
 import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener';
 import {
   createProject,
@@ -385,6 +389,7 @@ const exportProgress = ref(0);
 const exportStatus = ref('正在渲染视频文件...');
 const exportRunning = ref(false);
 const exportSelectedDir = ref('');
+const exportSelectedPath = ref('');
 const exportOutputPath = ref('');
 const defaultTemplateExportConfirmVisible = ref(false);
 const importOverwriteConfirmVisible = ref(false);
@@ -2684,6 +2689,10 @@ function buildBeautyFrameParams(values = {}) {
     positionX: Number(values.x) || 0,
     positionY: Number(values.y) || 0,
     scale: Number(values.scale) || 1,
+    canvas_width: Math.max(1, Math.round(Number(values.canvasWidth) || 960)),
+    canvas_height: Math.max(1, Math.round(Number(values.canvasHeight) || 540)),
+    transform_origin: values.transformOrigin || 'center',
+    rotation_direction: values.rotationDirection || 'clockwise',
     stabilization: Boolean(beauty.stabilization),
     one_click_beauty: Boolean(beauty.oneClickBeauty),
   };
@@ -3956,7 +3965,7 @@ async function showExportConfirmation() {
     return;
   }
 
-  await selectExportDirectory();
+  await selectExportFile();
 }
 
 function cancelDefaultTemplateExport() {
@@ -3966,36 +3975,66 @@ function cancelDefaultTemplateExport() {
 async function confirmDefaultTemplateExport() {
   void unlockExportFinishedSound();
   defaultTemplateExportConfirmVisible.value = false;
-  await selectExportDirectory();
+  await selectExportFile();
 }
 
-async function selectExportDirectory() {
+function getDefaultExportFileName() {
+  const source = String(
+    activeTemplateName.value || previewTitle.value || 'aicut-output',
+  ).trim();
+  const sanitized = source
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
+    .replace(/[. ]+$/g, '')
+    .replace(/\.mp4$/i, '')
+    .slice(0, 120);
+  return `${sanitized || 'aicut-output'}.mp4`;
+}
+
+function ensureMp4ExportPath(filePath) {
+  const normalized = String(filePath || '').trim();
+  if (!normalized || /\.mp4$/i.test(normalized)) return normalized;
+  const lastSeparator = Math.max(
+    normalized.lastIndexOf('/'),
+    normalized.lastIndexOf('\\'),
+  );
+  const extensionIndex = normalized.lastIndexOf('.');
+  if (extensionIndex > lastSeparator) {
+    return `${normalized.slice(0, extensionIndex)}.mp4`;
+  }
+  return `${normalized}.mp4`;
+}
+
+async function selectExportFile() {
   if (exportInterval) clearInterval(exportInterval);
   resetExportProgress();
+  exportSelectedPath.value = '';
 
   try {
     console.log('[export] ensuring default output directory');
-    const defaultPath = await invoke('ensure_default_output_dir');
-    console.log('[export] default output directory:', defaultPath);
-    console.log('[export] opening output directory picker');
-    const selected = await openDialog({
-      directory: true,
-      multiple: false,
+    const defaultDir = await invoke('ensure_default_output_dir');
+    const defaultPath = await join(defaultDir, getDefaultExportFileName());
+    console.log('[export] default output path:', defaultPath);
+    console.log('[export] opening save dialog');
+    const selected = await saveDialog({
+      title: '导出视频',
       defaultPath,
+      filters: [{ name: 'MP4 视频', extensions: ['mp4'] }],
+      canCreateDirectories: true,
     });
 
     if (!selected) {
-      console.log('[export] output directory selection cancelled');
+      console.log('[export] output file selection cancelled');
       return;
     }
 
-    exportSelectedDir.value = Array.isArray(selected) ? selected[0] : selected;
-    console.log('[export] selected output directory:', exportSelectedDir.value);
+    exportSelectedPath.value = ensureMp4ExportPath(selected);
+    exportSelectedDir.value = await dirname(exportSelectedPath.value);
+    console.log('[export] selected output file:', exportSelectedPath.value);
     exportState.value = 'confirm';
     exportModalVisible.value = true;
   } catch (error) {
-    console.error('[export] failed to select output directory:', error);
-    systemMessage.error(error?.message || '选择导出目录失败');
+    console.error('[export] failed to select output file:', error);
+    systemMessage.error(error?.message || '选择导出文件失败');
   }
 }
 
@@ -4067,6 +4106,10 @@ async function startExportProgress() {
     exportModalVisible.value = false;
     return;
   }
+  if (!exportSelectedPath.value) {
+    systemMessage.error('请先选择导出文件');
+    return;
+  }
 
   exportRunning.value = true;
 
@@ -4076,7 +4119,7 @@ async function startExportProgress() {
   try {
     console.log('[export] recording project export before compose');
     const exportAllowed = await ensureProjectExportRecorded(
-      exportSelectedDir.value,
+      exportSelectedPath.value,
     );
     if (!exportAllowed) {
       return;
@@ -4105,12 +4148,12 @@ async function startExportProgress() {
       exportId,
       templatePath: activeTemplateLocalInfo.value.templateFilePath,
       projectDir: activeProjectDir.value,
-      outputDir: exportSelectedDir.value,
+      outputPath: exportSelectedPath.value,
     });
     const result = await invoke('compose_project_video', {
       templatePath: activeTemplateLocalInfo.value.templateFilePath,
       projectDir: activeProjectDir.value,
-      outputDir: exportSelectedDir.value,
+      outputPath: exportSelectedPath.value,
       exportId,
     });
 
@@ -7474,7 +7517,7 @@ onBeforeUnmount(() => {
                   <p
                     class="mt-2 text-[11px] text-on-surface-variant/70 break-all"
                   >
-                    {{ exportSelectedDir }}
+                    {{ exportSelectedPath }}
                   </p>
                 </div>
                 <div class="flex flex-col w-full gap-3">

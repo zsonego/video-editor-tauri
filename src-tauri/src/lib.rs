@@ -693,6 +693,10 @@ struct ComposerBeautyFrameParams {
     #[serde(rename = "positionY")]
     position_y: f64,
     scale: f64,
+    canvas_width: u32,
+    canvas_height: u32,
+    transform_origin: String,
+    rotation_direction: String,
     stabilization: bool,
     one_click_beauty: bool,
 }
@@ -3925,13 +3929,41 @@ fn apply_project_subtitle(project_dir: String, text: String) -> Result<String, S
     Ok(updated_project_template_xml)
 }
 
+fn normalize_composer_output_path(value: &str) -> Result<PathBuf, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("输出文件路径不能为空".to_string());
+    }
+
+    let mut output_path = PathBuf::from(value);
+    if !output_path.is_absolute() {
+        return Err("输出文件路径必须是绝对路径".to_string());
+    }
+    if output_path.file_name().is_none() {
+        return Err("输出文件名不能为空".to_string());
+    }
+
+    match output_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+    {
+        None | Some("") => {
+            output_path.set_extension("mp4");
+        }
+        Some(extension) if extension.eq_ignore_ascii_case("mp4") => {}
+        Some(_) => return Err("导出文件必须使用 .mp4 后缀".to_string()),
+    }
+
+    Ok(output_path)
+}
+
 #[tauri::command]
 async fn compose_project_video(
     app: AppHandle,
     composer: tauri::State<'_, ComposerState>,
     template_path: String,
     project_dir: String,
-    output_dir: String,
+    output_path: String,
     export_id: String,
 ) -> Result<ComposerExportResult, String> {
     app_log_info(format!(
@@ -3967,9 +3999,12 @@ async fn compose_project_video(
         return Err("projectFile.xml 不存在".to_string());
     }
 
-    let output_dir = PathBuf::from(output_dir);
+    let output_path = normalize_composer_output_path(&output_path)?;
+    let output_dir = output_path
+        .parent()
+        .ok_or_else(|| "输出文件缺少父目录".to_string())?;
     app_log_info(format!(
-        "[composer] ensuring selected output dir: {}",
+        "[composer] ensuring selected output parent dir: {}",
         output_dir.display()
     ));
     fs::create_dir_all(&output_dir).map_err(|error| error.to_string())?;
@@ -3977,11 +4012,6 @@ async fn compose_project_video(
         return Err("输出目录无效".to_string());
     }
 
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| error.to_string())?
-        .as_millis();
-    let output_path = output_dir.join(format!("aicut-output-{timestamp}.mp4"));
     app_log_info(format!("[composer] output file: {}", output_path.display()));
     let output_path_string = output_path.to_string_lossy().to_string();
     let template_path_string = template_path.to_string_lossy().to_string();
@@ -4113,6 +4143,29 @@ fn prepare_beauty_frame_params(
     params.position_x = finite_or(params.position_x, 0.0);
     params.position_y = finite_or(params.position_y, 0.0);
     params.scale = finite_or(params.scale, 1.0).clamp(0.01, 10.0);
+    params.canvas_width = if params.canvas_width == 0 {
+        960
+    } else {
+        params.canvas_width.clamp(1, 16_384)
+    };
+    params.canvas_height = if params.canvas_height == 0 {
+        540
+    } else {
+        params.canvas_height.clamp(1, 16_384)
+    };
+    params.transform_origin = match params.transform_origin.trim().to_ascii_lowercase().as_str() {
+        "" | "center" => "center".to_string(),
+        _ => return Err("当前仅支持以 center 作为视频变换原点".to_string()),
+    };
+    params.rotation_direction = match params
+        .rotation_direction
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "" | "clockwise" => "clockwise".to_string(),
+        _ => return Err("当前仅支持 clockwise 旋转方向".to_string()),
+    };
 
     let lut_file = params
         .lut_file
@@ -4809,6 +4862,50 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn serializes_beauty_transform_coordinate_contract() {
+        let params = ComposerBeautyFrameParams {
+            rotation: 30.0,
+            position_x: 480.0,
+            position_y: 270.0,
+            scale: 0.5,
+            canvas_width: 960,
+            canvas_height: 540,
+            transform_origin: "center".to_string(),
+            rotation_direction: "clockwise".to_string(),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(params).expect("serialize beauty transform params");
+
+        assert_eq!(value["positionX"], 480.0);
+        assert_eq!(value["positionY"], 270.0);
+        assert_eq!(value["scale"], 0.5);
+        assert_eq!(value["rotation"], 30.0);
+        assert_eq!(value["canvas_width"], 960);
+        assert_eq!(value["canvas_height"], 540);
+        assert_eq!(value["transform_origin"], "center");
+        assert_eq!(value["rotation_direction"], "clockwise");
+    }
+
+    #[test]
+    fn normalizes_custom_composer_output_path() {
+        let output_dir = if cfg!(windows) {
+            PathBuf::from(r"C:\Users\aicut\Videos")
+        } else {
+            PathBuf::from("/Users/aicut/Videos")
+        };
+        let without_extension = output_dir.join("我的视频");
+        let normalized = normalize_composer_output_path(&without_extension.to_string_lossy())
+            .expect("normalize output path");
+
+        assert_eq!(normalized, output_dir.join("我的视频.mp4"));
+        assert!(normalize_composer_output_path("relative/video.mp4").is_err());
+        assert!(
+            normalize_composer_output_path(&output_dir.join("我的视频.mov").to_string_lossy())
+                .is_err()
+        );
+    }
 
     #[test]
     fn parses_satisfied_content_range() {

@@ -162,6 +162,10 @@ function emitTransform() {
     angle: transform.angle,
     scale: transform.scale,
     scalePercent: round(transform.scale * 100),
+    canvasWidth: CANVAS_WIDTH,
+    canvasHeight: CANVAS_HEIGHT,
+    transformOrigin: 'center',
+    rotationDirection: 'clockwise',
     beauty: getBeautySettings(),
   });
 }
