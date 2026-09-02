@@ -623,6 +623,7 @@ struct PreparedTemplate {
 #[serde(rename_all = "camelCase")]
 struct ProjectWorkspace {
     project_dir: String,
+    template_file_path: String,
     project_xml: String,
 }
 
@@ -631,6 +632,13 @@ struct ProjectWorkspace {
 struct ProjectAssetImport {
     copied_path: String,
     project_filepath: String,
+    project_xml: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectGeneratedAsset {
+    generate_path: String,
     project_xml: String,
 }
 
@@ -650,6 +658,31 @@ struct LocalProjectWorkspace {
 struct ProjectAreaOffsetUpdate {
     area_id: String,
     offset_ms: u64,
+}
+
+#[derive(Deserialize)]
+struct ProjectAssetProperties {
+    whiteness: f64,
+    smoothing: f64,
+    saturation: f64,
+    skin_tone: f64,
+    face_detect: i32,
+    rotation: f64,
+    lut_style: String,
+    lut_intensity: f64,
+    #[serde(rename = "positionX")]
+    position_x: f64,
+    #[serde(rename = "positionY")]
+    position_y: f64,
+    scale: f64,
+    canvas_width: u32,
+    canvas_height: u32,
+    transform_origin: String,
+    rotation_direction: String,
+    stabilization: bool,
+    one_click_beauty: bool,
+    #[serde(default)]
+    generatepath: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -682,6 +715,7 @@ struct ComposerExportResult {
 struct ComposerBeautyFrameParams {
     whiteness: f64,
     smoothing: f64,
+    saturation: f64,
     skin_tone: f64,
     face_detect: i32,
     rotation: f64,
@@ -2373,6 +2407,34 @@ fn replace_or_insert_xml_attribute(tag: &str, attribute: &str, value: &str) -> S
     )
 }
 
+fn remove_xml_attribute(tag: &str, attribute: &str) -> String {
+    let Some(attribute_position) = find_xml_attribute_position(tag, attribute) else {
+        return tag.to_string();
+    };
+    let after_name = &tag[attribute_position + attribute.len()..];
+    let leading_space_len = after_name.len() - after_name.trim_start().len();
+    let after_space = &after_name[leading_space_len..];
+    let Some(after_equals) = after_space.strip_prefix('=') else {
+        return tag.to_string();
+    };
+    let equals_and_space_len = 1 + after_equals.len() - after_equals.trim_start().len();
+    let value_start =
+        attribute_position + attribute.len() + leading_space_len + equals_and_space_len;
+    let Some(value_end) = xml_attribute_value_end(tag, value_start) else {
+        return tag.to_string();
+    };
+
+    let mut removal_start = attribute_position;
+    while removal_start > 0 {
+        match tag.as_bytes()[removal_start - 1] {
+            b' ' | b'\t' => removal_start -= 1,
+            _ => break,
+        }
+    }
+
+    format!("{}{}", &tag[..removal_start], &tag[value_end..])
+}
+
 fn find_xml_attribute_position(tag: &str, attribute: &str) -> Option<usize> {
     let mut search_start = 0;
 
@@ -2466,6 +2528,464 @@ fn update_project_asset_filepath(
     } else {
         Err("projectFile.xml 中未找到对应的 asset".to_string())
     }
+}
+
+fn update_project_asset_generatepath(
+    template_xml: &str,
+    asset_id: &str,
+    generate_path: Option<&str>,
+) -> Result<String, String> {
+    let mut output = String::new();
+    let mut search_start = 0;
+    let mut updated = false;
+
+    while let Some(relative_start) = template_xml[search_start..].find("<asset") {
+        let tag_start = search_start + relative_start;
+        let after_name = template_xml[tag_start + "<asset".len()..].chars().next();
+
+        if !is_xml_name_boundary(after_name) {
+            output.push_str(&template_xml[search_start..tag_start + "<asset".len()]);
+            search_start = tag_start + "<asset".len();
+            continue;
+        }
+
+        let Some(relative_tag_end) = template_xml[tag_start..].find('>') else {
+            break;
+        };
+        let tag_end = tag_start + relative_tag_end + 1;
+        let tag = &template_xml[tag_start..tag_end];
+
+        output.push_str(&template_xml[search_start..tag_start]);
+        if xml_attribute_value(tag, "id").as_deref() == Some(asset_id) {
+            output.push_str(&match generate_path {
+                Some(path) => replace_or_insert_xml_attribute(tag, "generatepath", path),
+                None => remove_xml_attribute(tag, "generatepath"),
+            });
+            updated = true;
+        } else {
+            output.push_str(tag);
+        }
+        search_start = tag_end;
+    }
+
+    output.push_str(&template_xml[search_start..]);
+    if updated {
+        Ok(output)
+    } else {
+        Err("template.xml 中未找到对应的 asset".to_string())
+    }
+}
+
+fn format_property_number(value: f64) -> String {
+    let mut formatted = format!("{value:.6}");
+    while formatted.ends_with('0') {
+        formatted.pop();
+    }
+    if formatted.ends_with('.') {
+        formatted.push('0');
+    }
+    formatted
+}
+
+fn normalize_project_asset_properties(
+    mut properties: ProjectAssetProperties,
+) -> Result<ProjectAssetProperties, String> {
+    properties.whiteness = finite_or(properties.whiteness, 0.0).clamp(0.0, 1.0);
+    properties.smoothing = finite_or(properties.smoothing, 0.0).clamp(0.0, 1.0);
+    properties.saturation = finite_or(properties.saturation, 100.0).clamp(0.0, 200.0);
+    properties.skin_tone = finite_or(properties.skin_tone, 0.0).clamp(-1.0, 1.0);
+    properties.face_detect = i32::from(properties.face_detect != 0);
+    properties.rotation = finite_or(properties.rotation, 0.0);
+    properties.lut_style = match properties.lut_style.trim() {
+        "" => "none".to_string(),
+        value => value.to_string(),
+    };
+    properties.lut_intensity = finite_or(properties.lut_intensity, 0.0).clamp(0.0, 1.0);
+    properties.position_x = finite_or(properties.position_x, 0.0);
+    properties.position_y = finite_or(properties.position_y, 0.0);
+    properties.scale = finite_or(properties.scale, 1.0).clamp(0.01, 10.0);
+    properties.canvas_width = properties.canvas_width.clamp(1, 16_384);
+    properties.canvas_height = properties.canvas_height.clamp(1, 16_384);
+    properties.transform_origin = match properties
+        .transform_origin
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "" | "center" => "center".to_string(),
+        _ => return Err("当前仅支持以 center 作为视频变换原点".to_string()),
+    };
+    properties.rotation_direction =
+        normalize_rotation_direction(&properties.rotation_direction, properties.rotation)?;
+    properties.generatepath = properties
+        .generatepath
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    Ok(properties)
+}
+
+fn project_asset_property_xml(properties: &ProjectAssetProperties, indent: &str) -> String {
+    let value_indent = format!("{indent}    ");
+    let mut values = vec![
+        ("whiteness", format_property_number(properties.whiteness)),
+        ("smoothing", format_property_number(properties.smoothing)),
+        ("saturation", format_property_number(properties.saturation)),
+        ("skin_tone", format_property_number(properties.skin_tone)),
+        ("face_detect", properties.face_detect.to_string()),
+        ("rotation", format_property_number(properties.rotation)),
+        ("lut_style", properties.lut_style.clone()),
+        (
+            "lut_intensity",
+            format_property_number(properties.lut_intensity),
+        ),
+        ("positionX", format_property_number(properties.position_x)),
+        ("positionY", format_property_number(properties.position_y)),
+        ("scale", format_property_number(properties.scale)),
+        ("canvas_width", properties.canvas_width.to_string()),
+        ("canvas_height", properties.canvas_height.to_string()),
+        ("transform_origin", properties.transform_origin.clone()),
+        ("rotation_direction", properties.rotation_direction.clone()),
+        ("stabilization", properties.stabilization.to_string()),
+        ("one_click_beauty", properties.one_click_beauty.to_string()),
+    ];
+    if let Some(generatepath) = &properties.generatepath {
+        values.push(("generatepath", generatepath.clone()));
+    }
+    let mut output = String::from("<property>");
+
+    for (name, value) in values {
+        output.push_str(&format!(
+            "\n{value_indent}<{name}>{}</{name}>",
+            escape_xml_text(&value)
+        ));
+    }
+    output.push_str(&format!("\n{indent}</property>"));
+    output
+}
+
+fn replace_or_append_area_property(
+    area_inner: &str,
+    property_xml: &str,
+    property_indent: &str,
+) -> String {
+    let mut area_inner = area_inner.to_string();
+    while let Some(property_start) = area_inner.find("<property") {
+        let after_name = area_inner[property_start + "<property".len()..]
+            .chars()
+            .next();
+        if !is_xml_name_boundary(after_name) {
+            break;
+        }
+        let Some(relative_tag_end) = area_inner[property_start..].find('>') else {
+            break;
+        };
+        let content_start = property_start + relative_tag_end + 1;
+        let Some(relative_close_start) = area_inner[content_start..].find("</property>") else {
+            break;
+        };
+        let property_end = content_start + relative_close_start + "</property>".len();
+        let line_start = area_inner[..property_start]
+            .rfind('\n')
+            .map(|position| position + 1)
+            .unwrap_or(0);
+        let property_line_is_indented = area_inner[line_start..property_start]
+            .chars()
+            .all(|character| matches!(character, ' ' | '\t' | '\r'));
+        let removal_start = if property_line_is_indented {
+            line_start
+        } else {
+            property_start
+        };
+        let mut removal_end = property_end;
+        while matches!(area_inner.as_bytes().get(removal_end), Some(b' ' | b'\t')) {
+            removal_end += 1;
+        }
+        if area_inner.as_bytes().get(removal_end) == Some(&b'\r') {
+            removal_end += 1;
+        }
+        if area_inner.as_bytes().get(removal_end) == Some(&b'\n') {
+            removal_end += 1;
+        }
+        area_inner.replace_range(removal_start..removal_end, "");
+    }
+
+    let content_end = area_inner.trim_end().len();
+    let mut output = area_inner[..content_end].to_string();
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+    output.push_str(property_indent);
+    output.push_str(property_xml);
+    output.push('\n');
+    output.push_str(property_indent.strip_suffix("    ").unwrap_or(""));
+    output
+}
+
+fn update_template_asset_properties(
+    template_xml: &str,
+    asset_id: &str,
+    properties: &ProjectAssetProperties,
+) -> Result<String, String> {
+    let mut output = String::new();
+    let mut search_start = 0;
+    let mut updated_count = 0;
+
+    while let Some(relative_start) = template_xml[search_start..].find("<area") {
+        let area_start = search_start + relative_start;
+        let after_name = template_xml[area_start + "<area".len()..].chars().next();
+
+        if !is_xml_name_boundary(after_name) {
+            output.push_str(&template_xml[search_start..area_start + "<area".len()]);
+            search_start = area_start + "<area".len();
+            continue;
+        }
+
+        let Some(relative_tag_end) = template_xml[area_start..].find('>') else {
+            break;
+        };
+        let tag_end = area_start + relative_tag_end + 1;
+        let area_tag = &template_xml[area_start..tag_end];
+        if xml_attribute_value(area_tag, "asset-id").as_deref() != Some(asset_id) {
+            output.push_str(&template_xml[search_start..tag_end]);
+            search_start = tag_end;
+            continue;
+        }
+
+        let line_start = template_xml[..area_start]
+            .rfind('\n')
+            .map(|position| position + 1)
+            .unwrap_or(0);
+        let line_prefix = &template_xml[line_start..area_start];
+        let area_indent = if line_prefix.chars().all(char::is_whitespace) {
+            line_prefix
+        } else {
+            ""
+        };
+        let property_indent = format!("{area_indent}    ");
+        let property_xml = project_asset_property_xml(properties, &property_indent);
+        output.push_str(&template_xml[search_start..area_start]);
+
+        if area_tag.trim_end().ends_with("/>") {
+            let opening_tag = area_tag
+                .trim_end()
+                .strip_suffix("/>")
+                .unwrap_or(area_tag)
+                .trim_end();
+            output.push_str(opening_tag);
+            output.push_str(">\n");
+            output.push_str(&property_indent);
+            output.push_str(&property_xml);
+            output.push('\n');
+            output.push_str(area_indent);
+            output.push_str("</area>");
+            search_start = tag_end;
+            updated_count += 1;
+            continue;
+        }
+
+        let Some(relative_close_start) = template_xml[tag_end..].find("</area>") else {
+            return Err("template.xml 中的 area 节点未正确闭合".to_string());
+        };
+        let close_start = tag_end + relative_close_start;
+        let close_end = close_start + "</area>".len();
+        let area_inner = &template_xml[tag_end..close_start];
+        let updated_inner =
+            replace_or_append_area_property(area_inner, &property_xml, &property_indent);
+        output.push_str(area_tag);
+        output.push_str(&updated_inner);
+        output.push_str("</area>");
+        search_start = close_end;
+        updated_count += 1;
+    }
+
+    output.push_str(&template_xml[search_start..]);
+    if updated_count == 0 {
+        Err("template.xml 中未找到使用当前 assetId 的 area".to_string())
+    } else {
+        Ok(output)
+    }
+}
+
+fn remove_xml_child_element(content: &str, element_name: &str) -> String {
+    let opening_prefix = format!("<{element_name}");
+    let closing_tag = format!("</{element_name}>");
+    let mut output = content.to_string();
+
+    while let Some(element_start) = output.find(&opening_prefix) {
+        let after_name = output[element_start + opening_prefix.len()..]
+            .chars()
+            .next();
+        if !is_xml_name_boundary(after_name) {
+            break;
+        }
+        let Some(relative_open_end) = output[element_start..].find('>') else {
+            break;
+        };
+        let content_start = element_start + relative_open_end + 1;
+        let Some(relative_close_start) = output[content_start..].find(&closing_tag) else {
+            break;
+        };
+        let element_end = content_start + relative_close_start + closing_tag.len();
+        let line_start = output[..element_start]
+            .rfind('\n')
+            .map(|position| position + 1)
+            .unwrap_or(0);
+        let line_is_indented = output[line_start..element_start]
+            .chars()
+            .all(|character| matches!(character, ' ' | '\t' | '\r'));
+        let removal_start = if line_is_indented {
+            line_start
+        } else {
+            element_start
+        };
+        let mut removal_end = element_end;
+        while matches!(output.as_bytes().get(removal_end), Some(b' ' | b'\t')) {
+            removal_end += 1;
+        }
+        if output.as_bytes().get(removal_end) == Some(&b'\r') {
+            removal_end += 1;
+        }
+        if output.as_bytes().get(removal_end) == Some(&b'\n') {
+            removal_end += 1;
+        }
+        output.replace_range(removal_start..removal_end, "");
+    }
+
+    output
+}
+
+fn remove_asset_area_property_element(
+    xml: &str,
+    asset_id: &str,
+    element_name: &str,
+) -> Result<String, String> {
+    let mut output = String::new();
+    let mut search_start = 0;
+    let mut matched_count = 0;
+
+    while let Some(relative_start) = xml[search_start..].find("<area") {
+        let area_start = search_start + relative_start;
+        let after_name = xml[area_start + "<area".len()..].chars().next();
+        if !is_xml_name_boundary(after_name) {
+            output.push_str(&xml[search_start..area_start + "<area".len()]);
+            search_start = area_start + "<area".len();
+            continue;
+        }
+
+        let Some(relative_tag_end) = xml[area_start..].find('>') else {
+            break;
+        };
+        let tag_end = area_start + relative_tag_end + 1;
+        let area_tag = &xml[area_start..tag_end];
+        output.push_str(&xml[search_start..tag_end]);
+        search_start = tag_end;
+        if xml_attribute_value(area_tag, "asset-id").as_deref() != Some(asset_id) {
+            continue;
+        }
+        matched_count += 1;
+        if area_tag.trim_end().ends_with("/>") {
+            continue;
+        }
+
+        let Some(relative_close_start) = xml[tag_end..].find("</area>") else {
+            return Err("XML 中的 area 节点未正确闭合".to_string());
+        };
+        let close_start = tag_end + relative_close_start;
+        let close_end = close_start + "</area>".len();
+        output.push_str(&remove_xml_child_element(
+            &xml[tag_end..close_start],
+            element_name,
+        ));
+        output.push_str("</area>");
+        search_start = close_end;
+    }
+
+    output.push_str(&xml[search_start..]);
+    if matched_count == 0 {
+        Err("XML 中未找到使用当前 assetId 的 area".to_string())
+    } else {
+        Ok(output)
+    }
+}
+
+fn collect_xml_child_element_values(content: &str, element_name: &str) -> Vec<String> {
+    let opening_prefix = format!("<{element_name}");
+    let closing_tag = format!("</{element_name}>");
+    let mut values = Vec::new();
+    let mut search_start = 0;
+
+    while let Some(relative_start) = content[search_start..].find(&opening_prefix) {
+        let element_start = search_start + relative_start;
+        let after_name = content[element_start + opening_prefix.len()..]
+            .chars()
+            .next();
+        if !is_xml_name_boundary(after_name) {
+            search_start = element_start + opening_prefix.len();
+            continue;
+        }
+        let Some(relative_open_end) = content[element_start..].find('>') else {
+            break;
+        };
+        let value_start = element_start + relative_open_end + 1;
+        let Some(relative_close_start) = content[value_start..].find(&closing_tag) else {
+            break;
+        };
+        let value_end = value_start + relative_close_start;
+        let value = unescape_xml_value(content[value_start..value_end].trim());
+        if !value.is_empty() {
+            values.push(value);
+        }
+        search_start = value_end + closing_tag.len();
+    }
+
+    values
+}
+
+fn collect_asset_generated_paths(xml: &str, asset_id: &str) -> HashSet<String> {
+    let mut paths = HashSet::new();
+    let mut search_start = 0;
+
+    while let Some(relative_start) = xml[search_start..].find("<area") {
+        let area_start = search_start + relative_start;
+        let after_name = xml[area_start + "<area".len()..].chars().next();
+        if !is_xml_name_boundary(after_name) {
+            search_start = area_start + "<area".len();
+            continue;
+        }
+        let Some(relative_tag_end) = xml[area_start..].find('>') else {
+            break;
+        };
+        let tag_end = area_start + relative_tag_end + 1;
+        let area_tag = &xml[area_start..tag_end];
+        search_start = tag_end;
+        if xml_attribute_value(area_tag, "asset-id").as_deref() != Some(asset_id)
+            || area_tag.trim_end().ends_with("/>")
+        {
+            continue;
+        }
+        let Some(relative_close_start) = xml[tag_end..].find("</area>") else {
+            break;
+        };
+        let close_start = tag_end + relative_close_start;
+        paths.extend(collect_xml_child_element_values(
+            &xml[tag_end..close_start],
+            "generatepath",
+        ));
+        search_start = close_start + "</area>".len();
+    }
+
+    for asset_tag in find_xml_start_tags(xml, "asset") {
+        if xml_attribute_value(&asset_tag, "id").as_deref() == Some(asset_id) {
+            if let Some(path) = xml_attribute_value(&asset_tag, "generatepath") {
+                if !path.trim().is_empty() {
+                    paths.insert(path);
+                }
+            }
+        }
+    }
+
+    paths
 }
 
 fn update_project_clip_offsets(
@@ -3658,6 +4178,18 @@ fn get_cached_template_assets(
 }
 
 #[tauri::command]
+fn read_original_template_xml(template_id: String) -> Result<String, String> {
+    if template_id.trim().is_empty() {
+        return Err("templateId 不能为空".to_string());
+    }
+    let (_, template_file_path, _) = cached_template_paths(&template_id)?;
+    if !template_file_path.is_file() {
+        return Err("原始模板 template.xml 不存在".to_string());
+    }
+    fs::read_to_string(template_file_path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn prepare_template_assets(
     app: AppHandle,
     template_id: String,
@@ -3748,6 +4280,7 @@ fn create_project_workspace(
 
     Ok(ProjectWorkspace {
         project_dir: project_dir.to_string_lossy().to_string(),
+        template_file_path: path_to_xml_filepath(project_dir.join("template.xml")),
         project_xml: template_xml,
     })
 }
@@ -3892,6 +4425,180 @@ fn update_project_asset_offset(
     fs::write(&project_file_path, updated_project_file_xml).map_err(|error| error.to_string())?;
 
     Ok(())
+}
+
+#[tauri::command]
+fn update_project_asset_properties(
+    project_dir: String,
+    asset_id: String,
+    properties: ProjectAssetProperties,
+) -> Result<String, String> {
+    let asset_id = asset_id.trim();
+    if asset_id.is_empty() {
+        return Err("assetId 不能为空".to_string());
+    }
+
+    let (_, project_root) = ensure_aicut_dirs()?;
+    let project_root = fs::canonicalize(project_root).map_err(|error| error.to_string())?;
+    let project_dir =
+        fs::canonicalize(PathBuf::from(project_dir)).map_err(|error| error.to_string())?;
+    if !project_dir.starts_with(&project_root) {
+        return Err("项目目录无效".to_string());
+    }
+
+    let template_file_path = project_dir.join("template.xml");
+    let project_file_path = project_dir.join("projectFile.xml");
+    let template_xml =
+        fs::read_to_string(&template_file_path).map_err(|error| error.to_string())?;
+    let project_file_xml =
+        fs::read_to_string(&project_file_path).map_err(|error| error.to_string())?;
+    let properties = normalize_project_asset_properties(properties)?;
+    let updated_template_xml =
+        update_template_asset_properties(&template_xml, asset_id, &properties)?;
+    let updated_project_file_xml =
+        update_template_asset_properties(&project_file_xml, asset_id, &properties)?;
+    fs::write(&template_file_path, &updated_template_xml).map_err(|error| error.to_string())?;
+    fs::write(&project_file_path, updated_project_file_xml).map_err(|error| error.to_string())?;
+
+    Ok(updated_template_xml)
+}
+
+#[tauri::command]
+fn apply_project_asset_generated_video(
+    project_dir: String,
+    asset_id: String,
+    preview_video_path: String,
+    mut properties: ProjectAssetProperties,
+) -> Result<ProjectGeneratedAsset, String> {
+    let asset_id = asset_id.trim();
+    if asset_id.is_empty() {
+        return Err("assetId 不能为空".to_string());
+    }
+
+    let (_, project_root) = ensure_aicut_dirs()?;
+    let project_root = fs::canonicalize(project_root).map_err(|error| error.to_string())?;
+    let project_dir =
+        fs::canonicalize(PathBuf::from(project_dir)).map_err(|error| error.to_string())?;
+    if !project_dir.starts_with(&project_root) {
+        return Err("项目目录无效".to_string());
+    }
+
+    let preview_video_path = fs::canonicalize(PathBuf::from(preview_video_path))
+        .map_err(|error| format!("生成的视频不存在: {error}"))?;
+    if !preview_video_path.is_file() {
+        return Err("生成的视频路径不是文件".to_string());
+    }
+
+    let generated_dir = project_dir.join("generated");
+    fs::create_dir_all(&generated_dir).map_err(|error| error.to_string())?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_millis();
+    let extension = preview_video_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("mp4");
+    let generated_path = generated_dir.join(format!(
+        "{}_{}.{}",
+        sanitize_name(asset_id),
+        timestamp,
+        extension
+    ));
+    let generate_path = path_to_xml_filepath(generated_path);
+    let template_file_path = project_dir.join("template.xml");
+    let project_file_path = project_dir.join("projectFile.xml");
+    let template_xml =
+        fs::read_to_string(&template_file_path).map_err(|error| error.to_string())?;
+    let project_file_xml =
+        fs::read_to_string(&project_file_path).map_err(|error| error.to_string())?;
+    let template_xml =
+        update_project_asset_generatepath(&template_xml, asset_id, None).unwrap_or(template_xml);
+    let project_file_xml = update_project_asset_generatepath(&project_file_xml, asset_id, None)
+        .unwrap_or(project_file_xml);
+    properties.generatepath = Some(generate_path.clone());
+    let properties = normalize_project_asset_properties(properties)?;
+    let updated_template_xml =
+        update_template_asset_properties(&template_xml, asset_id, &properties)?;
+    let updated_project_file_xml =
+        update_template_asset_properties(&project_file_xml, asset_id, &properties)?;
+
+    fs::copy(&preview_video_path, &generate_path)
+        .map_err(|error| format!("保存生成视频失败: {error}"))?;
+    fs::write(&template_file_path, &updated_template_xml).map_err(|error| error.to_string())?;
+    fs::write(&project_file_path, updated_project_file_xml).map_err(|error| error.to_string())?;
+
+    Ok(ProjectGeneratedAsset {
+        generate_path,
+        project_xml: updated_template_xml,
+    })
+}
+
+#[tauri::command]
+fn reset_project_asset_generated_video(
+    project_dir: String,
+    asset_id: String,
+) -> Result<String, String> {
+    let asset_id = asset_id.trim();
+    if asset_id.is_empty() {
+        return Err("assetId 不能为空".to_string());
+    }
+
+    let (_, project_root) = ensure_aicut_dirs()?;
+    let project_root = fs::canonicalize(project_root).map_err(|error| error.to_string())?;
+    let project_dir =
+        fs::canonicalize(PathBuf::from(project_dir)).map_err(|error| error.to_string())?;
+    if !project_dir.starts_with(&project_root) {
+        return Err("项目目录无效".to_string());
+    }
+
+    let template_file_path = project_dir.join("template.xml");
+    let project_file_path = project_dir.join("projectFile.xml");
+    let template_xml =
+        fs::read_to_string(&template_file_path).map_err(|error| error.to_string())?;
+    let project_file_xml =
+        fs::read_to_string(&project_file_path).map_err(|error| error.to_string())?;
+    let mut generated_paths = collect_asset_generated_paths(&template_xml, asset_id);
+    generated_paths.extend(collect_asset_generated_paths(&project_file_xml, asset_id));
+    let updated_template_xml =
+        remove_asset_area_property_element(&template_xml, asset_id, "generatepath")?;
+    let updated_project_file_xml =
+        remove_asset_area_property_element(&project_file_xml, asset_id, "generatepath")?;
+    let updated_template_xml =
+        update_project_asset_generatepath(&updated_template_xml, asset_id, None)
+            .unwrap_or(updated_template_xml);
+    let updated_project_file_xml =
+        update_project_asset_generatepath(&updated_project_file_xml, asset_id, None)
+            .unwrap_or(updated_project_file_xml);
+
+    let generated_dir = project_dir.join("generated");
+    let canonical_generated_dir = generated_dir
+        .is_dir()
+        .then(|| fs::canonicalize(&generated_dir))
+        .transpose()
+        .map_err(|error| format!("读取 generated 目录失败: {error}"))?;
+    if let Some(canonical_generated_dir) = canonical_generated_dir {
+        for generated_path in generated_paths {
+            let generated_path = PathBuf::from(generated_path);
+            if !generated_path.exists() {
+                continue;
+            }
+            let canonical_generated_path = fs::canonicalize(&generated_path)
+                .map_err(|error| format!("读取生成视频失败: {error}"))?;
+            if canonical_generated_path.starts_with(&canonical_generated_dir)
+                && canonical_generated_path.is_file()
+            {
+                fs::remove_file(&canonical_generated_path)
+                    .map_err(|error| format!("删除生成视频失败: {error}"))?;
+            }
+        }
+    }
+
+    fs::write(&template_file_path, &updated_template_xml).map_err(|error| error.to_string())?;
+    fs::write(&project_file_path, updated_project_file_xml).map_err(|error| error.to_string())?;
+
+    Ok(updated_template_xml)
 }
 
 #[tauri::command]
@@ -4130,15 +4837,27 @@ fn finite_or(value: f64, fallback: f64) -> f64 {
     }
 }
 
+fn normalize_rotation_direction(value: &str, rotation: f64) -> Result<String, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "clockwise" | "counterclockwise" => Ok(if rotation < 0.0 {
+            "counterclockwise".to_string()
+        } else {
+            "clockwise".to_string()
+        }),
+        _ => Err("rotation_direction 仅支持 clockwise 或 counterclockwise".to_string()),
+    }
+}
+
 fn prepare_beauty_frame_params(
     app: &AppHandle,
     mut params: ComposerBeautyFrameParams,
 ) -> Result<ComposerBeautyFrameParams, String> {
     params.whiteness = finite_or(params.whiteness, 0.0).clamp(0.0, 1.0);
     params.smoothing = finite_or(params.smoothing, 0.0).clamp(0.0, 1.0);
+    params.saturation = finite_or(params.saturation, 100.0).clamp(0.0, 200.0);
     params.skin_tone = finite_or(params.skin_tone, 0.0).clamp(-1.0, 1.0);
     params.face_detect = 1;
-    params.rotation = finite_or(params.rotation, 0.0).rem_euclid(360.0);
+    params.rotation = finite_or(params.rotation, 0.0);
     params.lut_intensity = finite_or(params.lut_intensity, 0.0).clamp(0.0, 1.0);
     params.position_x = finite_or(params.position_x, 0.0);
     params.position_y = finite_or(params.position_y, 0.0);
@@ -4157,15 +4876,8 @@ fn prepare_beauty_frame_params(
         "" | "center" => "center".to_string(),
         _ => return Err("当前仅支持以 center 作为视频变换原点".to_string()),
     };
-    params.rotation_direction = match params
-        .rotation_direction
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "" | "clockwise" => "clockwise".to_string(),
-        _ => return Err("当前仅支持 clockwise 旋转方向".to_string()),
-    };
+    params.rotation_direction =
+        normalize_rotation_direction(&params.rotation_direction, params.rotation)?;
 
     let lut_file = params
         .lut_file
@@ -4837,6 +5549,7 @@ pub fn run() {
             stop_pr_bridge,
             take_pr_template_exports,
             get_cached_template_assets,
+            read_original_template_xml,
             prepare_template_assets,
             cancel_template_download,
             ensure_default_output_dir,
@@ -4845,6 +5558,9 @@ pub fn run() {
             read_project_workspace,
             save_project_asset,
             update_project_asset_offset,
+            update_project_asset_properties,
+            apply_project_asset_generated_video,
+            reset_project_asset_generated_video,
             apply_project_subtitle,
             compose_project_video,
             preview_composer_beauty_frame,
@@ -4866,7 +5582,115 @@ mod tests {
     #[test]
     fn serializes_beauty_transform_coordinate_contract() {
         let params = ComposerBeautyFrameParams {
-            rotation: 30.0,
+            rotation: -450.0,
+            saturation: 100.0,
+            position_x: 480.0,
+            position_y: 270.0,
+            scale: 0.5,
+            canvas_width: 960,
+            canvas_height: 540,
+            transform_origin: "center".to_string(),
+            rotation_direction: "counterclockwise".to_string(),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(params).expect("serialize beauty transform params");
+
+        assert_eq!(value["positionX"], 480.0);
+        assert_eq!(value["positionY"], 270.0);
+        assert_eq!(value["saturation"], 100.0);
+        assert_eq!(value["scale"], 0.5);
+        assert_eq!(value["rotation"], -450.0);
+        assert_eq!(value["canvas_width"], 960);
+        assert_eq!(value["canvas_height"], 540);
+        assert_eq!(value["transform_origin"], "center");
+        assert_eq!(value["rotation_direction"], "counterclockwise");
+    }
+
+    #[test]
+    fn appends_and_updates_properties_for_every_area_using_asset() {
+        let template_xml = r#"<xmeml><template id="template-1"><clips>
+            <clip id="clip-1">
+                <area id="area-1" asset-id="asset-1">
+                    <source><duration>1000</duration></source>
+                </area>
+            </clip>
+            <clip id="clip-2">
+                <area id="area-2" asset-id="asset-1">
+                    <property><saturation>80.0</saturation></property>
+                </area>
+            </clip>
+            <clip id="clip-3">
+                <area id="area-3" asset-id="asset-2"><source><duration>1000</duration></source></area>
+            </clip>
+        </clips></template></xmeml>"#;
+        let properties = ProjectAssetProperties {
+            whiteness: 0.2,
+            smoothing: 0.3,
+            saturation: 122.0,
+            skin_tone: -0.4,
+            face_detect: 1,
+            rotation: -450.0,
+            lut_style: "lut-009".to_string(),
+            lut_intensity: 0.8,
+            position_x: 480.0,
+            position_y: 270.0,
+            scale: 0.5,
+            canvas_width: 960,
+            canvas_height: 540,
+            transform_origin: "center".to_string(),
+            rotation_direction: "counterclockwise".to_string(),
+            stabilization: false,
+            one_click_beauty: false,
+            generatepath: None,
+        };
+
+        let properties =
+            normalize_project_asset_properties(properties).expect("normalize asset properties");
+        let updated = update_template_asset_properties(template_xml, "asset-1", &properties)
+            .expect("update asset properties");
+        let updated_again = update_template_asset_properties(&updated, "asset-1", &properties)
+            .expect("update asset properties again");
+
+        assert_eq!(updated.matches("<property>").count(), 2);
+        assert_eq!(updated_again, updated);
+        assert_eq!(updated.matches("<saturation>122.0</saturation>").count(), 2);
+        assert_eq!(updated.matches("<lut_style>lut-009</lut_style>").count(), 2);
+        assert_eq!(updated.matches("<rotation>-450.0</rotation>").count(), 2);
+        assert_eq!(
+            updated
+                .matches("<rotation_direction>counterclockwise</rotation_direction>")
+                .count(),
+            2
+        );
+        assert_eq!(updated.matches("<positionX>480.0</positionX>").count(), 2);
+        assert_eq!(
+            updated
+                .matches("<one_click_beauty>false</one_click_beauty>")
+                .count(),
+            2
+        );
+        assert!(updated.contains(
+            "<source><duration>1000</duration></source>\n                    <property>"
+        ));
+        assert!(updated.contains(
+            "<area id=\"area-3\" asset-id=\"asset-2\"><source><duration>1000</duration></source></area>"
+        ));
+    }
+
+    #[test]
+    fn expands_project_file_area_and_persists_generated_path_in_property() {
+        let project_file_xml = r#"<project><clips><clip>
+            <area id="area-1" asset-id="asset-1" offset="904" />
+        </clip></clips></project>"#;
+        let properties = ProjectAssetProperties {
+            whiteness: 0.2,
+            smoothing: 0.3,
+            saturation: 122.0,
+            skin_tone: -0.4,
+            face_detect: 1,
+            rotation: 15.0,
+            lut_style: "lut-009".to_string(),
+            lut_intensity: 0.8,
             position_x: 480.0,
             position_y: 270.0,
             scale: 0.5,
@@ -4874,18 +5698,26 @@ mod tests {
             canvas_height: 540,
             transform_origin: "center".to_string(),
             rotation_direction: "clockwise".to_string(),
-            ..Default::default()
+            stabilization: false,
+            one_click_beauty: false,
+            generatepath: Some("/project/generated/asset-1.mp4".to_string()),
         };
-        let value = serde_json::to_value(params).expect("serialize beauty transform params");
 
-        assert_eq!(value["positionX"], 480.0);
-        assert_eq!(value["positionY"], 270.0);
-        assert_eq!(value["scale"], 0.5);
-        assert_eq!(value["rotation"], 30.0);
-        assert_eq!(value["canvas_width"], 960);
-        assert_eq!(value["canvas_height"], 540);
-        assert_eq!(value["transform_origin"], "center");
-        assert_eq!(value["rotation_direction"], "clockwise");
+        let updated = update_template_asset_properties(project_file_xml, "asset-1", &properties)
+            .expect("expand projectFile area");
+        assert!(!updated.contains(r#"asset-id="asset-1" offset="904" />"#));
+        assert!(updated.contains(r#"asset-id="asset-1" offset="904">"#));
+        assert!(updated.contains("<generatepath>/project/generated/asset-1.mp4</generatepath>"));
+        assert!(updated.contains("</property>\n            </area>"));
+        assert_eq!(
+            collect_asset_generated_paths(&updated, "asset-1"),
+            HashSet::from(["/project/generated/asset-1.mp4".to_string()])
+        );
+
+        let reset = remove_asset_area_property_element(&updated, "asset-1", "generatepath")
+            .expect("remove generated path property");
+        assert!(!reset.contains("<generatepath>"));
+        assert!(reset.contains("<saturation>122.0</saturation>"));
     }
 
     #[test]
@@ -5087,6 +5919,34 @@ mod tests {
 
         assert!(updated_xml.contains(r#"id="asset-a" filepath="template/assets/1.mp4""#));
         assert!(updated_xml.contains(r#"id="asset-b" filepath="project/assets/demo.mp4""#));
+    }
+
+    #[test]
+    fn adds_updates_and_removes_project_asset_generatepath() {
+        let template_xml = r#"<template><assets>
+            <asset id="asset-a" filepath="/project/assets/a.mp4" />
+            <asset id="asset-b" filepath="/project/assets/b.mp4" generatepath="/old.mp4" />
+        </assets></template>"#;
+
+        let added = update_project_asset_generatepath(
+            template_xml,
+            "asset-a",
+            Some("/project/generated/a.mp4"),
+        )
+        .expect("add generatepath");
+        assert!(added.contains(
+            r#"id="asset-a" filepath="/project/assets/a.mp4" generatepath="/project/generated/a.mp4""#
+        ));
+
+        let updated =
+            update_project_asset_generatepath(&added, "asset-b", Some("/project/generated/b.mp4"))
+                .expect("update generatepath");
+        assert!(updated.contains(r#"generatepath="/project/generated/b.mp4""#));
+
+        let removed = update_project_asset_generatepath(&updated, "asset-b", None)
+            .expect("remove generatepath");
+        assert!(removed.contains(r#"id="asset-b" filepath="/project/assets/b.mp4" />"#));
+        assert!(!removed.contains("/project/generated/b.mp4"));
     }
 
     #[test]

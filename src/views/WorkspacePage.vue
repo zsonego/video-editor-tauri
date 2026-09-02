@@ -106,6 +106,7 @@ const activeDownloadId = ref('');
 const activeTemplateId = ref('');
 const activeTemplateExportCredit = ref(0);
 const activeTemplateLocalInfo = ref(null);
+const originalTemplateXmlContent = ref('');
 const activeTemplateDemoSource = ref('');
 const activeProjectDir = ref('');
 const activeBackendProjectId = ref('');
@@ -419,6 +420,9 @@ let playerResizeObserver = null;
 let offsetPersistTimer = null;
 let projectUpdateTimer = null;
 let pendingProjectUpdate = null;
+let assetPropertyPersistTimer = null;
+let assetPropertyPersistPromise = null;
+const pendingAssetPropertyUpdates = new Map();
 let pendingMainVideoSeekTime = null;
 let beautyPreviewTimer = null;
 let pendingBeautyPreview = null;
@@ -447,7 +451,6 @@ const playerStageRef = ref(null);
 const playerWrapperRef = ref(null);
 const importVideoListScrollRef = ref(null);
 const timelineTrackRef = ref(null);
-const timelineTrackWidth = ref(0);
 const timelineRulerRef = ref(null);
 const editorTimelineRulerRef = ref(null);
 const timelineRulerWidth = ref(600);
@@ -475,6 +478,9 @@ const selectedVideoPath = ref('');
 const beautyFramePreviewLoading = ref(false);
 const beautyVideoPreviewLoading = ref(false);
 const beautyVideoPreviewActive = ref(false);
+const beautyVideoPreviewOutputPath = ref('');
+const generatedVideoApplying = ref(false);
+const materialResetting = ref(false);
 const importedVideoObjectUrls = new Set();
 
 // 时间线选区使用秒作为统一单位。
@@ -681,29 +687,14 @@ const timelineSelectionStyle = computed(() => {
     totalDuration,
     Math.max(0, Number(timeline.selectedDuration) || 0),
   );
-  const maxStart = Math.max(0, totalDuration - selectedDuration);
   const startTime = Math.min(
-    maxStart,
+    Math.max(0, totalDuration - selectedDuration),
     Math.max(0, Number(timeline.startTime) || 0),
   );
-  const trackWidth = Math.max(0, timelineTrackWidth.value);
-  if (!trackWidth) {
-    return {
-      left: '0px',
-      width: `${(selectedDuration / totalDuration) * 100}%`,
-    };
-  }
-
-  const width = Math.min(
-    trackWidth,
-    trackWidth * (selectedDuration / totalDuration),
-  );
-  const maxLeft = Math.max(0, trackWidth - width);
-  const left = maxStart > 0 ? maxLeft * (startTime / maxStart) : 0;
 
   return {
-    left: `${left}px`,
-    width: `${width}px`,
+    left: `${(startTime / totalDuration) * 100}%`,
+    width: `${(selectedDuration / totalDuration) * 100}%`,
     transform: 'translateY(-50%)',
   };
 });
@@ -884,7 +875,21 @@ const audioTimelinePlayheadPercent = computed(
 );
 const selectedClipTitle = computed(() => `${selectedVideoName.value}`);
 const selectedVideoTransform = computed(
-  () => videoTransformStateCache[selectedVideoKey.value] || null,
+  () =>
+    videoTransformStateCache[selectedVideoKey.value] ||
+    parseTemplateAssetProperties(
+      activeTemplateLocalInfo.value?.xmlContent,
+      selectedVideoAssetId.value,
+    ),
+);
+const selectedVideoGeneratePath = computed(() =>
+  parseTemplateAssetGeneratePath(
+    activeTemplateLocalInfo.value?.xmlContent,
+    selectedVideoAssetId.value,
+  ),
+);
+const selectedVideoPropertiesLocked = computed(
+  () => Boolean(selectedVideoGeneratePath.value),
 );
 
 // 页面级导航和主视图切换。
@@ -902,7 +907,9 @@ function statusMeta(status) {
       };
 }
 
-function goHome() {
+async function goHome() {
+  await flushPendingAssetPropertyUpdates();
+  flushPendingProjectTemplateUpdate();
   invalidateBeautyPreview();
   resetDraftBatchDelete();
   activeCategory.value = -1;
@@ -928,6 +935,7 @@ function goHome() {
   activeTemplateId.value = '';
   activeTemplateExportCredit.value = 0;
   activeTemplateLocalInfo.value = null;
+  originalTemplateXmlContent.value = '';
   activeTemplateSegments.value = [];
   activeTemplateDemoSource.value = '';
   activeProjectDir.value = '';
@@ -970,6 +978,7 @@ function openPreview(title, subtitle) {
   activeTemplateId.value = '';
   activeTemplateExportCredit.value = 0;
   activeTemplateLocalInfo.value = null;
+  originalTemplateXmlContent.value = '';
   activeTemplateDemoSource.value = '';
   activeProjectDir.value = '';
   activeBackendProjectId.value = '';
@@ -1008,6 +1017,7 @@ function enterTemplatePreview(topic, templateId, localInfo) {
     ? exportCredit
     : 0;
   activeTemplateLocalInfo.value = localInfo;
+  originalTemplateXmlContent.value = localInfo.xmlContent || '';
   activeTemplateDemoSource.value = resolveTemplateVideoSource(demoPath);
   activeProjectDir.value = '';
   activeBackendProjectId.value = '';
@@ -1488,6 +1498,15 @@ function scheduleProjectTemplateUpdate(projectXml) {
   }, 5000);
 }
 
+function applyActiveProjectTemplateXml(projectXml) {
+  if (!projectXml || !activeTemplateLocalInfo.value) return;
+  activeTemplateLocalInfo.value = {
+    ...activeTemplateLocalInfo.value,
+    xmlContent: projectXml,
+  };
+  scheduleProjectTemplateUpdate(projectXml);
+}
+
 function flushPendingProjectTemplateUpdate() {
   if (projectUpdateTimer) {
     window.clearTimeout(projectUpdateTimer);
@@ -1566,6 +1585,12 @@ async function startEditing() {
         templateId: activeTemplateId.value,
       });
       activeProjectDir.value = workspace.projectDir;
+      activeTemplateLocalInfo.value = {
+        ...activeTemplateLocalInfo.value,
+        templateDir: workspace.projectDir,
+        templateFilePath: workspace.templateFilePath,
+        xmlContent: workspace.projectXml,
+      };
       scheduleProjectTemplateUpdate(workspace.projectXml);
     } catch (error) {
       systemMessage.error(error?.message || '项目目录创建失败');
@@ -1605,7 +1630,8 @@ async function startEditing() {
   return true;
 }
 
-function handleSidebarBack() {
+async function handleSidebarBack() {
+  await flushPendingAssetPropertyUpdates();
   if (currentViewState.value === 'import') {
     flushPendingProjectTemplateUpdate();
     activeProjectDir.value = '';
@@ -1858,6 +1884,105 @@ function getDirectChildElements(parent, tagName) {
   return Array.from(parent.children).filter(
     (child) => child.tagName.toLowerCase() === lowerTagName,
   );
+}
+
+function parseTemplateAssetProperties(xmlContent, assetId) {
+  const normalizedAssetId = String(assetId || '').trim();
+  if (!xmlContent || !normalizedAssetId) return null;
+
+  const xml = new DOMParser().parseFromString(xmlContent, 'text/xml');
+  if (xml.querySelector('parsererror')) return null;
+  const property = Array.from(xml.querySelectorAll('area'))
+    .filter(
+      (candidate) =>
+        candidate.getAttribute('asset-id') === normalizedAssetId,
+    )
+    .map((area) => getDirectChildElements(area, 'property')[0])
+    .find(Boolean);
+  if (!property) return null;
+
+  const readText = (name, fallback = '') =>
+    getDirectChildElements(property, name)[0]?.textContent?.trim() || fallback;
+  const readNumber = (name, fallback) => {
+    const text = readText(name);
+    if (!text) return fallback;
+    const value = Number(text);
+    return Number.isFinite(value) ? value : fallback;
+  };
+  const skinToneValue = Math.min(
+    1,
+    Math.max(-1, readNumber('skin_tone', 0)),
+  );
+  const rotation = readNumber('rotation', 0);
+
+  return {
+    x: readNumber('positionX', 480),
+    y: readNumber('positionY', 270),
+    angle: rotation,
+    scale: readNumber('scale', 1),
+    canvasWidth: Math.max(1, readNumber('canvas_width', 960)),
+    canvasHeight: Math.max(1, readNumber('canvas_height', 540)),
+    transformOrigin: readText('transform_origin', 'center'),
+    rotationDirection: readText(
+      'rotation_direction',
+      rotation < 0 ? 'counterclockwise' : 'clockwise',
+    ),
+    beauty: {
+      lutStyle: readText('lut_style', 'none'),
+      lutIntensity: Math.min(
+        100,
+        Math.max(0, readNumber('lut_intensity', 0) * 100),
+      ),
+      skinTone:
+        skinToneValue < 0
+          ? 'natural'
+          : skinToneValue > 0
+            ? 'warm'
+            : 'off',
+      skinIntensity: Math.abs(skinToneValue) * 100,
+      smoothing: Math.min(
+        100,
+        Math.max(0, readNumber('smoothing', 0) * 100),
+      ),
+      whitening: Math.min(
+        100,
+        Math.max(0, readNumber('whiteness', 0) * 100),
+      ),
+      saturation: Math.min(
+        200,
+        Math.max(0, readNumber('saturation', 100)),
+      ),
+      stabilization: readText('stabilization', 'false') === 'true',
+      oneClickBeauty: readText('one_click_beauty', 'false') === 'true',
+    },
+  };
+}
+
+function parseTemplateAssetGeneratePath(xmlContent, assetId) {
+  const normalizedAssetId = String(assetId || '').trim();
+  if (!xmlContent || !normalizedAssetId) return '';
+
+  const xml = new DOMParser().parseFromString(xmlContent, 'text/xml');
+  if (xml.querySelector('parsererror')) return '';
+  const propertyGeneratePath = Array.from(xml.querySelectorAll('area'))
+    .filter(
+      (candidate) =>
+        candidate.getAttribute('asset-id') === normalizedAssetId,
+    )
+    .map((area) => getDirectChildElements(area, 'property')[0])
+    .filter(Boolean)
+    .map(
+      (property) =>
+        getDirectChildElements(property, 'generatepath')[0]?.textContent?.trim() ||
+        '',
+    )
+    .find(Boolean);
+  if (propertyGeneratePath) return propertyGeneratePath;
+
+  const legacyAsset = Array.from(xml.querySelectorAll('asset')).find(
+    (candidate) => candidate.getAttribute('id') === normalizedAssetId,
+  );
+  return legacyAsset?.getAttribute('generatepath')?.trim() || '';
 }
 
 function normalizeTemplateDurationSeconds(durationValue) {
@@ -2206,7 +2331,7 @@ async function createImportedVideoFromPath(
 
     localPath = savedAsset.copiedPath || filePath;
     projectFilepath = savedAsset.projectFilepath || '';
-    scheduleProjectTemplateUpdate(savedAsset.projectXml);
+    applyActiveProjectTemplateXml(savedAsset.projectXml);
   }
 
   const source = convertFileSrc(localPath);
@@ -2646,19 +2771,43 @@ function updateTransformerVideoControls(state = {}) {
   }
 }
 
-function handleTransformerVideoLoaded() {
+async function handleTransformerVideoLoaded() {
   const targetTime = Math.max(0, Number(timelinePlayheadTime.value) || 0);
   videoTransformerRef.value?.seekTo?.(targetTime);
   pendingMainVideoSeekTime = null;
   timelinePreviewSeeking.value = false;
+
+  const generatePath = selectedVideoGeneratePath.value;
+  if (!generatePath) return;
+  beautyVideoPreviewOutputPath.value = generatePath;
+  try {
+    const displayed = await videoTransformerRef.value?.showBeautyVideoPreview?.(
+      convertFileSrc(generatePath),
+    );
+    beautyVideoPreviewActive.value = displayed === true;
+  } catch (error) {
+    beautyVideoPreviewActive.value = false;
+    systemMessage.error(error?.message || '已应用的视频无法加载');
+  }
 }
 
 function handleTimelineVideoTransformChange(values) {
+  if (selectedVideoPropertiesLocked.value) return;
   const key = selectedVideoKey.value;
   if (!key) return;
   beautyVideoPreviewActive.value = false;
-  videoTransformStateCache[key] = { ...values };
-  scheduleBeautyPreview(values);
+  beautyVideoPreviewOutputPath.value = '';
+  const { changeType = 'transform', ...transformValues } = values || {};
+  videoTransformStateCache[key] = transformValues;
+  scheduleProjectAssetPropertyUpdate(
+    selectedVideoAssetId.value,
+    transformValues,
+  );
+  if (changeType === 'beauty') {
+    scheduleBeautyPreview(transformValues);
+  } else {
+    invalidateBeautyPreview();
+  }
 }
 
 function clampBeautyUnit(value) {
@@ -2669,6 +2818,7 @@ function clampBeautyUnit(value) {
 
 function buildBeautyFrameParams(values = {}) {
   const beauty = values.beauty || {};
+  const rotation = Number(values.angle) || 0;
   const skinIntensity = clampBeautyUnit(beauty.skinIntensity);
   const skinTone =
     beauty.skinTone === 'natural'
@@ -2681,9 +2831,10 @@ function buildBeautyFrameParams(values = {}) {
   return {
     whiteness: clampBeautyUnit(beauty.whitening),
     smoothing: clampBeautyUnit(beauty.smoothing),
+    saturation: Math.min(200, Math.max(0, Number(beauty.saturation) || 0)),
     skin_tone: skinTone,
     face_detect: 1,
-    rotation: Number(values.angle) || 0,
+    rotation,
     lut_file: lutFile || null,
     lut_intensity: lutFile ? clampBeautyUnit(beauty.lutIntensity) : 0,
     positionX: Number(values.x) || 0,
@@ -2692,15 +2843,98 @@ function buildBeautyFrameParams(values = {}) {
     canvas_width: Math.max(1, Math.round(Number(values.canvasWidth) || 960)),
     canvas_height: Math.max(1, Math.round(Number(values.canvasHeight) || 540)),
     transform_origin: values.transformOrigin || 'center',
-    rotation_direction: values.rotationDirection || 'clockwise',
+    rotation_direction: rotation < 0 ? 'counterclockwise' : 'clockwise',
     stabilization: Boolean(beauty.stabilization),
     one_click_beauty: Boolean(beauty.oneClickBeauty),
   };
 }
 
+function buildProjectAssetProperties(values = {}) {
+  const params = buildBeautyFrameParams(values);
+  return {
+    whiteness: params.whiteness,
+    smoothing: params.smoothing,
+    saturation: params.saturation,
+    skin_tone: params.skin_tone,
+    face_detect: params.face_detect,
+    rotation: params.rotation,
+    lut_style: String(values.beauty?.lutStyle || 'none'),
+    lut_intensity: params.lut_intensity,
+    positionX: params.positionX,
+    positionY: params.positionY,
+    scale: params.scale,
+    canvas_width: params.canvas_width,
+    canvas_height: params.canvas_height,
+    transform_origin: params.transform_origin,
+    rotation_direction: params.rotation_direction,
+    stabilization: params.stabilization,
+    one_click_beauty: params.one_click_beauty,
+  };
+}
+
+function scheduleProjectAssetPropertyUpdate(assetId, values) {
+  const normalizedAssetId = String(assetId || '').trim();
+  const projectDir = activeProjectDir.value;
+  if (!normalizedAssetId || !projectDir) return;
+
+  pendingAssetPropertyUpdates.set(normalizedAssetId, {
+    projectDir,
+    assetId: normalizedAssetId,
+    properties: buildProjectAssetProperties(values),
+  });
+  if (assetPropertyPersistTimer) {
+    window.clearTimeout(assetPropertyPersistTimer);
+  }
+  assetPropertyPersistTimer = window.setTimeout(() => {
+    assetPropertyPersistTimer = null;
+    void flushPendingAssetPropertyUpdates();
+  }, 250);
+}
+
+function flushPendingAssetPropertyUpdates() {
+  if (assetPropertyPersistPromise) {
+    return assetPropertyPersistPromise.then(() =>
+      pendingAssetPropertyUpdates.size > 0
+        ? flushPendingAssetPropertyUpdates()
+        : undefined,
+    );
+  }
+  if (assetPropertyPersistTimer) {
+    window.clearTimeout(assetPropertyPersistTimer);
+    assetPropertyPersistTimer = null;
+  }
+
+  const persist = (async () => {
+    while (pendingAssetPropertyUpdates.size > 0) {
+      const [assetId, update] = pendingAssetPropertyUpdates.entries().next().value;
+      pendingAssetPropertyUpdates.delete(assetId);
+      try {
+        const projectXml = await invoke('update_project_asset_properties', {
+          projectDir: update.projectDir,
+          assetId: update.assetId,
+          properties: update.properties,
+        });
+        if (update.projectDir === activeProjectDir.value) {
+          applyActiveProjectTemplateXml(projectXml);
+        }
+      } catch (error) {
+        console.error('[project] asset properties persist failed:', error);
+        systemMessage.error(error?.message || '素材属性保存失败');
+      }
+    }
+  })();
+  assetPropertyPersistPromise = persist;
+  return persist.finally(() => {
+    if (assetPropertyPersistPromise === persist) {
+      assetPropertyPersistPromise = null;
+    }
+  });
+}
+
 function invalidateBeautyPreview() {
   beautyPreviewGeneration += 1;
   beautyVideoPreviewActive.value = false;
+  beautyVideoPreviewOutputPath.value = '';
   pendingBeautyPreview = null;
   if (pendingBeautyVideoPreview && !beautyVideoPreviewRunning) {
     pendingBeautyVideoPreview = null;
@@ -2809,6 +3043,8 @@ async function processBeautyVideoPreview(request) {
       convertFileSrc(result.outputVideoPath),
     );
     beautyVideoPreviewActive.value = displayed === true;
+    beautyVideoPreviewOutputPath.value =
+      displayed === true ? result.outputVideoPath : '';
   } catch (error) {
     if (request.generation === beautyPreviewGeneration) {
       systemMessage.error(
@@ -2821,6 +3057,107 @@ async function processBeautyVideoPreview(request) {
     if (pendingBeautyPreview && !beautyPreviewTimer) {
       void processPendingBeautyPreview();
     }
+  }
+}
+
+async function handleRestoreAssetProperties() {
+  if (selectedVideoPropertiesLocked.value) return;
+  if (!selectedVideoAssetId.value || !activeTemplateId.value) {
+    systemMessage.error('当前素材缺少模板关联信息');
+    return;
+  }
+
+  try {
+    if (!originalTemplateXmlContent.value) {
+      originalTemplateXmlContent.value = await invoke(
+        'read_original_template_xml',
+        { templateId: activeTemplateId.value },
+      );
+    }
+    const originalProperties = parseTemplateAssetProperties(
+      originalTemplateXmlContent.value,
+      selectedVideoAssetId.value,
+    );
+    const restored = videoTransformerRef.value?.restoreProperties?.(
+      originalProperties,
+    );
+    if (restored !== true) {
+      throw new Error('当前视频尚未准备好');
+    }
+    systemMessage.success(
+      originalProperties ? '已还原为模板属性' : '已还原为默认属性',
+    );
+  } catch (error) {
+    systemMessage.error(error?.message || '属性还原失败');
+  }
+}
+
+async function handleApplyGeneratedVideo(values) {
+  if (generatedVideoApplying.value || selectedVideoPropertiesLocked.value) {
+    return;
+  }
+  const projectDir = activeProjectDir.value;
+  const assetId = selectedVideoAssetId.value;
+  const previewVideoPath = beautyVideoPreviewOutputPath.value;
+  if (!projectDir || !assetId || !previewVideoPath) {
+    systemMessage.error('请先生成当前素材的视频预览');
+    return;
+  }
+
+  generatedVideoApplying.value = true;
+  try {
+    await flushPendingAssetPropertyUpdates();
+    const result = await invoke('apply_project_asset_generated_video', {
+      projectDir,
+      assetId,
+      previewVideoPath,
+      properties: buildProjectAssetProperties(
+        values || videoTransformerRef.value?.getTransform?.() || {},
+      ),
+    });
+    if (projectDir === activeProjectDir.value) {
+      applyActiveProjectTemplateXml(result.projectXml);
+      if (assetId === selectedVideoAssetId.value) {
+        beautyVideoPreviewOutputPath.value = result.generatePath;
+        beautyVideoPreviewActive.value = true;
+      }
+    }
+    systemMessage.success('生成视频已应用');
+  } catch (error) {
+    systemMessage.error(error?.message || '生成视频应用失败');
+  } finally {
+    generatedVideoApplying.value = false;
+  }
+}
+
+async function handleMaterialResetRequest() {
+  if (materialResetting.value) return;
+  const projectDir = activeProjectDir.value;
+  const assetId = selectedVideoAssetId.value;
+  if (!projectDir || !assetId) {
+    systemMessage.error('当前素材缺少工程关联信息');
+    return;
+  }
+
+  materialResetting.value = true;
+  try {
+    await flushPendingAssetPropertyUpdates();
+    const projectXml = await invoke('reset_project_asset_generated_video', {
+      projectDir,
+      assetId,
+    });
+    if (projectDir === activeProjectDir.value) {
+      applyActiveProjectTemplateXml(projectXml);
+      if (assetId === selectedVideoAssetId.value) {
+        invalidateBeautyPreview();
+        videoTransformerRef.value?.clearBeautyPreview?.();
+      }
+    }
+    systemMessage.success('素材已重置');
+  } catch (error) {
+    systemMessage.error(error?.message || '素材重置失败');
+  } finally {
+    materialResetting.value = false;
   }
 }
 
@@ -3254,7 +3591,7 @@ async function applySubtitleChange() {
       projectDir: activeProjectDir.value,
       text,
     });
-    scheduleProjectTemplateUpdate(projectXml);
+    applyActiveProjectTemplateXml(projectXml);
     subtitleText.value = text;
     systemMessage.success('标题已更新');
   } catch (error) {
@@ -3531,6 +3868,7 @@ async function openDraftProject(projectId) {
       String(detail.statusName || '').trim() === '已导出';
     editingFromDraftLibrary.value = true;
     activeTemplateId.value = String(templateId);
+    originalTemplateXmlContent.value = '';
     activeTemplateExportCredit.value = Number(detail.exportCredit) || 0;
     activeTemplateName.value = detail.projectName || '未命名工程';
     previewTitle.value = activeTemplateName.value;
@@ -4130,6 +4468,7 @@ async function startExportProgress() {
 
     console.log('[export] flushing timeline offset before compose');
     await flushSelectedVideoOffsetPersist();
+    await flushPendingAssetPropertyUpdates();
 
     console.log('[export] listening composer progress:', exportId);
     unlistenProgress = await listen('composer-export-progress', (event) => {
@@ -4462,11 +4801,6 @@ function updateTimelineRulerWidth() {
     editorTimelineRulerRef.value?.getBoundingClientRect().width;
   if (Number.isFinite(audioRulerWidth) && audioRulerWidth > 0) {
     audioTimelineRulerWidth.value = audioRulerWidth;
-  }
-
-  const trackWidth = timelineTrackRef.value?.clientWidth;
-  if (Number.isFinite(trackWidth) && trackWidth > 0) {
-    timelineTrackWidth.value = trackWidth;
   }
 }
 
@@ -5420,6 +5754,7 @@ onMounted(() => {
 
 // 离开页面时释放全局监听、定时器和本地视频 URL。
 onBeforeUnmount(() => {
+  void flushPendingAssetPropertyUpdates();
   invalidateBeautyPreview();
   cacheCurrentVideoTimelineState();
   document.documentElement.classList.remove('dark');
@@ -5657,6 +5992,26 @@ onBeforeUnmount(() => {
 
     <main class="h-[calc(100vh-120px)] flex flex-col mt-[120px]">
       <div class="flex-1 flex overflow-hidden relative">
+        <button
+          v-if="sidebarToggleVisible"
+          class="absolute top-1/2 -translate-y-1/2 z-[160] bg-surface-container-high border border-outline-variant text-white w-6 h-12 flex items-center justify-center shadow-lg hover:bg-surface-container-highest transition-all duration-300 group"
+          :class="
+            sidebarHidden
+              ? 'left-0 translate-x-0 rounded-r-full'
+              : 'left-72 -translate-x-full rounded-l-full'
+          "
+          type="button"
+          :aria-label="sidebarHidden ? '展开视频列表' : '收起视频列表'"
+          :title="sidebarHidden ? '展开视频列表' : '收起视频列表'"
+          @click="toggleSidebar()"
+        >
+          <AppIcon
+            :name="sidebarHidden ? 'chevron_right' : 'chevron_left'"
+            :size="18"
+            class="group-hover:scale-110"
+          />
+        </button>
+
         <aside
           class="w-72 flex flex-col z-[150] h-full shrink-0 relative shadow-2xl"
           :class="{ 'hidden-sidebar': sidebarHidden }"
@@ -5701,6 +6056,31 @@ onBeforeUnmount(() => {
                 <AppIcon name="arrow_forward" :size="18" />
               </button>
             </h2>
+          </div>
+          <div
+            v-if="currentViewState === 'import'"
+            class="timeline-title-editor flex items-center gap-1.5 px-3 py-2 border-b border-white/5 bg-surface-container-low"
+          >
+            <label
+              class="text-[10px] font-bold text-on-surface-variant shrink-0 whitespace-nowrap"
+              for="subtitle-edit-input"
+              >标题编辑</label
+            >
+            <input
+              id="subtitle-edit-input"
+              v-model="subtitleText"
+              class="flex-1 min-w-0 h-7 bg-surface-container-lowest/50 border border-outline-variant/30 rounded px-2 text-[10px] text-on-surface placeholder:text-on-surface-variant/50 focus:border-electric-blue outline-none transition-colors"
+              placeholder="输入标题内容"
+              type="text"
+            />
+            <button
+              class="h-6 px-1.5 bg-electric-blue text-white rounded text-[9px] font-bold shadow shadow-electric-blue/20 hover:brightness-110 active:scale-95 transition-all shrink-0 whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
+              type="button"
+              :disabled="subtitleApplying"
+              @click="applySubtitleChange"
+            >
+              {{ subtitleApplying ? '应用中...' : '应用更改' }}
+            </button>
           </div>
           <div class="flex-1 overflow-y-auto custom-scrollbar flex flex-col">
             <div v-if="currentViewState === 'subtopics'" class="p-4 space-y-4">
@@ -6049,17 +6429,6 @@ onBeforeUnmount(() => {
         <section
           class="flex-1 bg-surface-dim flex flex-col h-full overflow-hidden relative"
         >
-          <button
-            v-if="sidebarToggleVisible"
-            class="absolute top-1/2 left-0 -translate-y-1/2 z-[80] bg-surface-container-high border border-outline-variant text-white w-6 h-12 rounded-r-full flex items-center justify-center shadow-lg hover:bg-surface-container-highest transition-all duration-300 group"
-            @click="toggleSidebar()"
-          >
-            <AppIcon
-              :name="sidebarHidden ? 'chevron_right' : 'chevron_left'"
-              :size="18"
-              class="group-hover:scale-110"
-            />
-          </button>
           <div
             class="absolute inset-0 z-[190] bg-black/60 backdrop-blur-[2px] modal-fade-in"
             :class="{ hidden: !previewModalVisible }"
@@ -6162,7 +6531,7 @@ onBeforeUnmount(() => {
           >
             <div
               ref="playerStageRef"
-              class="flex-1 bg-black/90 flex flex-col items-center justify-center relative overflow-hidden p-8"
+              class="flex-1 bg-black/90 flex flex-col items-center justify-center relative overflow-hidden p-2"
             >
               <VideoTransformer
                 v-if="currentViewState === 'import'"
@@ -6176,11 +6545,18 @@ onBeforeUnmount(() => {
                   beautyFramePreviewLoading || beautyVideoPreviewLoading
                 "
                 :video-preview-loading="beautyVideoPreviewLoading"
+                :apply-loading="generatedVideoApplying"
+                :properties-locked="selectedVideoPropertiesLocked"
+                :material-reset-loading="materialResetting"
                 @change="handleTimelineVideoTransformChange"
                 @video-loaded="handleTransformerVideoLoaded"
                 @playback-change="updateTransformerVideoControls"
                 @timeupdate="updateTransformerVideoControls"
                 @preview-request="handleBeautyPreviewRequest"
+                @restore-request="handleRestoreAssetProperties"
+                @apply-request="handleApplyGeneratedVideo"
+                @material-reset-request="handleMaterialResetRequest"
+                @layout-change="schedulePlayerResize"
                 @error="systemMessage.error($event)"
               >
                 <template #timeline>
@@ -6237,10 +6613,10 @@ onBeforeUnmount(() => {
                         <span class="timeline-playhead-handle"></span>
                         <span class="timeline-playhead-line"></span>
                       </button>
-                      <div class="clips-row relative h-16">
+                      <div class="clips-row relative h-11">
                         <div ref="timelineTrackRef" class="duration-track">
                           <div
-                            class="duration-selection bg-electric-blue/20 border-2 border-electric-blue rounded-md flex items-center px-3 shadow-[0_0_15px_rgba(74,142,255,0.25)]"
+                            class="duration-selection bg-electric-blue/20 border-2 border-electric-blue rounded-md flex items-center px-2 shadow-[0_0_15px_rgba(74,142,255,0.25)]"
                             :class="{ 'is-dragging': timelineDragging }"
                             :style="{
                               ...timelineSelectionStyle,
@@ -6252,23 +6628,23 @@ onBeforeUnmount(() => {
                             @pointerdown="startTimelineDrag"
                           >
                             <div
-                              class="flex h-full w-full min-w-0 flex-col justify-between px-2 py-1"
+                              class="flex h-full w-full min-w-0 flex-col justify-between px-1.5 py-0.5"
                             >
                               <div class="flex min-w-0 items-center gap-1.5">
                                 <span
-                                  class="truncate text-[12px] font-bold tracking-wide text-white"
+                                  class="truncate text-[10px] font-bold tracking-wide text-white"
                                   >{{ selectedClipTitle }}</span
                                 >
                               </div>
                               <div class="duration-meta-row">
                                 <span
-                                  class="duration-meta-duration text-[10px] font-bold text-primary"
+                                  class="duration-meta-duration text-[8px] font-bold text-primary"
                                   >时长：{{
                                     timelineSelectedDurationLabel
                                   }}</span
                                 >
                                 <span
-                                  class="duration-meta-range text-[10px] font-medium text-white/90 font-code-data tracking-tighter"
+                                  class="duration-meta-range text-[8px] font-medium text-white/90 font-code-data tracking-tighter"
                                   >{{ timelineRangeLabel }}</span
                                 >
                               </div>
@@ -6741,29 +7117,6 @@ onBeforeUnmount(() => {
                     </Teleport>
                   </div>
 
-                  <div
-                    class="timeline-title-editor w-full flex items-center gap-3 px-4 py-3 bg-surface-container-low border border-outline-variant rounded"
-                  >
-                    <label
-                      class="text-[12px] font-bold text-on-surface-variant shrink-0 whitespace-nowrap"
-                      for="subtitle-edit-input"
-                      >标题编辑</label
-                    >
-                    <input
-                      id="subtitle-edit-input"
-                      v-model="subtitleText"
-                      class="w-[360px] max-w-[42vw] h-9 bg-surface-container-lowest/50 border border-outline-variant/30 rounded px-3 text-[12px] text-on-surface placeholder:text-on-surface-variant/50 focus:border-electric-blue outline-none transition-colors"
-                      placeholder="输入标题内容"
-                      type="text"
-                    />
-                    <button
-                      class="h-9 px-4 bg-electric-blue text-white rounded text-[12px] font-bold shadow-lg shadow-electric-blue/20 hover:brightness-110 active:scale-95 transition-all shrink-0"
-                      :disabled="subtitleApplying"
-                      @click="applySubtitleChange"
-                    >
-                      {{ subtitleApplying ? '应用中...' : '应用更改' }}
-                    </button>
-                  </div>
                 </div>
               </div>
             </div>
@@ -8489,7 +8842,7 @@ onBeforeUnmount(() => {
 }
 
 .timeline-title-editor {
-  min-width: 620px;
+  min-width: 0;
 }
 
 .track {
@@ -8751,11 +9104,11 @@ onBeforeUnmount(() => {
 
 .timeline-settings-track {
   flex: 0 0 auto;
-  margin-bottom: 8px;
-  padding: 6px 0;
+  margin-bottom: 4px;
+  padding: 3px 0;
   overflow: hidden;
   border: 1px solid rgba(74, 142, 255, 0.18);
-  border-radius: 9px;
+  border-radius: 7px;
   background: #07122a;
 }
 
@@ -8767,10 +9120,65 @@ onBeforeUnmount(() => {
 }
 
 .timeline-settings-track .track-title {
+  padding: 2px 8px;
   border-bottom: 1px solid rgba(74, 142, 255, 0.15);
   background: rgba(16, 27, 51, 0.8);
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 700;
+  line-height: 12px;
+}
+
+.timeline-settings-track .timeline-overview {
+  margin: 0 8px;
+}
+
+.timeline-settings-track .timeline-ruler {
+  height: 22px;
+}
+
+.timeline-settings-track .timeline-ruler-tick.is-minor {
+  height: 5px;
+}
+
+.timeline-settings-track .timeline-ruler-tick.is-major {
+  height: 10px;
+}
+
+.timeline-settings-track .timeline-ruler-label {
+  top: 10px;
+  font-size: 8px;
+  line-height: 10px;
+}
+
+.timeline-settings-track .clips-row {
+  padding: 4px 0;
+}
+
+.timeline-settings-track .duration-track {
+  height: 34px;
+  border-radius: 6px;
+}
+
+.timeline-settings-track .duration-selection {
+  height: 28px;
+}
+
+.timeline-settings-track .duration-meta-row {
+  gap: 4px;
+}
+
+.timeline-settings-track .timeline-playhead {
+  width: 14px;
+  min-width: 14px;
+}
+
+.timeline-settings-track .timeline-playhead-line {
+  top: 6px;
+}
+
+.timeline-settings-track .timeline-playhead-handle {
+  width: 10px;
+  height: 10px;
 }
 
 .timeline-dock {

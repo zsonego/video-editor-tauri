@@ -16,6 +16,9 @@ const props = defineProps({
   initialTransform: { type: Object, default: null },
   previewLoading: { type: Boolean, default: false },
   videoPreviewLoading: { type: Boolean, default: false },
+  applyLoading: { type: Boolean, default: false },
+  propertiesLocked: { type: Boolean, default: false },
+  materialResetLoading: { type: Boolean, default: false },
 });
 
 const emit = defineEmits([
@@ -25,6 +28,10 @@ const emit = defineEmits([
   'timeupdate',
   'error',
   'preview-request',
+  'restore-request',
+  'apply-request',
+  'material-reset-request',
+  'layout-change',
 ]);
 
 const CANVAS_WIDTH = 960;
@@ -39,6 +46,7 @@ const canvasElement = ref(null);
 const errorMessage = ref('');
 const isReady = ref(false);
 const isPlaying = ref(false);
+const propertiesPanelOpen = ref(false);
 const isTransformExpanded = ref(true);
 const isBeautyExpanded = ref(true);
 const materialResetConfirmVisible = ref(false);
@@ -50,6 +58,7 @@ const DEFAULT_BEAUTY_SETTINGS = Object.freeze({
   skinIntensity: 60,
   smoothing: 0,
   whitening: 0,
+  saturation: 100,
   stabilization: false,
   oneClickBeauty: false,
 });
@@ -70,6 +79,7 @@ let videoElement = null;
 let animationFrameId = 0;
 let sourceRevision = 0;
 let beautyPreviewRevision = 0;
+let rotationLastVisualAngle = null;
 const beautyPreviewSource = ref('');
 const beautyPreviewVideoSource = ref('');
 const beautyPreviewVideoElement = ref(null);
@@ -77,6 +87,23 @@ const beautyPreviewVideoElement = ref(null);
 function round(value, precision = 1) {
   const multiplier = 10 ** precision;
   return Math.round((Number(value) || 0) * multiplier) / multiplier;
+}
+
+function normalizeVisualAngle(value) {
+  const angle = Number(value);
+  if (!Number.isFinite(angle)) return 0;
+  return ((angle % 360) + 360) % 360;
+}
+
+function getShortestAngleDelta(current, previous) {
+  let delta = normalizeVisualAngle(current) - normalizeVisualAngle(previous);
+  if (delta > 180) delta -= 360;
+  if (delta < -180) delta += 360;
+  return delta;
+}
+
+function getRotationDirection(angle = transform.angle) {
+  return Number(angle) < 0 ? 'counterclockwise' : 'clockwise';
 }
 
 function getCoverScale(video) {
@@ -154,9 +181,10 @@ function getBeautySettings() {
   };
 }
 
-function emitTransform() {
+function emitTransform(changeType = 'transform') {
   clearBeautyPreview();
   emit('change', {
+    changeType,
     x: transform.x,
     y: transform.y,
     angle: transform.angle,
@@ -165,7 +193,7 @@ function emitTransform() {
     canvasWidth: CANVAS_WIDTH,
     canvasHeight: CANVAS_HEIGHT,
     transformOrigin: 'center',
-    rotationDirection: 'clockwise',
+    rotationDirection: getRotationDirection(),
     beauty: getBeautySettings(),
   });
 }
@@ -185,9 +213,11 @@ function syncBeautySettings(values) {
     'skinIntensity',
     'smoothing',
     'whitening',
+    'saturation',
   ]) {
     const value = Number(values[key]);
-    if (Number.isFinite(value)) beauty[key] = Math.min(100, Math.max(0, value));
+    const max = key === 'saturation' ? 200 : 100;
+    if (Number.isFinite(value)) beauty[key] = Math.min(max, Math.max(0, value));
   }
   if (typeof values.stabilization === 'boolean') {
     beauty.stabilization = values.stabilization;
@@ -200,34 +230,70 @@ function syncBeautySettings(values) {
 function setBeautyPercent(key, event) {
   const value = Number(event.target.value);
   if (!Number.isFinite(value)) return;
-  beauty[key] = Math.min(100, Math.max(0, value));
-  emitTransform();
+  const max = key === 'saturation' ? 200 : 100;
+  beauty[key] = Math.min(max, Math.max(0, value));
+  emitTransform('beauty');
 }
 
 function setSkinTone(value) {
   beauty.skinTone = value;
-  emitTransform();
+  emitTransform('beauty');
 }
 
 function resetBeauty() {
+  if (props.propertiesLocked) return;
   Object.assign(beauty, DEFAULT_BEAUTY_SETTINGS);
-  emitTransform();
+  emitTransform('beauty');
 }
 
-function syncTransformFromObject() {
+function restoreProperties(values = null) {
+  if (!videoElement || !videoObject || props.propertiesLocked) return false;
+  clearBeautyPreview();
+  Object.assign(beauty, DEFAULT_BEAUTY_SETTINGS);
+  if (values?.beauty) syncBeautySettings(values.beauty);
+  applyTransform(
+    values || {
+      x: CANVAS_WIDTH / 2,
+      y: CANVAS_HEIGHT / 2,
+      angle: 0,
+      scale: getCoverScale(videoElement),
+    },
+    false,
+  );
+  emitTransform('beauty');
+  return true;
+}
+
+function syncTransformFromObject(syncAngle = false) {
   if (!videoObject) return;
   transform.x = round(videoObject.left);
   transform.y = round(videoObject.top);
-  transform.angle = round(videoObject.angle);
+  if (syncAngle) transform.angle = round(videoObject.angle, 2);
   transform.scale = round(videoObject.scaleX, 3);
   emitTransform();
+}
+
+function syncContinuousRotation(target) {
+  if (target !== videoObject) return;
+  const visualAngle = normalizeVisualAngle(target.angle);
+  const previousVisualAngle =
+    rotationLastVisualAngle ?? normalizeVisualAngle(transform.angle);
+  transform.angle = round(
+    transform.angle + getShortestAngleDelta(visualAngle, previousVisualAngle),
+    2,
+  );
+  rotationLastVisualAngle = visualAngle;
+  syncTransformFromObject();
 }
 
 function applyTransform(values = {}, shouldEmit = true) {
   if (!videoObject) return;
   if (Number.isFinite(values.x)) videoObject.set('left', values.x);
   if (Number.isFinite(values.y)) videoObject.set('top', values.y);
-  if (Number.isFinite(values.angle)) videoObject.set('angle', values.angle);
+  if (Number.isFinite(values.angle)) {
+    transform.angle = round(values.angle, 2);
+    videoObject.set('angle', normalizeVisualAngle(values.angle));
+  }
   if (Number.isFinite(values.scale)) {
     const scale = Math.min(10, Math.max(0.01, values.scale));
     videoObject.set({ scaleX: scale, scaleY: scale });
@@ -238,9 +304,23 @@ function applyTransform(values = {}, shouldEmit = true) {
   else {
     transform.x = round(videoObject.left);
     transform.y = round(videoObject.top);
-    transform.angle = round(videoObject.angle);
     transform.scale = round(videoObject.scaleX, 3);
   }
+  fabricCanvas?.requestRenderAll();
+}
+
+function syncVideoInteractivity() {
+  if (!videoObject) return;
+  const editable = !props.propertiesLocked;
+  videoObject.set({
+    selectable: editable,
+    evented: editable,
+    hasControls: editable,
+    hasBorders: editable,
+  });
+  if (editable) fabricCanvas?.setActiveObject(videoObject);
+  else fabricCanvas?.discardActiveObject();
+  videoObject.setCoords();
   fabricCanvas?.requestRenderAll();
 }
 
@@ -279,14 +359,14 @@ function addVideoToCanvas(video, revision) {
     mtr: false,
   });
   fabricCanvas.add(videoObject);
-  fabricCanvas.setActiveObject(videoObject);
+  syncVideoInteractivity();
   videoObject.setCoords();
   isReady.value = true;
 
   if (props.initialTransform) {
     syncBeautySettings(props.initialTransform.beauty);
     applyTransform(props.initialTransform, false);
-  } else syncTransformFromObject();
+  } else syncTransformFromObject(true);
 
   fabricCanvas.requestRenderAll();
   emit('video-loaded', {
@@ -325,6 +405,7 @@ function onVideoPause() {
 
 function disposeVideo() {
   sourceRevision += 1;
+  rotationLastVisualAngle = null;
   clearBeautyPreview();
   cancelAnimationFrame(animationFrameId);
   animationFrameId = 0;
@@ -372,31 +453,51 @@ function loadSource(source) {
 }
 
 function setNumericTransform(key, event) {
-  if (!videoObject) return;
-  const value = Number(event.target.value);
+  if (!videoObject || props.propertiesLocked) return;
+  const rawValue = String(event.target.value || '').trim();
+  if (!rawValue) return;
+  const value = Number(rawValue);
   if (!Number.isFinite(value)) return;
   applyTransform({ [key]: value });
 }
 
 function setScalePercent(event) {
+  if (props.propertiesLocked) return;
   const percent = Number(event.target.value);
   if (!Number.isFinite(percent)) return;
   applyTransform({ scale: percent / 100 });
 }
 
 function resetRotation() {
-  if (!videoObject) return;
+  if (!videoObject || props.propertiesLocked) return;
   applyTransform({ angle: 0 });
 }
 
 function resetTransform() {
-  if (!videoElement || !videoObject) return;
+  if (!videoElement || !videoObject || props.propertiesLocked) return;
   applyTransform({
     x: CANVAS_WIDTH / 2,
     y: CANVAS_HEIGHT / 2,
     angle: 0,
     scale: getCoverScale(videoElement),
   });
+}
+
+function togglePropertiesPanel() {
+  propertiesPanelOpen.value = !propertiesPanelOpen.value;
+  nextTick(() => {
+    fabricCanvas?.requestRenderAll();
+    emit('layout-change');
+  });
+}
+
+function handleWorkspaceTransitionEnd(event) {
+  if (
+    event.target === event.currentTarget &&
+    event.propertyName === 'padding-right'
+  ) {
+    emit('layout-change');
+  }
 }
 
 async function togglePlayback() {
@@ -449,7 +550,11 @@ function getCurrentTime() {
 }
 
 function getTransform() {
-  return { ...transform, beauty: getBeautySettings() };
+  return {
+    ...transform,
+    rotationDirection: getRotationDirection(),
+    beauty: getBeautySettings(),
+  };
 }
 
 function clearBeautyPreview() {
@@ -515,9 +620,22 @@ async function showBeautyVideoPreview(source) {
 }
 
 function requestBeautyPreview() {
-  if (!isReady.value || props.previewLoading) return;
+  if (!isReady.value || props.previewLoading || props.propertiesLocked) return;
   videoElement?.pause();
   emit('preview-request', getTransform());
+}
+
+function requestFooterPrimaryAction() {
+  if (beautyPreviewVideoSource.value) {
+    emit('apply-request', getTransform());
+    return;
+  }
+  requestBeautyPreview();
+}
+
+function confirmMaterialReset() {
+  materialResetConfirmVisible.value = false;
+  emit('material-reset-request');
 }
 
 onMounted(async () => {
@@ -538,10 +656,14 @@ onMounted(async () => {
   };
   fabricCanvas.on('object:moving', handleObjectTransform);
   fabricCanvas.on('object:scaling', handleObjectTransform);
-  fabricCanvas.on('object:rotating', handleObjectTransform);
-  fabricCanvas.on('object:modified', handleObjectTransform);
+  fabricCanvas.on('object:rotating', ({ target }) => {
+    syncContinuousRotation(target);
+  });
+  fabricCanvas.on('object:modified', () => {
+    rotationLastVisualAngle = null;
+  });
   fabricCanvas.on('mouse:wheel', ({ e }) => {
-    if (!videoObject) return;
+    if (!videoObject || props.propertiesLocked) return;
     e.preventDefault();
     e.stopPropagation();
     const nextScale = Math.min(
@@ -558,6 +680,11 @@ watch(
   (source) => {
     if (fabricCanvas) loadSource(source);
   },
+);
+
+watch(
+  () => props.propertiesLocked,
+  () => syncVideoInteractivity(),
 );
 
 watch(
@@ -582,6 +709,7 @@ defineExpose({
   getTransform,
   pause,
   resetBeauty,
+  restoreProperties,
   resetRotation,
   resetTransform,
   seekTo,
@@ -597,7 +725,11 @@ defineExpose({
     <p v-if="errorMessage" class="transform-error" role="alert">
       {{ errorMessage }}
     </p>
-    <div class="transform-workspace">
+    <div
+      class="transform-workspace"
+      :class="{ 'properties-open': propertiesPanelOpen }"
+      @transitionend="handleWorkspaceTransitionEnd"
+    >
       <div class="canvas-column">
         <div class="canvas-shell" :class="{ empty: !isReady }">
           <canvas ref="canvasElement" />
@@ -656,6 +788,20 @@ defineExpose({
             </button>
           </div>
         </div>
+        <button
+          class="properties-panel-toggle"
+          type="button"
+          :aria-expanded="propertiesPanelOpen"
+          :aria-label="propertiesPanelOpen ? '收起属性面板' : '展开属性面板'"
+          :title="propertiesPanelOpen ? '收起属性面板' : '展开属性面板'"
+          @click="togglePropertiesPanel"
+        >
+          <svg aria-hidden="true" viewBox="0 0 20 20">
+            <path
+              :d="propertiesPanelOpen ? 'm7 4 6 6-6 6' : 'm13 4-6 6 6 6'"
+            />
+          </svg>
+        </button>
       </div>
 
       <div v-if="$slots.timeline" class="transform-timeline-slot">
@@ -668,12 +814,18 @@ defineExpose({
           <button
             class="material-reset-button"
             type="button"
+            :disabled="materialResetLoading"
             @click="materialResetConfirmVisible = true"
           >
-            素材重置
+            {{ materialResetLoading ? '重置中…' : '素材重置' }}
           </button>
         </div>
-        <div class="properties-content">
+        <div
+          class="properties-content"
+          :class="{ 'is-locked': propertiesLocked }"
+          :inert="propertiesLocked || undefined"
+          :aria-disabled="propertiesLocked"
+        >
           <section class="property-section">
             <div class="section-heading">
               <button
@@ -761,8 +913,8 @@ defineExpose({
                   <label class="value-field">
                     <input
                       type="number"
-                      step="0.1"
-                      :value="transform.angle"
+                      step="0.01"
+                      :value="transform.angle.toFixed(2)"
                       :disabled="!isReady"
                       @input="setNumericTransform('angle', $event)"
                     />
@@ -829,7 +981,7 @@ defineExpose({
                 <select
                   v-model="beauty.lutStyle"
                   class="property-select"
-                  @change="emitTransform"
+                  @change="emitTransform('beauty')"
                 >
                   <option value="none">无</option>
                   <option
@@ -974,13 +1126,39 @@ defineExpose({
                 </div>
               </div>
 
+              <div class="property-row">
+                <span class="property-label">饱和度</span>
+                <div class="range-control">
+                  <input
+                    class="effect-slider"
+                    type="range"
+                    min="0"
+                    max="200"
+                    step="1"
+                    :value="beauty.saturation"
+                    @input="setBeautyPercent('saturation', $event)"
+                  />
+                  <label class="value-field compact-value">
+                    <input
+                      type="number"
+                      min="0"
+                      max="200"
+                      step="1"
+                      :value="beauty.saturation"
+                      @input="setBeautyPercent('saturation', $event)"
+                    />
+                    <em>%</em>
+                  </label>
+                </div>
+              </div>
+
               <label class="property-row stabilization-row">
                 <span class="property-label">视频去抖动</span>
                 <span class="checkbox-control">
                   <input
                     v-model="beauty.stabilization"
                     type="checkbox"
-                    @change="emitTransform"
+                    @change="emitTransform('beauty')"
                   />
                   <span aria-hidden="true"></span>
                 </span>
@@ -992,7 +1170,7 @@ defineExpose({
                   <input
                     v-model="beauty.oneClickBeauty"
                     type="checkbox"
-                    @change="emitTransform"
+                    @change="emitTransform('beauty')"
                   />
                   <span aria-hidden="true"></span>
                 </span>
@@ -1000,15 +1178,22 @@ defineExpose({
             </div>
           </section>
         </div>
-        <div class="properties-footer">
-          <button class="property-footer-button" type="button">一键还原</button>
+        <div v-if="!propertiesLocked" class="properties-footer">
+          <button
+            class="property-footer-button"
+            type="button"
+            :disabled="!isReady || previewLoading || applyLoading"
+            @click="emit('restore-request')"
+          >
+            一键还原
+          </button>
           <button
             class="property-footer-button property-footer-button-primary"
             type="button"
-            :disabled="!isReady || previewLoading"
-            @click="requestBeautyPreview"
+            :disabled="!isReady || previewLoading || applyLoading"
+            @click="requestFooterPrimaryAction"
           >
-            预览
+            {{ applyLoading ? '应用中…' : beautyPreviewVideoSource ? '应用' : '预览' }}
           </button>
         </div>
       </aside>
@@ -1041,7 +1226,7 @@ defineExpose({
             <button
               class="material-reset-dialog-button is-confirm"
               type="button"
-              @click="materialResetConfirmVisible = false"
+              @click="confirmMaterialReset"
             >
               是
             </button>
@@ -1075,11 +1260,17 @@ defineExpose({
   display: flex;
   height: 100%;
   min-height: 0;
-  padding-right: 232px;
+  padding-right: 0;
   flex-direction: column;
+  transition: padding-right 0.25s ease;
+}
+
+.transform-workspace.properties-open {
+  padding-right: 232px;
 }
 
 .canvas-column {
+  position: relative;
   display: flex;
   min-width: 0;
   min-height: 0;
@@ -1088,12 +1279,52 @@ defineExpose({
   justify-content: center;
   padding: 12px;
   background: #030d25;
+  container-type: size;
+}
+
+.properties-panel-toggle {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  z-index: 40;
+  display: flex;
+  width: 22px;
+  height: 48px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  transform: translateY(-50%);
+  border: 1px solid #454545;
+  border-right: 0;
+  border-radius: 10px 0 0 10px;
+  color: #d7d7d7;
+  background: rgba(31, 31, 31, 0.94);
+  box-shadow: -4px 0 12px rgba(0, 0, 0, 0.28);
+  cursor: pointer;
+  transition:
+    color 0.2s ease,
+    background 0.2s ease;
+}
+
+.properties-panel-toggle:hover {
+  color: #ffffff;
+  background: #303030;
+}
+
+.properties-panel-toggle svg {
+  width: 11px;
+  height: 11px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
 }
 
 .transform-timeline-slot {
   min-width: 0;
   flex: 0 0 auto;
-  padding: 0 12px 12px;
+  padding: 0 8px 6px;
   background: #030d25;
 }
 
@@ -1107,10 +1338,11 @@ defineExpose({
 
 .canvas-shell {
   position: relative;
-  width: auto;
-  height: 100%;
+  width: min(100%, calc(100cqh * 16 / 9));
+  height: auto;
   max-width: 100%;
   max-height: 100%;
+  flex: 0 0 auto;
   aspect-ratio: 16 / 9;
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.1);
@@ -1270,6 +1502,18 @@ defineExpose({
   border-left: 1px solid #353535;
   color: #d7d7d7;
   background: #1f1f1f;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(100%);
+  transition:
+    transform 0.25s ease,
+    opacity 0.2s ease;
+}
+
+.transform-workspace.properties-open .properties-panel {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(0);
 }
 
 .properties-content {
@@ -1281,6 +1525,12 @@ defineExpose({
   scrollbar-color: #555555 transparent;
   scrollbar-gutter: stable;
   scrollbar-width: thin;
+}
+
+.properties-content.is-locked {
+  opacity: 0.5;
+  pointer-events: none;
+  user-select: none;
 }
 
 .properties-content::-webkit-scrollbar {
@@ -1430,6 +1680,18 @@ defineExpose({
   border-color: #626262;
   color: #ffffff;
   background: #3a3a3a;
+}
+
+.property-footer-button:disabled,
+.material-reset-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.property-footer-button:disabled:hover {
+  border-color: #4a4a4a;
+  color: #d2d2d2;
+  background: #303030;
 }
 
 .property-footer-button-primary {
