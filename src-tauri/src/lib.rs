@@ -4922,7 +4922,7 @@ fn prepare_beauty_frame_params(
         return Err("LUT 文件格式不受支持".to_string());
     }
 
-    params.lut_file = Some(lut_path.to_string_lossy().to_string());
+    params.lut_file = Some(path_to_xml_filepath(lut_path));
     Ok(params)
 }
 
