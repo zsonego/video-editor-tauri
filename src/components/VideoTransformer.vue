@@ -53,7 +53,7 @@ const materialResetConfirmVisible = ref(false);
 const transform = reactive({ x: 480, y: 270, angle: 0, scale: 1 });
 const DEFAULT_BEAUTY_SETTINGS = Object.freeze({
   lutStyle: 'none',
-  lutIntensity: 100,
+  lutIntensity: 50,
   skinTone: 'off',
   skinIntensity: 60,
   smoothing: 0,
@@ -80,6 +80,7 @@ let animationFrameId = 0;
 let sourceRevision = 0;
 let beautyPreviewRevision = 0;
 let rotationLastVisualAngle = null;
+let activeLutStyle = 'none';
 const beautyPreviewSource = ref('');
 const beautyPreviewVideoSource = ref('');
 const beautyPreviewVideoElement = ref(null);
@@ -182,7 +183,7 @@ function getBeautySettings() {
 }
 
 function emitTransform(changeType = 'transform') {
-  clearBeautyPreview();
+  if (changeType !== 'beauty') clearBeautyPreview();
   emit('change', {
     changeType,
     x: transform.x,
@@ -202,6 +203,7 @@ function syncBeautySettings(values) {
   if (!values || typeof values !== 'object') return;
   if (values.lutStyle === 'none' || LUT_OPTION_IDS.has(values.lutStyle)) {
     beauty.lutStyle = values.lutStyle;
+    activeLutStyle = values.lutStyle;
   }
   if (SKIN_TONE_OPTIONS.some((option) => option.value === values.skinTone)) {
     beauty.skinTone = values.skinTone;
@@ -232,6 +234,17 @@ function setBeautyPercent(key, event) {
   if (!Number.isFinite(value)) return;
   const max = key === 'saturation' ? 200 : 100;
   beauty[key] = Math.min(max, Math.max(0, value));
+  if (key === 'lutIntensity' && LUT_OPTION_IDS.has(activeLutStyle)) {
+    beauty.lutStyle = activeLutStyle;
+  }
+  emitTransform('beauty');
+}
+
+function setLutStyle(event) {
+  const lutStyle = String(event?.target?.value || 'none');
+  activeLutStyle =
+    lutStyle === 'none' || LUT_OPTION_IDS.has(lutStyle) ? lutStyle : 'none';
+  beauty.lutStyle = activeLutStyle;
   emitTransform('beauty');
 }
 
@@ -243,6 +256,7 @@ function setSkinTone(value) {
 function resetBeauty() {
   if (props.propertiesLocked) return;
   Object.assign(beauty, DEFAULT_BEAUTY_SETTINGS);
+  activeLutStyle = DEFAULT_BEAUTY_SETTINGS.lutStyle;
   emitTransform('beauty');
 }
 
@@ -250,6 +264,7 @@ function restoreProperties(values = null) {
   if (!videoElement || !videoObject || props.propertiesLocked) return false;
   clearBeautyPreview();
   Object.assign(beauty, DEFAULT_BEAUTY_SETTINGS);
+  activeLutStyle = DEFAULT_BEAUTY_SETTINGS.lutStyle;
   if (values?.beauty) syncBeautySettings(values.beauty);
   applyTransform(
     values || {
@@ -571,12 +586,11 @@ function clearBeautyPreview() {
 }
 
 function showBeautyPreview(source) {
-  clearBeautyPreview();
   if (!source || !fabricCanvas || !videoObject) {
     return Promise.reject(new Error('当前视频尚未准备好'));
   }
 
-  const revision = beautyPreviewRevision;
+  const revision = ++beautyPreviewRevision;
   const image = new Image();
   image.crossOrigin = 'anonymous';
 
@@ -591,7 +605,15 @@ function showBeautyPreview(source) {
         return;
       }
 
+      const previewVideo = beautyPreviewVideoElement.value;
+      if (previewVideo) {
+        previewVideo.pause();
+        previewVideo.removeAttribute('src');
+        previewVideo.load();
+      }
+      beautyPreviewVideoSource.value = '';
       beautyPreviewSource.value = source;
+      isPlaying.value = videoElement ? !videoElement.paused : false;
       resolve(true);
     };
     image.onerror = () => reject(new Error('美颜预览图片加载失败'));
@@ -685,16 +707,6 @@ watch(
 watch(
   () => props.propertiesLocked,
   () => syncVideoInteractivity(),
-);
-
-watch(
-  () => props.initialTransform,
-  (values) => {
-    if (!values) return;
-    syncBeautySettings(values.beauty);
-    if (videoObject) applyTransform(values, false);
-  },
-  { deep: true },
 );
 
 onBeforeUnmount(() => {
@@ -981,7 +993,7 @@ defineExpose({
                 <select
                   v-model="beauty.lutStyle"
                   class="property-select"
-                  @change="emitTransform('beauty')"
+                  @change="setLutStyle"
                 >
                   <option value="none">无</option>
                   <option

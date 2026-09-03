@@ -1931,7 +1931,7 @@ function parseTemplateAssetProperties(xmlContent, assetId) {
       lutStyle: readText('lut_style', 'none'),
       lutIntensity: Math.min(
         100,
-        Math.max(0, readNumber('lut_intensity', 0) * 100),
+        Math.max(0, readNumber('lut_intensity', 0.5) * 100),
       ),
       skinTone:
         skinToneValue < 0

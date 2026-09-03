@@ -28,12 +28,15 @@ const n = (value, fallback = 0) => {
 };
 
 const opacity = (value) => Math.min(1, Math.max(0, n(value, 1)));
-const progress = (value) => Math.min(1, Math.max(0, n(value, 0)));
 const percent = (value, fallback = 0) =>
   Math.min(100, Math.max(0, n(value, fallback)));
 const saturationPercent = (value, fallback = 100) =>
   Math.min(200, Math.max(0, n(value, fallback)));
 const bool = (value) => value === true || value === 'true' || value === '1';
+const PROPERTY_CANVAS_WIDTH = 960;
+const PROPERTY_CANVAS_HEIGHT = 540;
+const TEMPLATE_LAYOUT_WIDTH = 1920;
+const TEMPLATE_LAYOUT_HEIGHT = 1080;
 
 const directChild = (node, tag) =>
   Array.from(node?.children ?? []).find((child) => child.tagName === tag) ??
@@ -60,8 +63,6 @@ export function buildXml(model) {
     '        <video>',
     `            <duration>${n(model.duration)}</duration>`,
     `            <resolution>${text(model.resolution)}</resolution>`,
-    `            <style>${text(model.videoStyle || 'none')}</style>`,
-    `            <progress>${progress(model.progress)}</progress>`,
     `            <demo-path>${text(model.demoPath)}</demo-path>`,
     '        </video>',
     '        <tracks>',
@@ -136,6 +137,32 @@ export function buildXml(model) {
     }
 
     clip.areas.forEach((area) => {
+      const areaWidth = n(area.width, TEMPLATE_LAYOUT_WIDTH);
+      const areaHeight = n(area.height, TEMPLATE_LAYOUT_HEIGHT);
+      const propertyPositionX =
+        (n(area.x) + areaWidth / 2) *
+        (PROPERTY_CANVAS_WIDTH / TEMPLATE_LAYOUT_WIDTH);
+      const propertyPositionY =
+        (n(area.y) + areaHeight / 2) *
+        (PROPERTY_CANVAS_HEIGHT / TEMPLATE_LAYOUT_HEIGHT);
+      const propertyScale = Math.max(
+        (areaWidth / TEMPLATE_LAYOUT_WIDTH) *
+          (PROPERTY_CANVAS_WIDTH / TEMPLATE_LAYOUT_WIDTH),
+        (areaHeight / TEMPLATE_LAYOUT_HEIGHT) *
+          (PROPERTY_CANVAS_HEIGHT / TEMPLATE_LAYOUT_HEIGHT),
+      );
+      const beauty = area.beauty || {};
+      const skinIntensity = percent(beauty.skinIntensity, 60) / 100;
+      const skinTone =
+        beauty.skinTone === 'natural'
+          ? -skinIntensity
+          : beauty.skinTone === 'warm'
+            ? skinIntensity
+            : 0;
+      const lutStyle = beauty.lutStyle || 'none';
+      const lutIntensity =
+        lutStyle === 'none' ? 0 : percent(beauty.lutIntensity, 100) / 100;
+      const rotation = n(area.rotate);
       lines.push(
         `                <area id="${attr(area.id)}" asset-id="${attr(area.assetId)}" index="${attr(Math.max(0, Math.round(n(area.index, 1))))}" opacity="${attr(opacity(area.opacity))}">`,
         '                    <source>',
@@ -144,13 +171,30 @@ export function buildXml(model) {
         '                    <transform>',
         `                        <mirror>${text(area.mirror)}</mirror>`,
         `                        <speed>${n(area.speed, 1)}</speed>`,
-        `                        <rotate>${n(area.rotate)}</rotate>`,
         '                    </transform>',
-        `                    <beauty lut-style="${attr(area.beauty?.lutStyle || 'none')}" lut-intensity="${attr(percent(area.beauty?.lutIntensity, 100))}" skin-tone="${attr(area.beauty?.skinTone || 'off')}" skin-intensity="${attr(percent(area.beauty?.skinIntensity, 60))}" smoothing="${attr(percent(area.beauty?.smoothing))}" whitening="${attr(percent(area.beauty?.whitening))}" saturation="${attr(saturationPercent(area.beauty?.saturation))}" stabilization="${attr(Boolean(area.beauty?.stabilization))}" one-click="${attr(Boolean(area.beauty?.oneClickBeauty))}" />`,
+        '                    <property>',
+        `                        <whiteness>${percent(beauty.whitening) / 100}</whiteness><!-- 美白强度 -->`,
+        `                        <smoothing>${percent(beauty.smoothing) / 100}</smoothing><!-- 磨皮强度 -->`,
+        `                        <saturation>${saturationPercent(beauty.saturation)}</saturation><!-- 饱和度 -->`,
+        `                        <skin_tone>${skinTone}</skin_tone><!-- 肤色调节 -->`,
+        '                        <face_detect>1</face_detect><!-- 人脸识别开关 -->',
+        `                        <rotation>${rotation}</rotation><!-- 旋转角度 -->`,
+        `                        <lut_style>${text(lutStyle)}</lut_style><!-- LUT 风格 -->`,
+        `                        <lut_intensity>${lutIntensity}</lut_intensity><!-- LUT 强度 -->`,
+        `                        <positionX>${propertyPositionX}</positionX><!-- 中心点横坐标 -->`,
+        `                        <positionY>${propertyPositionY}</positionY><!-- 中心点纵坐标 -->`,
+        `                        <scale>${propertyScale}</scale><!-- 缩放比例 -->`,
+        `                        <canvas_width>${PROPERTY_CANVAS_WIDTH}</canvas_width><!-- 画布宽度 -->`,
+        `                        <canvas_height>${PROPERTY_CANVAS_HEIGHT}</canvas_height><!-- 画布高度 -->`,
+        '                        <transform_origin>center</transform_origin><!-- 变换基准点 -->',
+        `                        <rotation_direction>${rotation < 0 ? 'counterclockwise' : 'clockwise'}</rotation_direction><!-- 旋转方向 -->`,
+        `                        <stabilization>${Boolean(beauty.stabilization)}</stabilization><!-- 视频去抖动开关 -->`,
+        `                        <one_click_beauty>${Boolean(beauty.oneClickBeauty)}</one_click_beauty><!-- 一键美颜开关 -->`,
+        '                    </property>',
         '                    <destination>',
-        `                        <position x="${attr(n(area.x))}" y="${attr(n(area.y))}" />`,
-        `                        <width>${n(area.width, 1920)}</width>`,
-        `                        <height>${n(area.height, 1080)}</height>`,
+        '                        <position x="0" y="0" />',
+        `                        <width>${TEMPLATE_LAYOUT_WIDTH}</width>`,
+        `                        <height>${TEMPLATE_LAYOUT_HEIGHT}</height>`,
         '                    </destination>',
         '                </area>',
       );
@@ -255,10 +299,63 @@ export function parseXml(xmlText) {
     const areas = directChildren(clipNode, 'area').map(
       (areaNode, areaIndex) => {
         const transform = directChild(areaNode, 'transform');
-        const beauty = directChild(areaNode, 'beauty');
+        const property = directChild(areaNode, 'property');
         const destination = directChild(areaNode, 'destination');
         const position = directChild(destination, 'position');
         const oldAssetId = areaNode.getAttribute('asset-id') || '';
+        const legacyX = n(position?.getAttribute('x'));
+        const legacyY = n(position?.getAttribute('y'));
+        const legacyWidth = n(
+          childText(destination, 'width'),
+          TEMPLATE_LAYOUT_WIDTH,
+        );
+        const legacyHeight = n(
+          childText(destination, 'height'),
+          TEMPLATE_LAYOUT_HEIGHT,
+        );
+        const propertyNumber = (tag, fallback) => {
+          const value = childText(property, tag);
+          return value === '' ? fallback : n(value, fallback);
+        };
+        const propertyCanvasWidth = Math.max(
+          1,
+          propertyNumber('canvas_width', PROPERTY_CANVAS_WIDTH),
+        );
+        const propertyCanvasHeight = Math.max(
+          1,
+          propertyNumber('canvas_height', PROPERTY_CANVAS_HEIGHT),
+        );
+        const propertyScale = propertyNumber(
+          'scale',
+          Math.max(
+            (legacyWidth / TEMPLATE_LAYOUT_WIDTH) *
+              (PROPERTY_CANVAS_WIDTH / TEMPLATE_LAYOUT_WIDTH),
+            (legacyHeight / TEMPLATE_LAYOUT_HEIGHT) *
+              (PROPERTY_CANVAS_HEIGHT / TEMPLATE_LAYOUT_HEIGHT),
+          ),
+        );
+        const propertyWidth =
+          propertyScale *
+          TEMPLATE_LAYOUT_WIDTH *
+          (TEMPLATE_LAYOUT_WIDTH / propertyCanvasWidth);
+        const propertyHeight =
+          propertyScale *
+          TEMPLATE_LAYOUT_HEIGHT *
+          (TEMPLATE_LAYOUT_HEIGHT / propertyCanvasHeight);
+        const propertyCenterX = propertyNumber(
+          'positionX',
+          (legacyX + legacyWidth / 2) *
+            (PROPERTY_CANVAS_WIDTH / TEMPLATE_LAYOUT_WIDTH),
+        );
+        const propertyCenterY = propertyNumber(
+          'positionY',
+          (legacyY + legacyHeight / 2) *
+            (PROPERTY_CANVAS_HEIGHT / TEMPLATE_LAYOUT_HEIGHT),
+        );
+        const propertyRotationText = childText(property, 'rotation');
+        const skinToneText = childText(property, 'skin_tone', '0');
+        const skinToneValue = n(skinToneText);
+        const hasProperty = Boolean(property);
         return {
           id: generateId(),
           assetId: assetIdMap.get(oldAssetId) || '',
@@ -269,28 +366,53 @@ export function parseXml(xmlText) {
           opacity: opacity(areaNode.getAttribute('opacity')),
           mirror: childText(transform, 'mirror', 'none') || 'none',
           speed: n(childText(transform, 'speed'), 1),
-          rotate: n(childText(transform, 'rotate'), 0),
+          rotate:
+            propertyRotationText === ''
+              ? n(childText(transform, 'rotate'), 0)
+              : n(propertyRotationText),
           beauty: {
-            lutStyle: beauty?.getAttribute('lut-style') || 'none',
+            lutStyle: childText(property, 'lut_style', 'none') || 'none',
             lutIntensity: percent(
-              beauty?.getAttribute('lut-intensity'),
-              100,
+              n(childText(property, 'lut_intensity', '0.5')) * 100,
             ),
-            skinTone: beauty?.getAttribute('skin-tone') || 'off',
-            skinIntensity: percent(
-              beauty?.getAttribute('skin-intensity'),
-              60,
+            skinTone:
+              skinToneValue < 0
+                ? 'natural'
+                : skinToneValue > 0
+                  ? 'warm'
+                  : 'off',
+            skinIntensity:
+              skinToneValue === 0
+                ? 60
+                : percent(Math.abs(skinToneValue) * 100),
+            smoothing: percent(
+              n(childText(property, 'smoothing', '0')) * 100,
             ),
-            smoothing: percent(beauty?.getAttribute('smoothing')),
-            whitening: percent(beauty?.getAttribute('whitening')),
-            saturation: saturationPercent(beauty?.getAttribute('saturation')),
-            stabilization: bool(beauty?.getAttribute('stabilization')),
-            oneClickBeauty: bool(beauty?.getAttribute('one-click')),
+            whitening: percent(
+              n(childText(property, 'whiteness', '0')) * 100,
+            ),
+            saturation: saturationPercent(
+              childText(property, 'saturation', '100'),
+            ),
+            stabilization: bool(
+              childText(property, 'stabilization', 'false'),
+            ),
+            oneClickBeauty: bool(
+              childText(property, 'one_click_beauty', 'false'),
+            ),
           },
-          x: n(position?.getAttribute('x')),
-          y: n(position?.getAttribute('y')),
-          width: n(childText(destination, 'width'), 1920),
-          height: n(childText(destination, 'height'), 1080),
+          x: hasProperty
+            ? propertyCenterX *
+                (TEMPLATE_LAYOUT_WIDTH / propertyCanvasWidth) -
+              propertyWidth / 2
+            : legacyX,
+          y: hasProperty
+            ? propertyCenterY *
+                (TEMPLATE_LAYOUT_HEIGHT / propertyCanvasHeight) -
+              propertyHeight / 2
+            : legacyY,
+          width: hasProperty ? propertyWidth : legacyWidth,
+          height: hasProperty ? propertyHeight : legacyHeight,
         };
       },
     );
@@ -350,8 +472,8 @@ export function parseXml(xmlText) {
     name: template.getAttribute('name') || '未命名模板',
     duration: n(childText(video, 'duration')),
     resolution: childText(video, 'resolution', '1920*1080') || '1920*1080',
-    videoStyle: childText(video, 'style', 'none') || 'none',
-    progress: progress(childText(video, 'progress')),
+    videoStyle: 'none',
+    progress: 0,
     demoPath: childText(video, 'demo-path'),
     tracks: {
       background: readTrackPath('bg'),

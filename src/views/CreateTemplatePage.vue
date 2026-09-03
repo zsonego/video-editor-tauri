@@ -105,7 +105,7 @@ const fontOptions = [
 ];
 const DEFAULT_AREA_BEAUTY_SETTINGS = Object.freeze({
   lutStyle: 'none',
-  lutIntensity: 100,
+  lutIntensity: 50,
   skinTone: 'off',
   skinIntensity: 60,
   smoothing: 0,
@@ -177,6 +177,7 @@ const createInitialModel = () => ({
 });
 
 const model = reactive(createInitialModel());
+const globalLutInheritedAreaIds = new Set();
 const selectedFilePaths = reactive({
   demo: '',
   background: '',
@@ -308,7 +309,10 @@ const invalidAreaCount = computed(() => {
   const ids = new Set(allAssets.value.map((asset) => asset.id));
   return model.clips.reduce(
     (total, clip) =>
-      total + clip.areas.filter((area) => !ids.has(area.assetId)).length,
+      total +
+      clip.areas.filter(
+        (area) => Boolean(area.assetId) && !ids.has(area.assetId),
+      ).length,
     0,
   );
 });
@@ -452,6 +456,7 @@ function replaceModel(next) {
     selectedFilePaths[key] = '';
   });
   selectedClipId.value = '';
+  globalLutInheritedAreaIds.clear();
 }
 
 function showToast(message, type = 'success') {
@@ -1629,6 +1634,50 @@ function createAreaBeautySettings(values = {}) {
   };
 }
 
+function applyGlobalLutToVariableAreas() {
+  const globalLutStyle =
+    model.videoStyle === 'none' || LUT_OPTION_IDS.has(model.videoStyle)
+      ? model.videoStyle
+      : 'none';
+  const globalLutIntensity = clampNumber(model.progress, 0, 100);
+
+  model.clips.forEach((clip) => {
+    if (clipMaterialType(clip) !== 'variable') return;
+    (clip.areas ?? []).forEach((area) => {
+      if (!area.beauty || typeof area.beauty !== 'object') {
+        area.beauty = createAreaBeautySettings();
+      }
+      const inheritsGlobal = globalLutInheritedAreaIds.has(area.id);
+      const hasAreaLut = area.beauty.lutStyle !== 'none';
+      if (hasAreaLut && !inheritsGlobal) return;
+
+      globalLutInheritedAreaIds.add(area.id);
+      area.beauty.lutStyle = globalLutStyle;
+      if (globalLutStyle !== 'none') {
+        area.beauty.lutIntensity = globalLutIntensity;
+      }
+    });
+  });
+}
+
+function markAreaLutExplicit(area = areaDraft.value) {
+  if (!area) return;
+  if (area.beauty?.lutStyle === 'none') {
+    globalLutInheritedAreaIds.add(area.id);
+    applyGlobalLutToVariableAreas();
+    return;
+  }
+  globalLutInheritedAreaIds.delete(area.id);
+}
+
+function handleAreaLutStyleChange(event) {
+  if (!areaDraft.value?.beauty) return;
+  const lutStyle = String(event?.target?.value || 'none');
+  areaDraft.value.beauty.lutStyle =
+    lutStyle === 'none' || LUT_OPTION_IDS.has(lutStyle) ? lutStyle : 'none';
+  markAreaLutExplicit();
+}
+
 function normalizeAreaBeautyValue(key, min = 0, max = 100) {
   if (!areaDraft.value?.beauty) return;
   areaDraft.value.beauty[key] = clampNumber(
@@ -1641,6 +1690,8 @@ function normalizeAreaBeautyValue(key, min = 0, max = 100) {
 function resetAreaBeauty() {
   if (!areaDraft.value || isBoundGeneratedArea(areaDraft.value)) return;
   areaDraft.value.beauty = createAreaBeautySettings();
+  globalLutInheritedAreaIds.add(areaDraft.value.id);
+  applyGlobalLutToVariableAreas();
 }
 
 function mirrorAxisForDirection(area, direction) {
@@ -2187,6 +2238,7 @@ function validateModel() {
 }
 
 function exportXml() {
+  applyGlobalLutToVariableAreas();
   const error = validateModel();
   if (error) {
     showToast(error, 'error');
@@ -2390,6 +2442,7 @@ function clipMaterialType(clip) {
 function setClipMaterialType(clip, materialType) {
   if (!clip) return;
   clip.materialType = materialType === 'fixed' ? 'fixed' : 'variable';
+  applyGlobalLutToVariableAreas();
 }
 
 function clipTransitionDescription(clip) {
@@ -2432,6 +2485,23 @@ function sequenceClipStyle(clip) {
 function sequenceTrackFileLabel(path) {
   return path ? fileName(path) : '待上传';
 }
+
+watch(
+  () => [
+    model.videoStyle,
+    model.progress,
+    ...(Array.isArray(model.clips) ? model.clips : []).flatMap((clip) => [
+      clip.id,
+      clip.materialType,
+      ...(Array.isArray(clip.areas) ? clip.areas : []).flatMap((area) => [
+        area.id,
+        area.beauty?.lutStyle,
+      ]),
+    ]),
+  ],
+  applyGlobalLutToVariableAreas,
+  { flush: 'post' },
+);
 
 watch(
   () =>
@@ -2837,18 +2907,18 @@ onBeforeUnmount(() => {
               class="area-inspector-range"
               type="range"
               min="0"
-              max="1"
-              step="0.01"
+              max="100"
+              step="1"
             />
             <label class="area-inspector-value">
               <input
                 v-model.number="model.progress"
                 type="number"
                 min="0"
-                max="1"
-                step="0.01"
+                max="100"
+                step="1"
                 aria-label="视频风格进度"
-                @change="model.progress = clampNumber(model.progress, 0, 1)"
+                @change="model.progress = clampNumber(model.progress, 0, 100)"
               />
             </label>
           </div>
@@ -4079,7 +4149,10 @@ onBeforeUnmount(() => {
                           <div class="area-beauty-grid">
                             <div class="area-beauty-control is-select">
                               <span class="area-inspector-label">LUT 风格</span>
-                              <select v-model="areaDraft.beauty.lutStyle">
+                              <select
+                                v-model="areaDraft.beauty.lutStyle"
+                                @change="handleAreaLutStyleChange"
+                              >
                                 <option value="none">无</option>
                                 <option
                                   v-for="lut in LUT_OPTIONS"
@@ -4101,7 +4174,8 @@ onBeforeUnmount(() => {
                                 max="100"
                                 step="1"
                                 @change="
-                                  normalizeAreaBeautyValue('lutIntensity')
+                                  normalizeAreaBeautyValue('lutIntensity');
+                                  markAreaLutExplicit()
                                 "
                               />
                               <label class="area-inspector-value">
@@ -4111,7 +4185,10 @@ onBeforeUnmount(() => {
                                   min="0"
                                   max="100"
                                   step="1"
-                                  @change="normalizeAreaBeautyValue('lutIntensity')"
+                                  @change="
+                                    normalizeAreaBeautyValue('lutIntensity');
+                                    markAreaLutExplicit()
+                                  "
                                 />
                                 <small>%</small>
                               </label>

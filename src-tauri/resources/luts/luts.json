@@ -1,7 +1,7 @@
 {
   "version": 1,
   "luts": [
-     {
+    {
       "id": "lut-011",
       "name": "莱卡电影胶片质感",
       "file": "luts/莱卡电影胶片质感.cube",
@@ -16,56 +16,56 @@
     {
       "id": "lut-001",
       "name": "像梦像风像雨",
-      "file": "luts/像梦像风像雨.3dl",
-      "format": "3dl"
+      "file": "luts/像梦像风像雨.cube",
+      "format": "cube"
     },
     {
       "id": "lut-002",
       "name": "大片质感",
-      "file": "luts/大片质感.3dl",
-      "format": "3dl"
+      "file": "luts/大片质感.cube",
+      "format": "cube"
     },
     {
       "id": "lut-003",
       "name": "旅拍大片质感",
-      "file": "luts/旅拍大片质感.3dl",
-      "format": "3dl"
+      "file": "luts/旅拍大片质感.cube",
+      "format": "cube"
     },
     {
       "id": "lut-005",
       "name": "江南风质感",
-      "file": "luts/江南风质感.3dl",
-      "format": "3dl"
+      "file": "luts/江南风质感.cube",
+      "format": "cube"
     },
     {
       "id": "lut-006",
       "name": "电影胶片莱卡质感",
-      "file": "luts/电影胶片莱卡质感.3dl",
-      "format": "3dl"
+      "file": "luts/电影胶片莱卡质感.cube",
+      "format": "cube"
     },
     {
       "id": "lut-007",
       "name": "胶片质感",
-      "file": "luts/胶片质感.3dl",
-      "format": "3dl"
+      "file": "luts/胶片质感.cube",
+      "format": "cube"
     },
     {
       "id": "lut-008",
       "name": "自然奶油质感",
-      "file": "luts/自然奶油质感.3dl",
-      "format": "3dl"
+      "file": "luts/自然奶油质感.cube",
+      "format": "cube"
     },
     {
       "id": "lut-009",
       "name": "自然清新质感",
-      "file": "luts/自然清新质感.3dl",
-      "format": "3dl"
+      "file": "luts/自然清新质感.cube",
+      "format": "cube"
     },
     {
       "id": "lut-010",
       "name": "自然莱卡质感",
-      "file": "luts/自然莱卡质感.3dl",
-      "format": "3dl"
+      "file": "luts/自然莱卡质感.cube",
+      "format": "cube"
     }
   ]
 }
