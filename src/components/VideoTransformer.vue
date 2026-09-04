@@ -76,6 +76,7 @@ const SKIN_TONE_OPTIONS = Object.freeze([
 let fabricCanvas = null;
 let videoObject = null;
 let videoElement = null;
+let videoBaseScale = 1;
 let animationFrameId = 0;
 let sourceRevision = 0;
 let beautyPreviewRevision = 0;
@@ -101,10 +102,6 @@ function getShortestAngleDelta(current, previous) {
   if (delta > 180) delta -= 360;
   if (delta < -180) delta += 360;
   return delta;
-}
-
-function getRotationDirection(angle = transform.angle) {
-  return Number(angle) < 0 ? 'counterclockwise' : 'clockwise';
 }
 
 function getCoverScale(video) {
@@ -194,7 +191,6 @@ function emitTransform(changeType = 'transform') {
     canvasWidth: CANVAS_WIDTH,
     canvasHeight: CANVAS_HEIGHT,
     transformOrigin: 'center',
-    rotationDirection: getRotationDirection(),
     beauty: getBeautySettings(),
   });
 }
@@ -271,7 +267,7 @@ function restoreProperties(values = null) {
       x: CANVAS_WIDTH / 2,
       y: CANVAS_HEIGHT / 2,
       angle: 0,
-      scale: getCoverScale(videoElement),
+      scale: 1,
     },
     false,
   );
@@ -284,7 +280,7 @@ function syncTransformFromObject(syncAngle = false) {
   transform.x = round(videoObject.left);
   transform.y = round(videoObject.top);
   if (syncAngle) transform.angle = round(videoObject.angle, 2);
-  transform.scale = round(videoObject.scaleX, 3);
+  transform.scale = round(videoObject.scaleX / videoBaseScale, 3);
   emitTransform();
 }
 
@@ -311,7 +307,8 @@ function applyTransform(values = {}, shouldEmit = true) {
   }
   if (Number.isFinite(values.scale)) {
     const scale = Math.min(10, Math.max(0.01, values.scale));
-    videoObject.set({ scaleX: scale, scaleY: scale });
+    const objectScale = videoBaseScale * scale;
+    videoObject.set({ scaleX: objectScale, scaleY: objectScale });
   }
   videoObject.setCoords();
   fabricCanvas?.setActiveObject(videoObject);
@@ -319,7 +316,7 @@ function applyTransform(values = {}, shouldEmit = true) {
   else {
     transform.x = round(videoObject.left);
     transform.y = round(videoObject.top);
-    transform.scale = round(videoObject.scaleX, 3);
+    transform.scale = round(videoObject.scaleX / videoBaseScale, 3);
   }
   fabricCanvas?.requestRenderAll();
 }
@@ -347,6 +344,7 @@ function addVideoToCanvas(video, revision) {
   video.width = video.videoWidth;
   video.height = video.videoHeight;
   const initialScale = getCoverScale(video);
+  videoBaseScale = initialScale;
   videoObject = new FabricImage(video, {
     left: CANVAS_WIDTH / 2,
     top: CANVAS_HEIGHT / 2,
@@ -432,6 +430,7 @@ function disposeVideo() {
     videoElement.load();
   }
   videoElement = null;
+  videoBaseScale = 1;
   isReady.value = false;
   isPlaying.value = false;
 }
@@ -494,7 +493,7 @@ function resetTransform() {
     x: CANVAS_WIDTH / 2,
     y: CANVAS_HEIGHT / 2,
     angle: 0,
-    scale: getCoverScale(videoElement),
+    scale: 1,
   });
 }
 
@@ -567,7 +566,6 @@ function getCurrentTime() {
 function getTransform() {
   return {
     ...transform,
-    rotationDirection: getRotationDirection(),
     beauty: getBeautySettings(),
   };
 }
@@ -690,7 +688,7 @@ onMounted(async () => {
     e.stopPropagation();
     const nextScale = Math.min(
       10,
-      Math.max(0.01, videoObject.scaleX * Math.pow(0.999, e.deltaY)),
+      Math.max(0.01, transform.scale * Math.pow(0.999, e.deltaY)),
     );
     applyTransform({ scale: nextScale });
   });

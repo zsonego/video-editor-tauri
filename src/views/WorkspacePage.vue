@@ -1926,19 +1926,27 @@ function parseTemplateAssetProperties(xmlContent, assetId) {
     Math.max(-1, readNumber('skin_tone', 0)),
   );
   const rotation = readNumber('rotation', 0);
+  const propertyCanvasWidth = Math.max(
+    1,
+    readNumber('canvas_width', EDITOR_CANVAS_WIDTH),
+  );
+  const propertyCanvasHeight = Math.max(
+    1,
+    readNumber('canvas_height', EDITOR_CANVAS_HEIGHT),
+  );
+  const positionScaleX = EDITOR_CANVAS_WIDTH / propertyCanvasWidth;
+  const positionScaleY = EDITOR_CANVAS_HEIGHT / propertyCanvasHeight;
+  const legacyScaleRatio =
+    COMPOSER_PREVIEW_CANVAS_WIDTH / propertyCanvasWidth;
 
   return {
-    x: readNumber('positionX', 480),
-    y: readNumber('positionY', 270),
+    x: readNumber('positionX', propertyCanvasWidth / 2) * positionScaleX,
+    y: readNumber('positionY', propertyCanvasHeight / 2) * positionScaleY,
     angle: rotation,
-    scale: readNumber('scale', 1),
-    canvasWidth: Math.max(1, readNumber('canvas_width', 960)),
-    canvasHeight: Math.max(1, readNumber('canvas_height', 540)),
+    scale: readNumber('scale', 1) * legacyScaleRatio,
+    canvasWidth: EDITOR_CANVAS_WIDTH,
+    canvasHeight: EDITOR_CANVAS_HEIGHT,
     transformOrigin: readText('transform_origin', 'center'),
-    rotationDirection: readText(
-      'rotation_direction',
-      rotation < 0 ? 'counterclockwise' : 'clockwise',
-    ),
     beauty: {
       lutStyle: readText('lut_style', 'none'),
       lutIntensity: Math.min(
@@ -2372,7 +2380,6 @@ function getCurrentAssetTransformValues(assetId, previousVideo = null) {
     canvasWidth: 960,
     canvasHeight: 540,
     transformOrigin: 'center',
-    rotationDirection: 'clockwise',
     beauty: {
       lutStyle: 'none',
       lutIntensity: 50,
@@ -3016,6 +3023,11 @@ function clampBeautyUnit(value) {
   return Math.min(1, Math.max(0, number / 100));
 }
 
+const EDITOR_CANVAS_WIDTH = 960;
+const EDITOR_CANVAS_HEIGHT = 540;
+const COMPOSER_PREVIEW_CANVAS_WIDTH = 1920;
+const COMPOSER_PREVIEW_CANVAS_HEIGHT = 1080;
+
 function buildBeautyFrameParams(values = {}) {
   const beauty = values.beauty || {};
   const rotation = Number(values.angle) || 0;
@@ -3027,6 +3039,17 @@ function buildBeautyFrameParams(values = {}) {
         ? skinIntensity
         : 0;
   const lutFile = String(beauty.lutFile || '').trim();
+  const editorCanvasWidth = Math.max(
+    1,
+    Number(values.canvasWidth) || EDITOR_CANVAS_WIDTH,
+  );
+  const editorCanvasHeight = Math.max(
+    1,
+    Number(values.canvasHeight) || EDITOR_CANVAS_HEIGHT,
+  );
+  const positionScaleX = COMPOSER_PREVIEW_CANVAS_WIDTH / editorCanvasWidth;
+  const positionScaleY =
+    COMPOSER_PREVIEW_CANVAS_HEIGHT / editorCanvasHeight;
 
   return {
     whiteness: clampBeautyUnit(beauty.whitening),
@@ -3037,13 +3060,12 @@ function buildBeautyFrameParams(values = {}) {
     rotation,
     lut_file: lutFile || null,
     lut_intensity: lutFile ? clampBeautyUnit(beauty.lutIntensity) : 0,
-    positionX: Number(values.x) || 0,
-    positionY: Number(values.y) || 0,
+    positionX: (Number(values.x) || 0) * positionScaleX,
+    positionY: (Number(values.y) || 0) * positionScaleY,
     scale: Number(values.scale) || 1,
-    canvas_width: Math.max(1, Math.round(Number(values.canvasWidth) || 960)),
-    canvas_height: Math.max(1, Math.round(Number(values.canvasHeight) || 540)),
+    canvas_width: COMPOSER_PREVIEW_CANVAS_WIDTH,
+    canvas_height: COMPOSER_PREVIEW_CANVAS_HEIGHT,
     transform_origin: values.transformOrigin || 'center',
-    rotation_direction: rotation < 0 ? 'counterclockwise' : 'clockwise',
     stabilization: Boolean(beauty.stabilization),
     one_click_beauty: Boolean(beauty.oneClickBeauty),
   };
@@ -3066,7 +3088,6 @@ function buildProjectAssetProperties(values = {}) {
     canvas_width: params.canvas_width,
     canvas_height: params.canvas_height,
     transform_origin: params.transform_origin,
-    rotation_direction: params.rotation_direction,
     stabilization: params.stabilization,
     one_click_beauty: params.one_click_beauty,
   };

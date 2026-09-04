@@ -678,7 +678,6 @@ struct ProjectAssetProperties {
     canvas_width: u32,
     canvas_height: u32,
     transform_origin: String,
-    rotation_direction: String,
     stabilization: bool,
     one_click_beauty: bool,
     #[serde(default)]
@@ -730,7 +729,6 @@ struct ComposerBeautyFrameParams {
     canvas_width: u32,
     canvas_height: u32,
     transform_origin: String,
-    rotation_direction: String,
     stabilization: bool,
     one_click_beauty: bool,
 }
@@ -1082,7 +1080,12 @@ impl ComposerRuntime {
                 let library_resource_path = library_path
                     .parent()
                     .map(|directory| directory.join("share").join("composer"));
-                let bundled_resource_path = std::env::current_exe().ok().and_then(|exe| {
+                let current_exe = std::env::current_exe().ok();
+                let dev_resource_path = current_exe.as_ref().and_then(|exe| {
+                    exe.parent()
+                        .map(|directory| directory.join("share").join("composer"))
+                });
+                let bundled_resource_path = current_exe.as_ref().and_then(|exe| {
                     exe.parent()
                         .and_then(|macos_dir| macos_dir.parent())
                         .map(|contents_dir| {
@@ -1092,12 +1095,16 @@ impl ComposerRuntime {
                                 .join("composer")
                         })
                 });
-                [library_resource_path, bundled_resource_path]
-                    .into_iter()
-                    .flatten()
-                    .find_map(|path| fs::canonicalize(path).ok())
-                    .map(path_to_xml_filepath)
-                    .ok_or_else(|| "Composer 美颜资源目录 share/composer 不可用".to_string())?
+                [
+                    library_resource_path,
+                    dev_resource_path,
+                    bundled_resource_path,
+                ]
+                .into_iter()
+                .flatten()
+                .find_map(|path| fs::canonicalize(path).ok())
+                .map(path_to_xml_filepath)
+                .ok_or_else(|| "Composer 美颜资源目录 share/composer 不可用".to_string())?
             };
             #[cfg(target_os = "windows")]
             let beauty_resource_path = String::new();
@@ -2626,8 +2633,6 @@ fn normalize_project_asset_properties(
         "" | "center" => "center".to_string(),
         _ => return Err("当前仅支持以 center 作为视频变换原点".to_string()),
     };
-    properties.rotation_direction =
-        normalize_rotation_direction(&properties.rotation_direction, properties.rotation)?;
     properties.generatepath = properties
         .generatepath
         .map(|value| value.trim().to_string())
@@ -2656,7 +2661,6 @@ fn project_asset_property_xml(properties: &ProjectAssetProperties, indent: &str)
         ("canvas_width", properties.canvas_width.to_string()),
         ("canvas_height", properties.canvas_height.to_string()),
         ("transform_origin", properties.transform_origin.clone()),
-        ("rotation_direction", properties.rotation_direction.clone()),
         ("stabilization", properties.stabilization.to_string()),
         ("one_click_beauty", properties.one_click_beauty.to_string()),
     ];
@@ -4848,17 +4852,6 @@ fn finite_or(value: f64, fallback: f64) -> f64 {
     }
 }
 
-fn normalize_rotation_direction(value: &str, rotation: f64) -> Result<String, String> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "" | "clockwise" | "counterclockwise" => Ok(if rotation < 0.0 {
-            "counterclockwise".to_string()
-        } else {
-            "clockwise".to_string()
-        }),
-        _ => Err("rotation_direction 仅支持 clockwise 或 counterclockwise".to_string()),
-    }
-}
-
 fn prepare_beauty_frame_params(
     app: &AppHandle,
     mut params: ComposerBeautyFrameParams,
@@ -4874,12 +4867,12 @@ fn prepare_beauty_frame_params(
     params.position_y = finite_or(params.position_y, 0.0);
     params.scale = finite_or(params.scale, 1.0).clamp(0.01, 10.0);
     params.canvas_width = if params.canvas_width == 0 {
-        960
+        1920
     } else {
         params.canvas_width.clamp(1, 16_384)
     };
     params.canvas_height = if params.canvas_height == 0 {
-        540
+        1080
     } else {
         params.canvas_height.clamp(1, 16_384)
     };
@@ -4887,9 +4880,6 @@ fn prepare_beauty_frame_params(
         "" | "center" => "center".to_string(),
         _ => return Err("当前仅支持以 center 作为视频变换原点".to_string()),
     };
-    params.rotation_direction =
-        normalize_rotation_direction(&params.rotation_direction, params.rotation)?;
-
     let lut_file = params
         .lut_file
         .take()
@@ -5595,26 +5585,25 @@ mod tests {
         let params = ComposerBeautyFrameParams {
             rotation: -450.0,
             saturation: 100.0,
-            position_x: 480.0,
-            position_y: 270.0,
-            scale: 0.5,
-            canvas_width: 960,
-            canvas_height: 540,
+            position_x: 960.0,
+            position_y: 540.0,
+            scale: 1.0,
+            canvas_width: 1920,
+            canvas_height: 1080,
             transform_origin: "center".to_string(),
-            rotation_direction: "counterclockwise".to_string(),
             ..Default::default()
         };
         let value = serde_json::to_value(params).expect("serialize beauty transform params");
 
-        assert_eq!(value["positionX"], 480.0);
-        assert_eq!(value["positionY"], 270.0);
+        assert_eq!(value["positionX"], 960.0);
+        assert_eq!(value["positionY"], 540.0);
         assert_eq!(value["saturation"], 100.0);
-        assert_eq!(value["scale"], 0.5);
+        assert_eq!(value["scale"], 1.0);
         assert_eq!(value["rotation"], -450.0);
-        assert_eq!(value["canvas_width"], 960);
-        assert_eq!(value["canvas_height"], 540);
+        assert_eq!(value["canvas_width"], 1920);
+        assert_eq!(value["canvas_height"], 1080);
         assert_eq!(value["transform_origin"], "center");
-        assert_eq!(value["rotation_direction"], "counterclockwise");
+        assert!(value.get("rotation_direction").is_none());
     }
 
     #[test]
@@ -5649,7 +5638,6 @@ mod tests {
             canvas_width: 960,
             canvas_height: 540,
             transform_origin: "center".to_string(),
-            rotation_direction: "counterclockwise".to_string(),
             stabilization: false,
             one_click_beauty: false,
             generatepath: None,
@@ -5667,12 +5655,7 @@ mod tests {
         assert_eq!(updated.matches("<saturation>122.0</saturation>").count(), 2);
         assert_eq!(updated.matches("<lut_style>lut-009</lut_style>").count(), 2);
         assert_eq!(updated.matches("<rotation>-450.0</rotation>").count(), 2);
-        assert_eq!(
-            updated
-                .matches("<rotation_direction>counterclockwise</rotation_direction>")
-                .count(),
-            2
-        );
+        assert!(!updated.contains("<rotation_direction>"));
         assert_eq!(updated.matches("<positionX>480.0</positionX>").count(), 2);
         assert_eq!(
             updated
@@ -5708,7 +5691,6 @@ mod tests {
             canvas_width: 960,
             canvas_height: 540,
             transform_origin: "center".to_string(),
-            rotation_direction: "clockwise".to_string(),
             stabilization: false,
             one_click_beauty: false,
             generatepath: Some("/project/generated/asset-1.mp4".to_string()),

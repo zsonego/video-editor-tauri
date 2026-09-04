@@ -33,8 +33,8 @@ const percent = (value, fallback = 0) =>
 const saturationPercent = (value, fallback = 100) =>
   Math.min(200, Math.max(0, n(value, fallback)));
 const bool = (value) => value === true || value === 'true' || value === '1';
-const PROPERTY_CANVAS_WIDTH = 960;
-const PROPERTY_CANVAS_HEIGHT = 540;
+const PROPERTY_CANVAS_WIDTH = 1920;
+const PROPERTY_CANVAS_HEIGHT = 1080;
 const TEMPLATE_LAYOUT_WIDTH = 1920;
 const TEMPLATE_LAYOUT_HEIGHT = 1080;
 
@@ -187,7 +187,6 @@ export function buildXml(model) {
         `                        <canvas_width>${PROPERTY_CANVAS_WIDTH}</canvas_width><!-- 画布宽度 -->`,
         `                        <canvas_height>${PROPERTY_CANVAS_HEIGHT}</canvas_height><!-- 画布高度 -->`,
         '                        <transform_origin>center</transform_origin><!-- 变换基准点 -->',
-        `                        <rotation_direction>${rotation < 0 ? 'counterclockwise' : 'clockwise'}</rotation_direction><!-- 旋转方向 -->`,
         `                        <stabilization>${Boolean(beauty.stabilization)}</stabilization><!-- 视频去抖动开关 -->`,
         `                        <one_click_beauty>${Boolean(beauty.oneClickBeauty)}</one_click_beauty><!-- 一键美颜开关 -->`,
         '                    </property>',
