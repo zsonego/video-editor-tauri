@@ -445,6 +445,28 @@ const BEAUTY_PREVIEW_DEBOUNCE_MS = 300;
 const LUT_FILE_BY_ID = new Map(
   lutManifest.luts.map((lut) => [String(lut.id), String(lut.file || '')]),
 );
+const LUT_ID_BY_FILE = new Map(
+  lutManifest.luts.map((lut) => [
+    String(lut.file || '').replaceAll('\\', '/').toLowerCase(),
+    String(lut.id),
+  ]),
+);
+
+function lutOptionIdFromStoredValue(value) {
+  const storedValue = String(value || '').trim();
+  if (!storedValue || storedValue === 'none') return 'none';
+  if (LUT_FILE_BY_ID.has(storedValue)) return storedValue;
+  const normalizedValue = storedValue.replaceAll('\\', '/').toLowerCase();
+  for (const [file, id] of LUT_ID_BY_FILE) {
+    if (
+      file &&
+      (normalizedValue === file || normalizedValue.endsWith(`/${file}`))
+    ) {
+      return id;
+    }
+  }
+  return 'none';
+}
 const VIDEO_SOURCE_TYPES = {
   mp4: 'video/mp4',
   m4v: 'video/mp4',
@@ -1948,7 +1970,7 @@ function parseTemplateAssetProperties(xmlContent, assetId) {
     canvasHeight: EDITOR_CANVAS_HEIGHT,
     transformOrigin: readText('transform_origin', 'center'),
     beauty: {
-      lutStyle: readText('lut_style', 'none'),
+      lutStyle: lutOptionIdFromStoredValue(readText('lut_style', 'none')),
       lutIntensity: Math.min(
         100,
         Math.max(0, readNumber('lut_intensity', 0.5) * 100),
@@ -3080,7 +3102,7 @@ function buildProjectAssetProperties(values = {}) {
     skin_tone: params.skin_tone,
     face_detect: params.face_detect,
     rotation: params.rotation,
-    lut_style: String(values.beauty?.lutStyle || 'none'),
+    lut_style: params.lut_file || 'none',
     lut_intensity: params.lut_intensity,
     positionX: params.positionX,
     positionY: params.positionY,

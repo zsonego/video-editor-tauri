@@ -89,6 +89,7 @@ const LUT_OPTIONS = Object.freeze(
   lutManifest.luts.map((lut) => Object.freeze({ ...lut })),
 );
 const LUT_OPTION_IDS = new Set(LUT_OPTIONS.map((lut) => lut.id));
+const LUT_OPTION_BY_ID = new Map(LUT_OPTIONS.map((lut) => [lut.id, lut]));
 const videoStyleOptions = Object.freeze([
   Object.freeze({ value: 'none', label: '无' }),
   ...LUT_OPTIONS.map((lut) =>
@@ -127,6 +128,25 @@ const AREA_MAX_SCALE = Math.min(
   AREA_CANVAS_WIDTH / AREA_ASPECT_WIDTH,
   AREA_CANVAS_HEIGHT / AREA_ASPECT_HEIGHT,
 );
+
+function lutOptionIdFromStoredValue(value) {
+  const storedValue = String(value || '').trim();
+  if (!storedValue || storedValue === 'none') return 'none';
+  if (LUT_OPTION_IDS.has(storedValue)) return storedValue;
+  const normalizedValue = storedValue.replaceAll('\\', '/').toLowerCase();
+  return (
+    LUT_OPTIONS.find((lut) => {
+      const normalizedFile = String(lut.file || '')
+        .replaceAll('\\', '/')
+        .toLowerCase();
+      return (
+        normalizedFile &&
+        (normalizedValue === normalizedFile ||
+          normalizedValue.endsWith(`/${normalizedFile}`))
+      );
+    })?.id || 'none'
+  );
+}
 const VIDEO_EXTENSIONS = ['mp4', 'mov', 'm4v', 'avi', 'mkv', 'webm'];
 const AUDIO_EXTENSIONS = ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg'];
 const THUMBNAIL_MAX_WIDTH = 640;
@@ -1592,10 +1612,7 @@ function areaImageTransformStyle(area) {
 
 function createAreaBeautySettings(values = {}) {
   const source = values && typeof values === 'object' ? values : {};
-  const lutStyle =
-    source.lutStyle === 'none' || LUT_OPTION_IDS.has(source.lutStyle)
-      ? source.lutStyle
-      : DEFAULT_AREA_BEAUTY_SETTINGS.lutStyle;
+  const lutStyle = lutOptionIdFromStoredValue(source.lutStyle);
   const skinTone = AREA_SKIN_TONE_OPTIONS.some(
     (option) => option.value === source.skinTone,
   )
@@ -2237,14 +2254,39 @@ function validateModel() {
   return '';
 }
 
-function exportXml() {
+async function exportXml() {
   applyGlobalLutToVariableAreas();
   const error = validateModel();
   if (error) {
     showToast(error, 'error');
     return;
   }
-  const xml = buildXml(model);
+  const selectedLutIds = new Set(
+    model.clips.flatMap((clip) =>
+      (clip.areas || [])
+        .map((area) => area.beauty?.lutStyle)
+        .filter((lutStyle) => lutStyle && lutStyle !== 'none'),
+    ),
+  );
+  const lutAbsolutePaths = new Map();
+  try {
+    await Promise.all(
+      Array.from(selectedLutIds, async (lutId) => {
+        const lut = LUT_OPTION_BY_ID.get(lutId);
+        if (!lut?.file) throw new Error(`LUT 配置不存在：${lutId}`);
+        const absolutePath = await invoke('resolve_lut_resource_path', {
+          lutFile: lut.file,
+        });
+        lutAbsolutePaths.set(lutId, absolutePath);
+      }),
+    );
+  } catch (resolveError) {
+    showToast(resolveError?.message || 'LUT 文件路径解析失败。', 'error');
+    return;
+  }
+  const xml = buildXml(model, {
+    resolveLutStyle: (lutStyle) => lutAbsolutePaths.get(lutStyle) || lutStyle,
+  });
   const blob = new Blob([xml], { type: 'application/xml;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');

@@ -2641,6 +2641,19 @@ fn normalize_project_asset_properties(
     Ok(properties)
 }
 
+fn prepare_project_asset_properties(
+    app: &AppHandle,
+    properties: ProjectAssetProperties,
+) -> Result<ProjectAssetProperties, String> {
+    let mut properties = normalize_project_asset_properties(properties)?;
+    if properties.lut_style == "none" {
+        properties.lut_intensity = 0.0;
+    } else {
+        properties.lut_style = resolve_lut_resource_file_path(app, &properties.lut_style)?;
+    }
+    Ok(properties)
+}
+
 fn project_asset_property_xml(properties: &ProjectAssetProperties, indent: &str) -> String {
     let value_indent = format!("{indent}    ");
     let mut values = vec![
@@ -4444,6 +4457,7 @@ fn update_project_asset_offset(
 
 #[tauri::command]
 fn update_project_asset_properties(
+    app: AppHandle,
     project_dir: String,
     asset_id: String,
     properties: ProjectAssetProperties,
@@ -4467,7 +4481,7 @@ fn update_project_asset_properties(
         fs::read_to_string(&template_file_path).map_err(|error| error.to_string())?;
     let project_file_xml =
         fs::read_to_string(&project_file_path).map_err(|error| error.to_string())?;
-    let properties = normalize_project_asset_properties(properties)?;
+    let properties = prepare_project_asset_properties(&app, properties)?;
     let updated_template_xml =
         update_template_asset_properties(&template_xml, asset_id, &properties)?;
     let updated_project_file_xml =
@@ -4480,6 +4494,7 @@ fn update_project_asset_properties(
 
 #[tauri::command]
 fn apply_project_asset_generated_video(
+    app: AppHandle,
     project_dir: String,
     asset_id: String,
     preview_video_path: String,
@@ -4533,7 +4548,7 @@ fn apply_project_asset_generated_video(
     let project_file_xml = update_project_asset_generatepath(&project_file_xml, asset_id, None)
         .unwrap_or(project_file_xml);
     properties.generatepath = Some(generate_path.clone());
-    let properties = normalize_project_asset_properties(properties)?;
+    let properties = prepare_project_asset_properties(&app, properties)?;
     let updated_template_xml =
         update_template_asset_properties(&template_xml, asset_id, &properties)?;
     let updated_project_file_xml =
@@ -4852,6 +4867,49 @@ fn finite_or(value: f64, fallback: f64) -> f64 {
     }
 }
 
+fn resolve_lut_resource_file_path(app: &AppHandle, lut_file: &str) -> Result<String, String> {
+    let relative_path = Path::new(lut_file.trim());
+    if relative_path.as_os_str().is_empty()
+        || relative_path.is_absolute()
+        || relative_path.components().any(|component| {
+            !matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+    {
+        return Err("LUT 文件路径无效".to_string());
+    }
+
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|error| error.to_string())?;
+    let lut_root = fs::canonicalize(resource_dir.join("luts"))
+        .map_err(|error| format!("LUT 资源目录不可用: {error}"))?;
+    let relative_lut_path = relative_path.strip_prefix("luts").unwrap_or(relative_path);
+    let lut_path = fs::canonicalize(lut_root.join(relative_lut_path))
+        .map_err(|error| format!("LUT 文件不存在: {error}"))?;
+    if !lut_path.starts_with(&lut_root) || !lut_path.is_file() {
+        return Err("LUT 文件路径无效".to_string());
+    }
+    let extension = lut_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !matches!(extension.as_str(), "cube" | "3dl" | "dat" | "m3d" | "csp") {
+        return Err("LUT 文件格式不受支持".to_string());
+    }
+
+    Ok(path_to_xml_filepath(lut_path))
+}
+
+#[tauri::command]
+fn resolve_lut_resource_path(app: AppHandle, lut_file: String) -> Result<String, String> {
+    resolve_lut_resource_file_path(&app, &lut_file)
+}
+
 fn prepare_beauty_frame_params(
     app: &AppHandle,
     mut params: ComposerBeautyFrameParams,
@@ -4889,41 +4947,7 @@ fn prepare_beauty_frame_params(
         params.lut_intensity = 0.0;
         return Ok(params);
     };
-
-    let relative_path = Path::new(&lut_file);
-    if relative_path.is_absolute()
-        || relative_path.components().any(|component| {
-            !matches!(
-                component,
-                std::path::Component::Normal(_) | std::path::Component::CurDir
-            )
-        })
-    {
-        return Err("LUT 文件路径无效".to_string());
-    }
-
-    let resource_dir = app
-        .path()
-        .resource_dir()
-        .map_err(|error| error.to_string())?;
-    let lut_root = fs::canonicalize(resource_dir.join("luts"))
-        .map_err(|error| format!("LUT 资源目录不可用: {error}"))?;
-    let relative_lut_path = relative_path.strip_prefix("luts").unwrap_or(relative_path);
-    let lut_path = fs::canonicalize(lut_root.join(relative_lut_path))
-        .map_err(|error| format!("LUT 文件不存在: {error}"))?;
-    if !lut_path.starts_with(&lut_root) || !lut_path.is_file() {
-        return Err("LUT 文件路径无效".to_string());
-    }
-    let extension = lut_path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if !matches!(extension.as_str(), "cube" | "3dl" | "dat" | "m3d" | "csp") {
-        return Err("LUT 文件格式不受支持".to_string());
-    }
-
-    params.lut_file = Some(path_to_xml_filepath(lut_path));
+    params.lut_file = Some(resolve_lut_resource_file_path(app, &lut_file)?);
     Ok(params)
 }
 
@@ -5564,6 +5588,7 @@ pub fn run() {
             reset_project_asset_generated_video,
             apply_project_subtitle,
             compose_project_video,
+            resolve_lut_resource_path,
             preview_composer_beauty_frame,
             preview_composer_beauty_file,
             read_project_cover,
@@ -5630,7 +5655,7 @@ mod tests {
             skin_tone: -0.4,
             face_detect: 1,
             rotation: -450.0,
-            lut_style: "lut-009".to_string(),
+            lut_style: "/resources/luts/自然清新质感.cube".to_string(),
             lut_intensity: 0.8,
             position_x: 480.0,
             position_y: 270.0,
@@ -5653,7 +5678,12 @@ mod tests {
         assert_eq!(updated.matches("<property>").count(), 2);
         assert_eq!(updated_again, updated);
         assert_eq!(updated.matches("<saturation>122.0</saturation>").count(), 2);
-        assert_eq!(updated.matches("<lut_style>lut-009</lut_style>").count(), 2);
+        assert_eq!(
+            updated
+                .matches("<lut_style>/resources/luts/自然清新质感.cube</lut_style>")
+                .count(),
+            2
+        );
         assert_eq!(updated.matches("<rotation>-450.0</rotation>").count(), 2);
         assert!(!updated.contains("<rotation_direction>"));
         assert_eq!(updated.matches("<positionX>480.0</positionX>").count(), 2);
@@ -5683,7 +5713,7 @@ mod tests {
             skin_tone: -0.4,
             face_detect: 1,
             rotation: 15.0,
-            lut_style: "lut-009".to_string(),
+            lut_style: "/resources/luts/自然清新质感.cube".to_string(),
             lut_intensity: 0.8,
             position_x: 480.0,
             position_y: 270.0,

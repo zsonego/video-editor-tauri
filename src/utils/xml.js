@@ -54,7 +54,11 @@ export function assetPath(filename) {
   return filename ? `template/assets/${filename}` : '';
 }
 
-export function buildXml(model) {
+export function buildXml(model, options = {}) {
+  const resolveLutStyle =
+    typeof options.resolveLutStyle === 'function'
+      ? options.resolveLutStyle
+      : (value) => value;
   const lines = [
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<!DOCTYPE xmeml>',
@@ -159,9 +163,15 @@ export function buildXml(model) {
           : beauty.skinTone === 'warm'
             ? skinIntensity
             : 0;
-      const lutStyle = beauty.lutStyle || 'none';
+      const selectedLutStyle = beauty.lutStyle || 'none';
+      const lutStyle =
+        selectedLutStyle === 'none'
+          ? 'none'
+          : resolveLutStyle(selectedLutStyle);
       const lutIntensity =
-        lutStyle === 'none' ? 0 : percent(beauty.lutIntensity, 100) / 100;
+        selectedLutStyle === 'none'
+          ? 0
+          : percent(beauty.lutIntensity, 100) / 100;
       const rotation = n(area.rotate);
       lines.push(
         `                <area id="${attr(area.id)}" asset-id="${attr(area.assetId)}" index="${attr(Math.max(0, Math.round(n(area.index, 1))))}" opacity="${attr(opacity(area.opacity))}">`,

@@ -207,7 +207,7 @@ Tauri 层对缺失参数使用以下默认值：
         <skin_tone>0.0</skin_tone>
         <face_detect>1</face_detect>
         <rotation>0.0</rotation>
-        <lut_style>lut-009</lut_style>
+        <lut_style>/应用资源目录/luts/自然清新质感.cube</lut_style>
         <lut_intensity>0.0</lut_intensity>
         <positionX>960.0</positionX>
         <positionY>540.0</positionY>
@@ -221,4 +221,4 @@ Tauri 层对缺失参数使用以下默认值：
 </area>
 ```
 
-`lut_style` 保存 `src-tauri/resources/luts/luts.json` 中对应选项的 `id`，例如 `lut-009`；未选择 LUT 时保存 `none`。应用重新打开原始模板或工程草稿时根据该 ID 恢复下拉框，再在运行时解析当前安装目录中的 LUT 绝对路径。`lut_style` 只用于模板持久化，不传给 C++ 美颜接口；C++ 仍读取 JSON 中的 `lut_file` 和 `lut_intensity`。
+`lut_style` 保存当前应用资源目录中 LUT 文件的绝对路径，与图片、视频预览 JSON 的 `lut_file` 完全一致；未选择 LUT 时保存 `none`。页面重新打开模板时根据路径中的 LUT 文件名恢复下拉框。C++ 读取模板时可直接使用 `lut_style`，预览接口仍读取 JSON 中的 `lut_file` 和 `lut_intensity`。
