@@ -1078,16 +1078,27 @@ impl ComposerRuntime {
                 library_path.display()
             ));
             #[cfg(target_os = "macos")]
-            let beauty_resource_path = fs::canonicalize(
-                library_path
+            let beauty_resource_path = {
+                let library_resource_path = library_path
                     .parent()
-                    .ok_or_else(|| "无法确定 Composer 动态库目录".to_string())?
-                    .join("gpupixel.framework")
-                    .join("Resources"),
-            )
-            .map_err(|error| format!("GPU Pixel 资源目录不可用: {error}"))?
-            .to_string_lossy()
-            .to_string();
+                    .map(|directory| directory.join("share").join("composer"));
+                let bundled_resource_path = std::env::current_exe().ok().and_then(|exe| {
+                    exe.parent()
+                        .and_then(|macos_dir| macos_dir.parent())
+                        .map(|contents_dir| {
+                            contents_dir
+                                .join("Resources")
+                                .join("share")
+                                .join("composer")
+                        })
+                });
+                [library_resource_path, bundled_resource_path]
+                    .into_iter()
+                    .flatten()
+                    .find_map(|path| fs::canonicalize(path).ok())
+                    .map(path_to_xml_filepath)
+                    .ok_or_else(|| "Composer 美颜资源目录 share/composer 不可用".to_string())?
+            };
             #[cfg(target_os = "windows")]
             let beauty_resource_path = String::new();
             app_log_info(format!(

@@ -43,6 +43,7 @@ import dingAudio from '../assets/ding.mp3';
 import hotImage from '../assets/hot.png';
 import logoImage from '../assets/logo.png';
 import AppIcon from '../components/AppIcon.vue';
+import lutManifest from '../../src-tauri/resources/luts/luts.json';
 
 const VideoTransformer = defineAsyncComponent(
   () => import('../components/VideoTransformer.vue'),
@@ -51,6 +52,8 @@ const VideoTransformer = defineAsyncComponent(
 // 页面对外事件与远程/本地资源配置。
 const emit = defineEmits(['logout']);
 const router = useRouter();
+const CREATE_TEMPLATE_ENTRY_VISIBLE = false;
+const GLOBAL_TIMELINE_VISIBLE = false;
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
@@ -397,6 +400,12 @@ const importOverwriteConfirmVisible = ref(false);
 const pendingImportSegment = ref(null);
 const importRepeatConfirmVisible = ref(false);
 const pendingRepeatImport = ref(null);
+const importProcessingVisible = ref(false);
+const importProcessingProgress = ref(0);
+const importProcessingStatus = ref('正在准备处理视频...');
+const importProcessingFileName = ref('');
+const importProcessingCurrent = ref(0);
+const importProcessingTotal = ref(0);
 const collapsedSegmentCollectionIds = ref(new Set());
 let exportInterval = null;
 let exportFinishedAudio = null;
@@ -433,6 +442,9 @@ const canceledTemplateDownloadIds = new Set();
 const VIDEO_FRAME_REVEAL_TIME = 0.001;
 const VIDEO_FRAME_REVEAL_TIMEOUT = 2000;
 const BEAUTY_PREVIEW_DEBOUNCE_MS = 300;
+const LUT_FILE_BY_ID = new Map(
+  lutManifest.luts.map((lut) => [String(lut.id), String(lut.file || '')]),
+);
 const VIDEO_SOURCE_TYPES = {
   mp4: 'video/mp4',
   m4v: 'video/mp4',
@@ -2258,6 +2270,11 @@ function clearProjectEditingState() {
   importOverwriteConfirmVisible.value = false;
   pendingRepeatImport.value = null;
   importRepeatConfirmVisible.value = false;
+  importProcessingVisible.value = false;
+  importProcessingProgress.value = 0;
+  importProcessingFileName.value = '';
+  importProcessingCurrent.value = 0;
+  importProcessingTotal.value = 0;
   collapsedSegmentCollectionIds.value = new Set();
   resetMainPlayer();
 }
@@ -2299,6 +2316,131 @@ function getVideoMetadata(source) {
   });
 }
 
+function beginImportProcessing(total) {
+  importProcessingTotal.value = Math.max(1, Number(total) || 1);
+  importProcessingCurrent.value = 1;
+  importProcessingProgress.value = 0;
+  importProcessingFileName.value = '';
+  importProcessingStatus.value = '正在准备处理视频...';
+  importProcessingVisible.value = true;
+}
+
+function updateImportProcessing(itemIndex, fileName, phase, status) {
+  const total = Math.max(1, importProcessingTotal.value);
+  const normalizedIndex = Math.min(
+    total - 1,
+    Math.max(0, Number(itemIndex) || 0),
+  );
+  const normalizedPhase = Math.min(1, Math.max(0, Number(phase) || 0));
+  importProcessingCurrent.value = normalizedIndex + 1;
+  importProcessingFileName.value = fileName || '';
+  importProcessingStatus.value = status || '正在处理视频...';
+  importProcessingProgress.value = Math.min(
+    100,
+    Math.round(((normalizedIndex + normalizedPhase) / total) * 100),
+  );
+}
+
+function finishImportProcessing() {
+  importProcessingProgress.value = 100;
+  importProcessingStatus.value = '视频处理完成';
+  importProcessingVisible.value = false;
+}
+
+function failImportProcessing() {
+  importProcessingVisible.value = false;
+}
+
+function getCurrentAssetTransformValues(assetId, previousVideo = null) {
+  const normalizedAssetId = String(assetId || '').trim();
+  const liveValues =
+    normalizedAssetId && normalizedAssetId === selectedVideoAssetId.value
+      ? videoTransformerRef.value?.getTransform?.()
+      : null;
+  const cachedValues = previousVideo?.id
+    ? videoTransformStateCache[previousVideo.id]
+    : null;
+  const templateValues = parseTemplateAssetProperties(
+    activeTemplateLocalInfo.value?.xmlContent,
+    normalizedAssetId,
+  );
+  const values = liveValues || cachedValues || templateValues || {
+    x: 480,
+    y: 270,
+    angle: 0,
+    scale: 1,
+    canvasWidth: 960,
+    canvasHeight: 540,
+    transformOrigin: 'center',
+    rotationDirection: 'clockwise',
+    beauty: {
+      lutStyle: 'none',
+      lutIntensity: 50,
+      skinTone: 'off',
+      skinIntensity: 60,
+      smoothing: 0,
+      whitening: 0,
+      saturation: 100,
+      stabilization: false,
+      oneClickBeauty: false,
+    },
+  };
+  const beauty = { ...(values.beauty || {}) };
+  const lutStyle = String(beauty.lutStyle || 'none');
+  beauty.lutFile = lutStyle === 'none' ? '' : LUT_FILE_BY_ID.get(lutStyle) || '';
+
+  return {
+    ...values,
+    beauty,
+  };
+}
+
+async function generateAndApplyImportedVideo(
+  importedVideo,
+  transformValues,
+  onProgress,
+) {
+  const projectDir = activeProjectDir.value;
+  const assetId = String(importedVideo?.assetId || '').trim();
+  if (!projectDir || !assetId || !importedVideo?.localPath) {
+    throw new Error('导入视频缺少工程或素材关联信息');
+  }
+
+  const startTimeMs = Math.max(
+    0,
+    Math.round(
+      (Number(videoTimelineStateCache[importedVideo.id]?.startTime) || 0) *
+        1000,
+    ),
+  );
+  const durationSeconds = getTimelineSelectionDuration(
+    importedVideo,
+    Number(importedVideo.durationSeconds) || 0,
+  );
+  const durationMs = Math.max(0, Math.round(durationSeconds * 1000));
+
+  onProgress?.(0.5, '正在生成预览视频...');
+  const previewResult = await invoke('preview_composer_beauty_file', {
+    inputVideoPath: importedVideo.localPath,
+    startTimeMs,
+    durationMs,
+    params: buildBeautyFrameParams(transformValues),
+  });
+
+  onProgress?.(0.88, '正在应用预览视频...');
+  const appliedResult = await invoke('apply_project_asset_generated_video', {
+    projectDir,
+    assetId,
+    previewVideoPath: previewResult.outputVideoPath,
+    properties: buildProjectAssetProperties(transformValues),
+  });
+  if (projectDir === activeProjectDir.value) {
+    applyActiveProjectTemplateXml(appliedResult.projectXml);
+  }
+  importedVideo.generatePath = appliedResult.generatePath;
+  onProgress?.(1, '当前视频处理完成');
+}
+
 async function pickVideoPaths(multiple) {
   const selected = await openDialog({
     multiple,
@@ -2318,11 +2460,14 @@ async function createImportedVideoFromPath(
   filePath,
   keySuffix = '',
   assetId = '',
+  options = {},
 ) {
   let localPath = filePath;
   let projectFilepath = '';
+  const onProgress = options.onProgress;
 
   if (activeProjectDir.value && assetId) {
+    onProgress?.(0.05, '正在复制视频到工程...');
     const savedAsset = await invoke('save_project_asset', {
       projectDir: activeProjectDir.value,
       assetId,
@@ -2334,6 +2479,7 @@ async function createImportedVideoFromPath(
     applyActiveProjectTemplateXml(savedAsset.projectXml);
   }
 
+  onProgress?.(0.25, '正在读取视频信息...');
   const source = convertFileSrc(localPath);
   const metadata = await getVideoMetadata(source);
   const suffix = keySuffix || Math.random().toString(36).slice(2);
@@ -2349,6 +2495,12 @@ async function createImportedVideoFromPath(
   };
 
   await initializeVideoDefaultOffset(importedVideo);
+  onProgress?.(0.42, '正在读取素材参数...');
+  await generateAndApplyImportedVideo(
+    importedVideo,
+    options.transformValues || getCurrentAssetTransformValues(assetId),
+    onProgress,
+  );
   return importedVideo;
 }
 
@@ -2491,6 +2643,9 @@ async function importPathsIntoSlots(slots, filePaths) {
   }));
   if (assignments.length === 0) return false;
 
+  await flushPendingAssetPropertyUpdates();
+  beginImportProcessing(assignments.length);
+
   const assignmentsBySegment = new Map();
   assignments.forEach((assignment) => {
     const segmentAssignments =
@@ -2501,6 +2656,7 @@ async function importPathsIntoSlots(slots, filePaths) {
 
   let firstImportedVideo = null;
   let firstImportedSegment = null;
+  let processingIndex = 0;
 
   for (const segmentAssignments of assignmentsBySegment.values()) {
     const segment = segmentAssignments[0].segment;
@@ -2512,19 +2668,42 @@ async function importPathsIntoSlots(slots, filePaths) {
     try {
       for (const { filePath, slotIndex } of segmentAssignments) {
         const assetId = segment.defaultAssets?.[slotIndex]?.id || '';
+        const previousVideo = videos[slotIndex];
+        const transformValues = getCurrentAssetTransformValues(
+          assetId,
+          previousVideo,
+        );
+        const processingFileName = getFileNameFromPath(filePath);
+        updateImportProcessing(
+          processingIndex,
+          processingFileName,
+          0,
+          '正在准备导入视频...',
+        );
         const importedVideo = await createImportedVideoFromPath(
           filePath,
           `${segment.id}-${slotIndex}`,
           assetId,
+          {
+            transformValues,
+            onProgress: (phase, status) =>
+              updateImportProcessing(
+                processingIndex,
+                processingFileName,
+                phase,
+                status,
+              ),
+          },
         );
-        const previousVideo = videos[slotIndex];
         if (previousVideo) replacedVideos.push(previousVideo);
         videos[slotIndex] = importedVideo;
         importedVideos.push(importedVideo);
         firstImportedVideo ||= importedVideo;
         firstImportedSegment ||= segment;
+        processingIndex += 1;
       }
     } catch (error) {
+      failImportProcessing();
       systemMessage.error(error?.message || '素材导入失败');
       return false;
     }
@@ -2552,6 +2731,7 @@ async function importPathsIntoSlots(slots, filePaths) {
   if (firstImportedVideo && firstImportedSegment) {
     selectVideoForTimeline(firstImportedVideo, firstImportedSegment.name);
   }
+  finishImportProcessing();
   return true;
 }
 
@@ -2659,12 +2839,31 @@ async function openReplaceFilePicker(segment, videoIndex) {
   let replacementVideo;
 
   try {
+    await flushPendingAssetPropertyUpdates();
+    const previousVideo = videos[videoIndex];
+    const transformValues = getCurrentAssetTransformValues(
+      assetId,
+      previousVideo,
+    );
+    const processingFileName = getFileNameFromPath(filePath);
+    beginImportProcessing(1);
     replacementVideo = await createImportedVideoFromPath(
       filePath,
       `${segment.id}-replace-${videoIndex}`,
       assetId,
+      {
+        transformValues,
+        onProgress: (phase, status) =>
+          updateImportProcessing(
+            0,
+            processingFileName,
+            phase,
+            status,
+          ),
+      },
     );
   } catch (error) {
+    failImportProcessing();
     systemMessage.error(error?.message || '素材替换失败');
     return;
   }
@@ -2685,6 +2884,7 @@ async function openReplaceFilePicker(segment, videoIndex) {
   refreshInvalidDurationVideoState();
 
   selectVideoForTimeline(replacementVideo, segment.name);
+  finishImportProcessing();
 }
 
 // 选择素材后恢复其时间线状态，播放指针始终从 0 秒开始。
@@ -5863,6 +6063,7 @@ onBeforeUnmount(() => {
         </div>
         <div class="flex-1"></div>
         <button
+          v-show="CREATE_TEMPLATE_ENTRY_VISIBLE"
           class="h-9 w-24 text-on-surface-variant hover:text-electric-blue shrink-0 flex items-center justify-center gap-1.5 bg-surface-container-low/50 shadow-sm rounded-lg transition-all active:scale-95 hover:bg-surface-container-high border border-outline-variant/20"
           type="button"
           @click="showCreateTemplate"
@@ -7731,6 +7932,70 @@ onBeforeUnmount(() => {
           </div>
 
           <div
+            class="fixed inset-0 z-[430] flex items-center justify-center"
+            :class="{ hidden: !importProcessingVisible }"
+          >
+            <div class="absolute inset-0 bg-black/65 backdrop-blur-2xl"></div>
+            <div
+              class="relative w-full max-w-sm bg-surface-container-highest rounded-2xl p-8 border border-white/10 shadow-2xl modal-pop-in"
+            >
+              <div class="flex flex-col items-center text-center space-y-6">
+                <div
+                  class="w-16 h-16 bg-electric-blue/10 rounded-full flex items-center justify-center"
+                >
+                  <AppIcon
+                    name="movie_edit"
+                    :size="30"
+                    class="text-electric-blue"
+                  />
+                </div>
+                <div
+                  class="circular-progress"
+                  :style="{ '--progress': `${importProcessingProgress}%` }"
+                >
+                  <div
+                    class="absolute inset-0 flex items-center justify-center"
+                  >
+                    <span class="text-2xl font-black text-electric-blue">
+                      {{ Math.round(importProcessingProgress) }}%
+                    </span>
+                  </div>
+                </div>
+                <div class="w-full min-w-0">
+                  <h3 class="text-xl font-black text-white mb-2">
+                    正在处理导入视频
+                  </h3>
+                  <p class="text-on-surface-variant text-sm">
+                    {{ importProcessingStatus }}
+                  </p>
+                  <p
+                    v-if="importProcessingFileName"
+                    class="mt-2 truncate text-xs text-on-surface-variant/70"
+                    :title="importProcessingFileName"
+                  >
+                    {{ importProcessingFileName }}
+                  </p>
+                  <p class="mt-3 text-xs tabular-nums text-electric-blue/90">
+                    第 {{ importProcessingCurrent }} 个，共
+                    {{ importProcessingTotal }} 个
+                  </p>
+                </div>
+                <div
+                  class="h-1.5 w-full overflow-hidden rounded-full bg-white/5"
+                >
+                  <div
+                    class="h-full bg-electric-blue transition-all duration-300 shadow-[0_0_12px_rgba(74,142,255,0.8)]"
+                    :style="{ width: `${importProcessingProgress}%` }"
+                  ></div>
+                </div>
+                <p class="text-[11px] leading-5 text-on-surface-variant/60">
+                  处理完成前请勿关闭应用
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div
             class="fixed inset-0 z-[420] flex items-center justify-center"
             :class="{ hidden: !templateDownloadVisible }"
           >
@@ -7956,7 +8221,11 @@ onBeforeUnmount(() => {
           </div>
         </section>
       </div>
-      <div id="global-timeline-slot" class="global-timeline-slot"></div>
+      <div
+        v-show="GLOBAL_TIMELINE_VISIBLE"
+        id="global-timeline-slot"
+        class="global-timeline-slot"
+      ></div>
     </main>
 
     <div
