@@ -69,8 +69,8 @@ const LUT_OPTIONS = Object.freeze(
 const LUT_OPTION_IDS = new Set(LUT_OPTIONS.map((lut) => lut.id));
 const SKIN_TONE_OPTIONS = Object.freeze([
   { value: 'off', label: '不设置', color: 'transparent' },
-  { value: 'natural', label: '白皙', color: '#fddcbe' },
-  { value: 'warm', label: '原生', color: '#d5a273' },
+  { value: 'natural', label: '白皙', color: '#fdebe2' },
+  { value: 'warm', label: '原生', color: '#ffdcba' },
 ]);
 
 let fabricCanvas = null;

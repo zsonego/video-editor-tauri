@@ -117,8 +117,8 @@ const DEFAULT_AREA_BEAUTY_SETTINGS = Object.freeze({
 });
 const AREA_SKIN_TONE_OPTIONS = Object.freeze([
   { value: 'off', label: '不设置', color: 'transparent' },
-  { value: 'natural', label: '白皙', color: '#fddcbe' },
-  { value: 'warm', label: '原生', color: '#d5a273' },
+  { value: 'natural', label: '白皙', color: '#fdebe2' },
+  { value: 'warm', label: '原生', color: '#ffdcba' },
 ]);
 const AREA_CANVAS_WIDTH = 1920;
 const AREA_CANVAS_HEIGHT = 1080;
