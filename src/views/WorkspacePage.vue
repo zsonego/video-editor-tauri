@@ -531,6 +531,51 @@ const videoTransformStateCache = reactive({});
 const invalidDurationVideoKeys = ref(new Set());
 const importVideoItemRefs = new Map();
 
+function createDefaultVideoTransformValues() {
+  return {
+    x: 480,
+    y: 270,
+    angle: 0,
+    scale: 1,
+    canvasWidth: 960,
+    canvasHeight: 540,
+    transformOrigin: 'center',
+    beauty: {
+      lutStyle: 'none',
+      lutIntensity: 50,
+      skinTone: 'off',
+      skinIntensity: 60,
+      smoothing: 0,
+      whitening: 0,
+      saturation: 100,
+      stabilization: false,
+      oneClickBeauty: false,
+    },
+  };
+}
+
+function normalizeVideoTransformValues(values = null) {
+  const defaults = createDefaultVideoTransformValues();
+  const source = values && typeof values === 'object' ? values : {};
+  const sourceBeauty =
+    source.beauty && typeof source.beauty === 'object' ? source.beauty : {};
+  const beauty = {
+    ...defaults.beauty,
+    ...sourceBeauty,
+  };
+  const lutStyle = String(beauty.lutStyle || 'none');
+  beauty.lutFile =
+    lutStyle === 'none'
+      ? ''
+      : String(sourceBeauty.lutFile || LUT_FILE_BY_ID.get(lutStyle) || '');
+
+  return {
+    ...defaults,
+    ...source,
+    beauty,
+  };
+}
+
 // 页面展示数据与交互权限的派生状态。
 const sidebarContextLabel = computed(() => {
   if (currentViewState.value === 'finished') return '成片素材';
@@ -909,12 +954,13 @@ const audioTimelinePlayheadPercent = computed(
 );
 const selectedClipTitle = computed(() => `${selectedVideoName.value}`);
 const selectedVideoTransform = computed(
-  () =>
+  () => normalizeVideoTransformValues(
     videoTransformStateCache[selectedVideoKey.value] ||
-    parseTemplateAssetProperties(
-      activeTemplateLocalInfo.value?.xmlContent,
-      selectedVideoAssetId.value,
-    ),
+      parseTemplateAssetProperties(
+        activeTemplateLocalInfo.value?.xmlContent,
+        selectedVideoAssetId.value,
+      ),
+  ),
 );
 const selectedVideoGeneratePath = computed(() =>
   parseTemplateAssetGeneratePath(
@@ -1638,8 +1684,9 @@ async function startEditing() {
   await initializeDefaultTemplateAssets();
   try {
     await initializeProjectAssetOffsets();
+    await initializeProjectAssetProperties();
   } catch (error) {
-    systemMessage.error(error?.message || '工程素材位置初始化失败');
+    systemMessage.error(error?.message || '工程素材属性初始化失败');
     return false;
   }
   currentViewState.value = 'import';
@@ -2394,26 +2441,9 @@ function getCurrentAssetTransformValues(assetId, previousVideo = null) {
     activeTemplateLocalInfo.value?.xmlContent,
     normalizedAssetId,
   );
-  const values = liveValues || cachedValues || templateValues || {
-    x: 480,
-    y: 270,
-    angle: 0,
-    scale: 1,
-    canvasWidth: 960,
-    canvasHeight: 540,
-    transformOrigin: 'center',
-    beauty: {
-      lutStyle: 'none',
-      lutIntensity: 50,
-      skinTone: 'off',
-      skinIntensity: 60,
-      smoothing: 0,
-      whitening: 0,
-      saturation: 100,
-      stabilization: false,
-      oneClickBeauty: false,
-    },
-  };
+  const values = normalizeVideoTransformValues(
+    liveValues || cachedValues || templateValues,
+  );
   const beauty = { ...(values.beauty || {}) };
   const lutStyle = String(beauty.lutStyle || 'none');
   beauty.lutFile = lutStyle === 'none' ? '' : LUT_FILE_BY_ID.get(lutStyle) || '';
@@ -3080,7 +3110,7 @@ function buildBeautyFrameParams(values = {}) {
     skin_tone: skinTone,
     face_detect: 1,
     rotation,
-    lut_file: lutFile || null,
+    lut_file: lutFile,
     lut_intensity: lutFile ? clampBeautyUnit(beauty.lutIntensity) : 0,
     positionX: (Number(values.x) || 0) * positionScaleX,
     positionY: (Number(values.y) || 0) * positionScaleY,
@@ -3094,7 +3124,9 @@ function buildBeautyFrameParams(values = {}) {
 }
 
 function buildProjectAssetProperties(values = {}) {
-  const params = buildBeautyFrameParams(values);
+  const normalizedValues = normalizeVideoTransformValues(values);
+  const beauty = normalizedValues.beauty;
+  const params = buildBeautyFrameParams(normalizedValues);
   return {
     whiteness: params.whiteness,
     smoothing: params.smoothing,
@@ -3103,7 +3135,7 @@ function buildProjectAssetProperties(values = {}) {
     face_detect: params.face_detect,
     rotation: params.rotation,
     lut_style: params.lut_file || 'none',
-    lut_intensity: params.lut_intensity,
+    lut_intensity: clampBeautyUnit(beauty.lutIntensity),
     positionX: params.positionX,
     positionY: params.positionY,
     scale: params.scale,
@@ -3231,6 +3263,15 @@ async function handleBeautyPreviewRequest(values) {
     return;
   }
 
+  const normalizedValues = normalizeVideoTransformValues(values);
+  if (selectedVideoAssetId.value && activeProjectDir.value) {
+    scheduleProjectAssetPropertyUpdate(
+      selectedVideoAssetId.value,
+      normalizedValues,
+    );
+    await flushPendingAssetPropertyUpdates();
+  }
+
   invalidateBeautyPreview();
   const requestGeneration = beautyPreviewGeneration;
   const requestVideoKey = selectedVideoKey.value;
@@ -3250,10 +3291,7 @@ async function handleBeautyPreviewRequest(values) {
     videoPath: requestVideoPath,
     startTimeMs,
     durationMs,
-    values: {
-      ...values,
-      beauty: { ...(values?.beauty || {}) },
-    },
+    values: normalizedValues,
   };
 
   beautyVideoPreviewLoading.value = true;
@@ -3644,6 +3682,40 @@ async function initializeProjectAssetOffsets() {
 
       initializedAssetIds.add(assetId);
       await initializeVideoDefaultOffset(video);
+    }
+  }
+}
+
+// 工程首次进入时为每个素材写入完整属性，避免未操作属性面板时 XML 缺少 property。
+async function initializeProjectAssetProperties() {
+  const initializedAssetIds = new Set();
+
+  for (const segment of importSegments.value) {
+    for (const video of segment.videos) {
+      const assetId = String(video.assetId || '').trim();
+      if (!assetId || initializedAssetIds.has(assetId)) continue;
+
+      initializedAssetIds.add(assetId);
+      const currentValues = normalizeVideoTransformValues(
+        parseTemplateAssetProperties(
+          activeTemplateLocalInfo.value?.xmlContent,
+          assetId,
+        ),
+      );
+      const generatepath = parseTemplateAssetGeneratePath(
+        activeTemplateLocalInfo.value?.xmlContent,
+        assetId,
+      );
+      const projectXml = await invoke('update_project_asset_properties', {
+        projectDir: activeProjectDir.value,
+        assetId,
+        properties: {
+          ...buildProjectAssetProperties(currentValues),
+          ...(generatepath ? { generatepath } : {}),
+        },
+      });
+      applyActiveProjectTemplateXml(projectXml);
+      videoTransformStateCache[video.id] = currentValues;
     }
   }
 }
@@ -4130,6 +4202,7 @@ async function openDraftProject(projectId) {
 
     await initializeDefaultTemplateAssets();
     restoreProjectVideoOffsets(projectFileXml);
+    await initializeProjectAssetProperties();
 
     draftLibraryVisible.value = false;
     resetDraftBatchDelete();

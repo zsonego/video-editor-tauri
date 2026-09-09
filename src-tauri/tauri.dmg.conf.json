@@ -10,7 +10,8 @@
     },
     "macOS": {
       "frameworks": [
-        "libs/macos-bundle/libcomposer.dylib"
+        "libs/macos-bundle/libcomposer.dylib",
+        "libs/macos-bundle/libonnxruntime.1.29.0.dylib"
       ],
       "signingIdentity": "Developer ID Application: Loogear Co., Ltd. (PMBZKYYRRP)",
       "hardenedRuntime": true

@@ -718,8 +718,7 @@ struct ComposerBeautyFrameParams {
     skin_tone: f64,
     face_detect: i32,
     rotation: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    lut_file: Option<String>,
+    lut_file: String,
     lut_intensity: f64,
     #[serde(rename = "positionX")]
     position_x: f64,
@@ -2646,9 +2645,7 @@ fn prepare_project_asset_properties(
     properties: ProjectAssetProperties,
 ) -> Result<ProjectAssetProperties, String> {
     let mut properties = normalize_project_asset_properties(properties)?;
-    if properties.lut_style == "none" {
-        properties.lut_intensity = 0.0;
-    } else {
+    if properties.lut_style != "none" {
         properties.lut_style = resolve_lut_resource_file_path(app, &properties.lut_style)?;
     }
     Ok(properties)
@@ -4938,16 +4935,13 @@ fn prepare_beauty_frame_params(
         "" | "center" => "center".to_string(),
         _ => return Err("当前仅支持以 center 作为视频变换原点".to_string()),
     };
-    let lut_file = params
-        .lut_file
-        .take()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    let Some(lut_file) = lut_file else {
+    let lut_file = params.lut_file.trim().to_string();
+    if lut_file.is_empty() {
+        params.lut_file.clear();
         params.lut_intensity = 0.0;
         return Ok(params);
-    };
-    params.lut_file = Some(resolve_lut_resource_file_path(app, &lut_file)?);
+    }
+    params.lut_file = resolve_lut_resource_file_path(app, &lut_file)?;
     Ok(params)
 }
 
@@ -5628,6 +5622,7 @@ mod tests {
         assert_eq!(value["canvas_width"], 1920);
         assert_eq!(value["canvas_height"], 1080);
         assert_eq!(value["transform_origin"], "center");
+        assert_eq!(value["lut_file"], "");
         assert!(value.get("rotation_direction").is_none());
     }
 

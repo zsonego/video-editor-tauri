@@ -8,7 +8,8 @@
     },
     "macOS": {
       "frameworks": [
-        "libs/macos-bundle/libcomposer.dylib"
+        "libs/macos-bundle/libcomposer.dylib",
+        "libs/macos-bundle/libonnxruntime.1.29.0.dylib"
       ],
       "hardenedRuntime": true
     }

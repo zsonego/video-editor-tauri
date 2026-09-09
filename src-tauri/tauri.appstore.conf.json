@@ -11,7 +11,8 @@
     },
     "macOS": {
       "frameworks": [
-        "libs/macos-bundle/libcomposer.dylib"
+        "libs/macos-bundle/libcomposer.dylib",
+        "libs/macos-bundle/libonnxruntime.1.29.0.dylib"
       ],
       "minimumSystemVersion": "12.0",
       "signingIdentity": "Apple Distribution: Loogear Co., Ltd. (PMBZKYYRRP)",
