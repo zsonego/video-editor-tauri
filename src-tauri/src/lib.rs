@@ -86,6 +86,30 @@ unsafe extern "C" {
 
 static DOWNLOAD_CANCEL_FLAGS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
 
+const TEMPLATE_DOWNLOAD_EVENT_NAME: &str = "template-download-progress";
+const WINDOWS_RUNTIME_DOWNLOAD_EVENT_NAME: &str = "windows-runtime-download-progress";
+
+#[cfg(target_os = "windows")]
+const WINDOWS_RUNTIME_REQUIRED_DLLS: &[&str] = &[
+    "cublas64_12.dll",
+    "cublasLt64_12.dll",
+    "cudart64_12.dll",
+    "cudnn64_9.dll",
+    "cudnn_adv64_9.dll",
+    "cudnn_cnn64_9.dll",
+    "cudnn_engines_precompiled64_9.dll",
+    "cudnn_engines_runtime_compiled64_9.dll",
+    "cudnn_graph64_9.dll",
+    "cudnn_heuristic64_9.dll",
+    "cudnn_ops64_9.dll",
+    "cufft64_11.dll",
+    "cufftw64_11.dll",
+    "nvblas64_12.dll",
+    "onnxruntime.dll",
+    "onnxruntime_providers_cuda.dll",
+    "onnxruntime_providers_shared.dll",
+];
+
 const PR_BRIDGE_PORT: u16 = 32145;
 const PR_BRIDGE_PROTOCOL_VERSION: u8 = 1;
 const PR_BRIDGE_MAX_REQUEST_BYTES: usize = 64 * 1024;
@@ -696,6 +720,13 @@ struct TemplateDownloadProgress {
     resumed_bytes: u64,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WindowsRuntimePreparationResult {
+    ready: bool,
+    downloaded: bool,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ComposerExportProgress {
@@ -991,6 +1022,31 @@ fn emit_transfer_progress(
     total_bytes: Option<u64>,
     resumed_bytes: u64,
 ) {
+    emit_transfer_progress_for_event(
+        app,
+        TEMPLATE_DOWNLOAD_EVENT_NAME,
+        download_id,
+        progress,
+        status,
+        phase,
+        downloaded_bytes,
+        total_bytes,
+        resumed_bytes,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_transfer_progress_for_event(
+    app: &AppHandle,
+    event_name: &str,
+    download_id: &str,
+    progress: u8,
+    status: &str,
+    phase: &str,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    resumed_bytes: u64,
+) {
     let payload = TemplateDownloadProgress {
         download_id: download_id.to_string(),
         progress: progress.min(100),
@@ -1000,7 +1056,7 @@ fn emit_transfer_progress(
         total_bytes,
         resumed_bytes,
     };
-    let _ = app.emit("template-download-progress", payload);
+    let _ = app.emit(event_name, payload);
 }
 
 fn emit_composer_progress(app: &AppHandle, export_id: &str, progress: u8, status: &str) {
@@ -1029,6 +1085,18 @@ fn composer_error_message(code: i32) -> String {
 }
 
 impl ComposerRuntime {
+    fn is_available(&self) -> bool {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            self.init_error.is_none() && self.initialized
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            false
+        }
+    }
+
     fn initialize() -> Self {
         match Self::try_initialize() {
             Ok(runtime) => runtime,
@@ -3730,6 +3798,8 @@ fn validate_partial_download_version(
 #[allow(clippy::too_many_arguments)]
 fn download_resumable_to_file(
     app: &AppHandle,
+    progress_event_name: &str,
+    progress_phase: &str,
     download_id: &str,
     url: &str,
     output_path: &Path,
@@ -3770,12 +3840,13 @@ fn download_resumable_to_file(
         } else {
             status
         };
-        emit_transfer_progress(
+        emit_transfer_progress_for_event(
             app,
+            progress_event_name,
             download_id,
             start_progress,
             download_status,
-            "assets",
+            progress_phase,
             resume_offset,
             None,
             resume_offset,
@@ -3815,12 +3886,13 @@ fn download_resumable_to_file(
             if resume_offset > 0 && total == Some(resume_offset) {
                 remove_file_if_exists(output_path)?;
                 fs::rename(partial_path, output_path).map_err(|error| error.to_string())?;
-                emit_transfer_progress(
+                emit_transfer_progress_for_event(
                     app,
+                    progress_event_name,
                     download_id,
                     end_progress,
                     download_status,
-                    "assets",
+                    progress_phase,
                     resume_offset,
                     total,
                     resume_offset,
@@ -3915,12 +3987,15 @@ fn download_resumable_to_file(
             .map_err(|error| error.to_string())?;
         let mut downloaded = active_resume_offset;
         let mut buffer = [0_u8; 64 * 1024];
-        emit_transfer_progress(
+        let mut last_emitted_progress =
+            progress_between(start_progress, end_progress, downloaded, total);
+        emit_transfer_progress_for_event(
             app,
+            progress_event_name,
             download_id,
-            progress_between(start_progress, end_progress, downloaded, total),
+            last_emitted_progress,
             download_status,
-            "assets",
+            progress_phase,
             downloaded,
             total,
             active_resume_offset,
@@ -3941,16 +4016,22 @@ fn download_resumable_to_file(
                 .write_all(&buffer[..read_count])
                 .map_err(|error| error.to_string())?;
             downloaded += read_count as u64;
-            emit_transfer_progress(
-                app,
-                download_id,
-                progress_between(start_progress, end_progress, downloaded, total),
-                download_status,
-                "assets",
-                downloaded,
-                total,
-                active_resume_offset,
-            );
+            let current_progress =
+                progress_between(start_progress, end_progress, downloaded, total);
+            if current_progress != last_emitted_progress {
+                last_emitted_progress = current_progress;
+                emit_transfer_progress_for_event(
+                    app,
+                    progress_event_name,
+                    download_id,
+                    current_progress,
+                    download_status,
+                    progress_phase,
+                    downloaded,
+                    total,
+                    active_resume_offset,
+                );
+            }
         }
 
         output_file.flush().map_err(|error| error.to_string())?;
@@ -3967,12 +4048,13 @@ fn download_resumable_to_file(
 
         remove_file_if_exists(output_path)?;
         fs::rename(partial_path, output_path).map_err(|error| error.to_string())?;
-        emit_transfer_progress(
+        emit_transfer_progress_for_event(
             app,
+            progress_event_name,
             download_id,
             end_progress,
             download_status,
-            "assets",
+            progress_phase,
             final_size,
             total.or(Some(final_size)),
             active_resume_offset,
@@ -3981,6 +4063,371 @@ fn download_resumable_to_file(
     }
 
     Err("BOS resumable download could not be restarted".to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn emit_windows_runtime_progress(
+    app: &AppHandle,
+    download_id: &str,
+    progress: u8,
+    status: &str,
+    phase: &str,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    resumed_bytes: u64,
+) {
+    emit_transfer_progress_for_event(
+        app,
+        WINDOWS_RUNTIME_DOWNLOAD_EVENT_NAME,
+        download_id,
+        progress,
+        status,
+        phase,
+        downloaded_bytes,
+        total_bytes,
+        resumed_bytes,
+    );
+}
+
+#[cfg(target_os = "windows")]
+fn windows_runtime_install_dir() -> Result<PathBuf, String> {
+    std::env::current_exe()
+        .map_err(|error| format!("无法定位应用程序安装目录：{error}"))?
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "无法定位应用程序安装目录".to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn missing_windows_runtime_dlls(directory: &Path) -> Vec<&'static str> {
+    WINDOWS_RUNTIME_REQUIRED_DLLS
+        .iter()
+        .copied()
+        .filter(|file_name| {
+            fs::metadata(directory.join(file_name))
+                .map(|metadata| !metadata.is_file() || metadata.len() == 0)
+                .unwrap_or(true)
+        })
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn composer_state_is_available(composer: &ComposerState) -> Result<bool, String> {
+    composer
+        .lock()
+        .map(|runtime| runtime.is_available())
+        .map_err(|error| format!("无法读取 Composer 状态：{error}"))
+}
+
+#[cfg(target_os = "windows")]
+fn reinitialize_composer(composer: &ComposerState) -> Result<(), String> {
+    let new_runtime = ComposerRuntime::initialize();
+    if !new_runtime.is_available() {
+        return Err(new_runtime
+            .init_error
+            .clone()
+            .unwrap_or_else(|| "Composer 初始化失败".to_string()));
+    }
+
+    let mut runtime = composer
+        .lock()
+        .map_err(|error| format!("无法更新 Composer 状态：{error}"))?;
+    runtime.cleanup();
+    *runtime = new_runtime;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn extract_windows_runtime_zip(
+    app: &AppHandle,
+    download_id: &str,
+    zip_path: &Path,
+    install_dir: &Path,
+    cancel_flag: &AtomicBool,
+) -> Result<(), String> {
+    let temp_dir = install_dir.join(".aicut-runtime-extract");
+    if temp_dir.exists() {
+        fs::remove_dir_all(&temp_dir).map_err(|error| format!("清理临时目录失败：{error}"))?;
+    }
+    fs::create_dir_all(&temp_dir).map_err(|error| format!("创建临时目录失败：{error}"))?;
+
+    let result = (|| {
+        let file =
+            fs::File::open(zip_path).map_err(|error| format!("打开运行库压缩包失败：{error}"))?;
+        let mut archive =
+            zip::ZipArchive::new(file).map_err(|error| format!("运行库压缩包无效：{error}"))?;
+        let total_entries = archive.len().max(1) as u64;
+        let mut extracted_dlls = HashSet::new();
+
+        emit_windows_runtime_progress(
+            app,
+            download_id,
+            86,
+            "正在解压运行环境...",
+            "extract",
+            0,
+            None,
+            0,
+        );
+
+        for index in 0..archive.len() {
+            ensure_not_cancelled(cancel_flag)?;
+            let mut zipped_file = archive
+                .by_index(index)
+                .map_err(|error| format!("读取压缩包失败：{error}"))?;
+            if zipped_file.is_dir() {
+                continue;
+            }
+
+            let Some(enclosed_name) = zipped_file.enclosed_name() else {
+                continue;
+            };
+            let Some(file_name) = enclosed_name.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if !file_name.to_ascii_lowercase().ends_with(".dll")
+                || file_name.eq_ignore_ascii_case("libcomposer.dll")
+            {
+                continue;
+            }
+
+            let normalized_name = file_name.to_ascii_lowercase();
+            if !extracted_dlls.insert(normalized_name) {
+                return Err(format!("压缩包内存在重名 DLL：{file_name}"));
+            }
+
+            let output_path = temp_dir.join(file_name);
+            let mut output_file = fs::File::create(&output_path)
+                .map_err(|error| format!("创建 DLL 文件失败：{error}"))?;
+            io::copy(&mut zipped_file, &mut output_file)
+                .map_err(|error| format!("解压 DLL 文件失败：{error}"))?;
+            output_file
+                .flush()
+                .map_err(|error| format!("写入 DLL 文件失败：{error}"))?;
+
+            emit_windows_runtime_progress(
+                app,
+                download_id,
+                progress_between(86, 96, (index + 1) as u64, Some(total_entries)),
+                "正在解压运行环境...",
+                "extract",
+                (index + 1) as u64,
+                Some(total_entries),
+                0,
+            );
+        }
+
+        let missing = missing_windows_runtime_dlls(&temp_dir);
+        if !missing.is_empty() {
+            return Err(format!("运行库压缩包缺少文件：{}", missing.join("、")));
+        }
+
+        for entry in fs::read_dir(&temp_dir).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let source_path = entry.path();
+            if !source_path.is_file() {
+                continue;
+            }
+            let target_path = install_dir.join(entry.file_name());
+            remove_file_if_exists(&target_path)?;
+            fs::rename(&source_path, &target_path)
+                .map_err(|error| format!("安装运行库失败：{error}"))?;
+        }
+
+        Ok(())
+    })();
+
+    let _ = fs::remove_dir_all(&temp_dir);
+    result
+}
+
+#[cfg(target_os = "windows")]
+fn prepare_windows_runtime_blocking(
+    app: AppHandle,
+    composer: ComposerState,
+    download_url: String,
+    runtime_version: String,
+    download_id: String,
+    cancel_flag: Arc<AtomicBool>,
+) -> Result<WindowsRuntimePreparationResult, String> {
+    let install_dir = windows_runtime_install_dir()?;
+    let package_path = install_dir.join("win.zip");
+    let partial_path = install_dir.join("win.zip.part");
+    let metadata_path = install_dir.join("win.zip.part.json");
+
+    let result = (|| {
+        emit_windows_runtime_progress(
+            &app,
+            &download_id,
+            2,
+            "正在检查运行环境...",
+            "check",
+            0,
+            None,
+            0,
+        );
+
+        if composer_state_is_available(&composer)? {
+            emit_windows_runtime_progress(
+                &app,
+                &download_id,
+                100,
+                "运行环境已就绪",
+                "complete",
+                0,
+                None,
+                0,
+            );
+            return Ok(WindowsRuntimePreparationResult {
+                ready: true,
+                downloaded: false,
+            });
+        }
+
+        if missing_windows_runtime_dlls(&install_dir).is_empty()
+            && reinitialize_composer(&composer).is_ok()
+        {
+            emit_windows_runtime_progress(
+                &app,
+                &download_id,
+                100,
+                "运行环境已就绪",
+                "complete",
+                0,
+                None,
+                0,
+            );
+            return Ok(WindowsRuntimePreparationResult {
+                ready: true,
+                downloaded: false,
+            });
+        }
+
+        if download_url.trim().is_empty() {
+            return Err("运行库下载地址为空".to_string());
+        }
+
+        download_resumable_to_file(
+            &app,
+            WINDOWS_RUNTIME_DOWNLOAD_EVENT_NAME,
+            "download",
+            &download_id,
+            download_url.trim(),
+            &package_path,
+            &partial_path,
+            &metadata_path,
+            runtime_version.trim(),
+            &cancel_flag,
+            3,
+            85,
+            "初次运行需等待，请稍候",
+        )?;
+
+        extract_windows_runtime_zip(
+            &app,
+            &download_id,
+            &package_path,
+            &install_dir,
+            &cancel_flag,
+        )?;
+
+        remove_file_if_exists(&package_path)?;
+        remove_file_if_exists(&metadata_path)?;
+
+        emit_windows_runtime_progress(
+            &app,
+            &download_id,
+            97,
+            "正在校验运行环境...",
+            "verify",
+            0,
+            None,
+            0,
+        );
+        let missing = missing_windows_runtime_dlls(&install_dir);
+        if !missing.is_empty() {
+            return Err(format!("运行环境校验失败，缺少：{}", missing.join("、")));
+        }
+
+        reinitialize_composer(&composer).map_err(|error| format!("运行环境加载失败：{error}"))?;
+
+        emit_windows_runtime_progress(
+            &app,
+            &download_id,
+            100,
+            "运行环境准备完成",
+            "complete",
+            0,
+            None,
+            0,
+        );
+        Ok(WindowsRuntimePreparationResult {
+            ready: true,
+            downloaded: true,
+        })
+    })();
+
+    let _ = remove_download_task(&download_id);
+    result
+}
+
+#[tauri::command]
+fn is_windows_runtime_ready(composer: State<'_, ComposerState>) -> Result<bool, String> {
+    #[cfg(target_os = "windows")]
+    {
+        if composer_state_is_available(composer.inner())? {
+            return Ok(true);
+        }
+
+        let install_dir = windows_runtime_install_dir()?;
+        if !missing_windows_runtime_dlls(&install_dir).is_empty() {
+            return Ok(false);
+        }
+
+        return Ok(reinitialize_composer(composer.inner()).is_ok());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = composer;
+        Ok(true)
+    }
+}
+
+#[tauri::command]
+async fn prepare_windows_runtime(
+    app: AppHandle,
+    composer: State<'_, ComposerState>,
+    download_url: String,
+    runtime_version: String,
+    download_id: String,
+) -> Result<WindowsRuntimePreparationResult, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let cancel_flag = register_download_task(&download_id)?;
+        let composer_state = composer.inner().clone();
+        return tauri::async_runtime::spawn_blocking(move || {
+            prepare_windows_runtime_blocking(
+                app,
+                composer_state,
+                download_url,
+                runtime_version,
+                download_id,
+                cancel_flag,
+            )
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (app, composer, download_url, runtime_version, download_id);
+        Ok(WindowsRuntimePreparationResult {
+            ready: true,
+            downloaded: false,
+        })
+    }
 }
 
 fn extract_zip(
@@ -4139,6 +4586,8 @@ fn prepare_template_assets_blocking(
                 let package_url = resolve_url("", &material_package_url)?;
                 download_resumable_to_file(
                     &app,
+                    TEMPLATE_DOWNLOAD_EVENT_NAME,
+                    "assets",
                     &download_id,
                     &package_url,
                     &material_package_path,
@@ -5567,6 +6016,8 @@ pub fn run() {
             start_pr_bridge,
             stop_pr_bridge,
             take_pr_template_exports,
+            is_windows_runtime_ready,
+            prepare_windows_runtime,
             get_cached_template_assets,
             read_original_template_xml,
             prepare_template_assets,
