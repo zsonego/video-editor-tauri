@@ -52,8 +52,8 @@ const VideoTransformer = defineAsyncComponent(
 // 页面对外事件与远程/本地资源配置。
 const emit = defineEmits(['logout']);
 const router = useRouter();
-const CREATE_TEMPLATE_ENTRY_VISIBLE = true;
-const GLOBAL_TIMELINE_VISIBLE = true;
+const CREATE_TEMPLATE_ENTRY_VISIBLE = false;
+const GLOBAL_TIMELINE_VISIBLE = false;
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
