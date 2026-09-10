@@ -1,7 +1,12 @@
 import { request } from "./request";
 
 export function loginUser(data) {
-  return request("/login", { data });
+  return request("/login", {
+    data: {
+      ...data,
+      channel: 1,
+    },
+  });
 }
 
 export function getUserInfo(data) {
