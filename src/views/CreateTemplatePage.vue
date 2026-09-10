@@ -24,6 +24,7 @@ import {
   Menu,
   MoreHorizontal,
   Music2,
+  Pause,
   Pencil,
   Play,
   Plus,
@@ -254,6 +255,9 @@ let prBridgePageActive = false;
 let prBridgePollTimer = null;
 let prBridgePolling = false;
 const handledPrBridgeEventIds = new Set();
+const clipPreviewVideoRefs = new Map();
+const playingClipPreviewId = ref('');
+const loadingClipPreviewId = ref('');
 
 const selectedClip = computed(
   () => model.clips.find((clip) => clip.id === selectedClipId.value) ?? null,
@@ -270,6 +274,9 @@ const allAssets = computed(() =>
 );
 const allVideoAssets = computed(() =>
   allAssets.value.filter((asset) => asset.mediaType !== 'audio'),
+);
+const videoAssetById = computed(
+  () => new Map(allVideoAssets.value.map((asset) => [asset.id, asset])),
 );
 const areaAssetGroupTabs = computed(() => [
   {
@@ -477,6 +484,7 @@ function replaceModel(next) {
   });
   selectedClipId.value = '';
   globalLutInheritedAreaIds.clear();
+  stopClipPreview();
 }
 
 function showToast(message, type = 'success') {
@@ -850,6 +858,7 @@ function removeClip(clip) {
     title: '删除这个片段？',
     message: `“${clip.name}”以及其中的 Area、字幕和转场设置都会被删除。`,
     action: () => {
+      if (playingClipPreviewId.value === clip.id) stopClipPreview();
       model.clips.splice(model.clips.indexOf(clip), 1);
       if (selectedClipId.value === clip.id) selectedClipId.value = '';
       showToast('片段已删除');
@@ -2481,8 +2490,128 @@ function clipMaterialType(clip) {
   return clip?.materialType === 'fixed' ? 'fixed' : 'variable';
 }
 
+function clipPreviewAsset(clip) {
+  if (clipMaterialType(clip) !== 'variable') return null;
+  const orderedAreas = [...(clip?.areas ?? [])].sort(
+    (left, right) => Number(left.index || 0) - Number(right.index || 0),
+  );
+  for (const area of orderedAreas) {
+    const asset = videoAssetById.value.get(area.assetId);
+    if (asset?.sourcePath) return asset;
+  }
+  return null;
+}
+
+function clipPreviewSource(clip) {
+  const sourcePath = clipPreviewAsset(clip)?.sourcePath;
+  if (!sourcePath) return '';
+  try {
+    return convertFileSrc(sourcePath);
+  } catch {
+    return '';
+  }
+}
+
+function setClipPreviewVideoRef(clipId, element) {
+  if (element) {
+    clipPreviewVideoRefs.set(clipId, element);
+    return;
+  }
+  clipPreviewVideoRefs.delete(clipId);
+  if (playingClipPreviewId.value === clipId) {
+    playingClipPreviewId.value = '';
+    loadingClipPreviewId.value = '';
+  }
+}
+
+function stopClipPreview({ reset = true } = {}) {
+  const clipId = playingClipPreviewId.value;
+  const video = clipPreviewVideoRefs.get(clipId);
+  if (video) {
+    video.pause();
+    if (reset) video.currentTime = 0;
+  }
+  playingClipPreviewId.value = '';
+  loadingClipPreviewId.value = '';
+}
+
+async function toggleClipPreview(clip) {
+  selectedClipId.value = clip.id;
+  const video = clipPreviewVideoRefs.get(clip.id);
+  if (!video || !clipPreviewSource(clip)) {
+    showToast('当前可变片段没有可预览的素材视频', 'warning');
+    return;
+  }
+
+  if (playingClipPreviewId.value === clip.id && !video.paused) {
+    video.pause();
+    playingClipPreviewId.value = '';
+    loadingClipPreviewId.value = '';
+    return;
+  }
+
+  if (playingClipPreviewId.value && playingClipPreviewId.value !== clip.id) {
+    stopClipPreview();
+    video.currentTime = 0;
+  }
+
+  playingClipPreviewId.value = clip.id;
+  loadingClipPreviewId.value = clip.id;
+  try {
+    await video.play();
+  } catch (error) {
+    playingClipPreviewId.value = '';
+    loadingClipPreviewId.value = '';
+    showToast(error?.message || '片段素材视频播放失败', 'error');
+  }
+}
+
+function handleClipPreviewPlaying(clipId) {
+  if (playingClipPreviewId.value === clipId) {
+    loadingClipPreviewId.value = '';
+  }
+}
+
+function handleClipPreviewWaiting(clipId) {
+  if (playingClipPreviewId.value === clipId) {
+    loadingClipPreviewId.value = clipId;
+  }
+}
+
+function handleClipPreviewTimeUpdate(clip, event) {
+  if (playingClipPreviewId.value !== clip.id) return;
+  const video = event.currentTarget;
+  const previewDuration = Math.max(0, Number(clip.duration) || 0) / 1000;
+  if (previewDuration > 0 && video.currentTime >= previewDuration) {
+    stopClipPreview();
+  }
+}
+
+function handleClipPreviewEnded(clipId) {
+  const video = clipPreviewVideoRefs.get(clipId);
+  if (video) video.currentTime = 0;
+  if (playingClipPreviewId.value === clipId) {
+    playingClipPreviewId.value = '';
+    loadingClipPreviewId.value = '';
+  }
+}
+
+function handleClipPreviewError(clipId) {
+  if (playingClipPreviewId.value === clipId) {
+    playingClipPreviewId.value = '';
+    loadingClipPreviewId.value = '';
+    showToast('片段素材视频加载失败', 'error');
+  }
+}
+
 function setClipMaterialType(clip, materialType) {
   if (!clip) return;
+  if (
+    materialType === 'fixed' &&
+    playingClipPreviewId.value === clip.id
+  ) {
+    stopClipPreview();
+  }
   clip.materialType = materialType === 'fixed' ? 'fixed' : 'variable';
   applyGlobalLutToVariableAreas();
 }
@@ -2605,6 +2734,8 @@ onBeforeUnmount(() => {
   activeThumbnailCancels.forEach((cancel) => cancel());
   stopAreaInteraction();
   stopSubtitleInteraction();
+  stopClipPreview();
+  clipPreviewVideoRefs.clear();
   disposeAssetGroups(model.mediaGroups);
   if (toast.timer) window.clearTimeout(toast.timer);
 });
@@ -3204,10 +3335,60 @@ onBeforeUnmount(() => {
           >
             <div class="clip-preview">
               <div class="preview-grid"></div>
+              <video
+                v-if="clipPreviewSource(clip)"
+                :ref="(element) => setClipPreviewVideoRef(clip.id, element)"
+                class="clip-preview-video"
+                :src="clipPreviewSource(clip)"
+                :poster="clipPreviewAsset(clip)?.thumbnailUrl || undefined"
+                preload="metadata"
+                playsinline
+                @click.stop="toggleClipPreview(clip)"
+                @playing="handleClipPreviewPlaying(clip.id)"
+                @waiting="handleClipPreviewWaiting(clip.id)"
+                @timeupdate="handleClipPreviewTimeUpdate(clip, $event)"
+                @ended="handleClipPreviewEnded(clip.id)"
+                @error="handleClipPreviewError(clip.id)"
+              ></video>
               <div class="preview-number">
                 {{ String(index + 1).padStart(2, '0') }}
               </div>
-              <div v-if="clip.topVideo || clip.areas.length" class="preview-content">
+              <button
+                v-if="clipPreviewSource(clip)"
+                class="preview-content"
+                :class="{
+                  'is-playing': playingClipPreviewId === clip.id,
+                  'is-loading': loadingClipPreviewId === clip.id,
+                }"
+                type="button"
+                :title="
+                  playingClipPreviewId === clip.id
+                    ? '暂停片段预览'
+                    : '播放片段素材视频'
+                "
+                :aria-label="
+                  playingClipPreviewId === clip.id
+                    ? '暂停片段预览'
+                    : '播放片段素材视频'
+                "
+                @click.stop="toggleClipPreview(clip)"
+              >
+                <LoaderCircle
+                  v-if="loadingClipPreviewId === clip.id"
+                  :size="21"
+                  class="preview-loading-icon"
+                />
+                <Pause
+                  v-else-if="playingClipPreviewId === clip.id"
+                  :size="20"
+                  fill="currentColor"
+                />
+                <Play v-else :size="22" fill="currentColor" />
+              </button>
+              <div
+                v-else-if="clip.topVideo || clip.areas.length"
+                class="preview-content preview-content-static"
+              >
                 <Play :size="22" fill="currentColor" />
               </div>
               <div v-else class="preview-placeholder">
@@ -5926,6 +6107,17 @@ label:focus-within {
   background-size: 25% 25%;
 }
 
+.clip-preview-video {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  cursor: pointer;
+  background: #20201e;
+  object-fit: cover;
+}
+
 .preview-number {
   position: absolute;
   z-index: 1;
@@ -5939,14 +6131,49 @@ label:focus-within {
 
 .preview-content {
   position: relative;
-  z-index: 1;
+  z-index: 2;
   width: 48px;
   height: 48px;
   display: grid;
   place-items: center;
+  padding: 0;
   color: white;
+  border: 0;
   border-radius: 50%;
   background: rgba(32, 32, 30, 0.82);
+  cursor: pointer;
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+
+.preview-content:hover {
+  transform: scale(1.06);
+}
+
+.preview-content.is-playing {
+  opacity: 0;
+}
+
+.clip-preview:hover .preview-content.is-playing,
+.preview-content.is-loading {
+  opacity: 1;
+}
+
+.preview-content-static {
+  cursor: default;
+}
+
+.preview-content-static:hover {
+  transform: none;
+}
+
+.preview-loading-icon {
+  animation: preview-spin 0.85s linear infinite;
+}
+
+@keyframes preview-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .preview-placeholder {
