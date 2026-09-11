@@ -8,10 +8,11 @@ import {
   reactive,
   ref,
 } from 'vue';
-import { useRouter } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { dirname, join } from '@tauri-apps/api/path';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import {
   open as openDialog,
   save as saveDialog,
@@ -37,11 +38,11 @@ import {
   getTemplateDetail,
   getTemplates,
 } from '../api/template';
-import { getUserInfo, logoutUser, resetPassword } from '../api/user';
 import { systemMessage } from '../utils/message';
 import dingAudio from '../assets/ding.mp3';
 import hotImage from '../assets/hot.png';
 import logoImage from '../assets/logo.png';
+import AccountCenterMenu from '../components/AccountCenterMenu.vue';
 import AppIcon from '../components/AppIcon.vue';
 import lutManifest from '../../src-tauri/resources/luts/luts.json';
 
@@ -51,11 +52,10 @@ const VideoTransformer = defineAsyncComponent(
 
 // 页面对外事件与远程/本地资源配置。
 const emit = defineEmits(['logout']);
+const route = useRoute();
 const router = useRouter();
-const CREATE_TEMPLATE_ENTRY_VISIBLE = true;
-const GLOBAL_TIMELINE_VISIBLE = true;
-
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
+const CREATE_TEMPLATE_ENTRY_VISIBLE = false;
+const GLOBAL_TIMELINE_VISIBLE = false;
 
 // 模板列表、收藏列表及请求状态。
 const categories = ref([]);
@@ -85,16 +85,6 @@ const activeTemplateName = ref('');
 const previewTitle = ref('');
 const previewSubtitle = ref('');
 const previewModalVisible = ref(false);
-const accountMenuVisible = ref(false);
-const profileModalVisible = ref(false);
-const passwordModalVisible = ref(false);
-const helpCenterVisible = ref(false);
-const activeHelpTab = ref('guide');
-const helpGuideDownloading = ref(false);
-const logoutConfirmVisible = ref(false);
-const logoutSubmitting = ref(false);
-const passwordSubmitting = ref(false);
-const profileRefreshing = ref(false);
 const templateDetailLoading = ref(false);
 const startEditingLoading = ref(false);
 const templateDownloadVisible = ref(false);
@@ -380,12 +370,6 @@ const draftDeleting = ref(false);
 const draftOpeningId = ref('');
 const selectedDraftProjectIds = ref(new Set());
 const draftTitleInputRefs = new Map();
-const passwordForm = reactive({
-  oldPassword: '',
-  newPassword: '',
-  confirmPassword: '',
-});
-
 // 导出、素材替换确认及全局交互句柄。
 const exportModalVisible = ref(false);
 const exportState = ref('confirm');
@@ -395,6 +379,20 @@ const exportRunning = ref(false);
 const exportSelectedDir = ref('');
 const exportSelectedPath = ref('');
 const exportOutputPath = ref('');
+const projectPreviewModalVisible = ref(false);
+const projectPreviewRunning = ref(false);
+const projectPreviewProgress = ref(0);
+const projectPreviewStatus = ref('正在准备预览...');
+const projectPreviewSource = ref('');
+const projectPreviewVideoRef = ref(null);
+const projectPreviewPlayerRef = ref(null);
+const projectPreviewPaused = ref(true);
+const projectPreviewPlaybackRate = ref(1);
+const projectPreviewCurrentTime = ref(0);
+const projectPreviewDuration = ref(0);
+const projectPreviewVolume = ref(1);
+const projectPreviewMuted = ref(false);
+const projectPreviewFullscreen = ref(false);
 const defaultTemplateExportConfirmVisible = ref(false);
 const importOverwriteConfirmVisible = ref(false);
 const pendingImportSegment = ref(null);
@@ -413,6 +411,8 @@ let exportFinishedAudioContext = null;
 let exportFinishedAudioBuffer = null;
 let exportFinishedAudioBufferLoading = null;
 let exportFinishedSoundKeepAlive = null;
+let projectPreviewProgressUnlisten = null;
+let projectPreviewWindowWasFullscreen = false;
 let timelineMoveHandler = null;
 let timelineUpHandler = null;
 let timelinePlayheadMoveHandler = null;
@@ -607,25 +607,18 @@ const previewFavorited = computed(
     favoriteTemplateIds.value.has(activeFavoriteKey.value),
 );
 const userInfoRevision = ref(0);
-const storedUserProfile = computed(() => {
+const storedAccountProfile = computed(() => {
   userInfoRevision.value;
-  return getStoredUserProfile();
+  const userInfo = getStoredUserInfo();
+  return userInfo.user || userInfo.profile || userInfo.sysUser || userInfo;
 });
 const accountDisplayName = computed(() => {
-  const profile = storedUserProfile.value;
-  return profile.phone || '--';
-});
-const accountVersionName = computed(() => {
-  const profile = storedUserProfile.value;
-  return profile.nickName || '--';
+  const profile = storedAccountProfile.value;
+  return profile.phone || profile.phonenumber || '--';
 });
 const accountTenantName = computed(() => {
-  const profile = storedUserProfile.value;
-  return profile.renterName || '--';
-});
-const accountBalance = computed(() => {
-  const profile = storedUserProfile.value;
-  return formatAccountBalance(profile.creditBalance);
+  const profile = storedAccountProfile.value;
+  return profile.renterName || profile.tenantName || '--';
 });
 const canExport = computed(
   () =>
@@ -1003,10 +996,6 @@ async function goHome() {
   previewModalVisible.value = false;
   draftLibraryVisible.value = false;
   finishedLibraryVisible.value = false;
-  profileModalVisible.value = false;
-  passwordModalVisible.value = false;
-  helpCenterVisible.value = false;
-  accountMenuVisible.value = false;
   exportModalVisible.value = false;
   defaultTemplateExportConfirmVisible.value = false;
   importOverwriteConfirmVisible.value = false;
@@ -3303,6 +3292,196 @@ async function handleBeautyPreviewRequest(values) {
   await processBeautyVideoPreview(request);
 }
 
+async function handleSidebarVideoPreview() {
+  if (projectPreviewRunning.value || exportRunning.value) return;
+  if (!canExport.value) {
+    systemMessage.error('请先开始编辑');
+    return;
+  }
+  if (!validateExportVideoDurations()) return;
+
+  const templatePath = activeTemplateLocalInfo.value?.templateFilePath;
+  const projectDir = activeProjectDir.value;
+  if (!templatePath || !projectDir) {
+    systemMessage.error('当前工程文件不完整，无法生成预览');
+    return;
+  }
+
+  projectPreviewVideoRef.value?.pause?.();
+  projectPreviewSource.value = '';
+  projectPreviewPaused.value = true;
+  projectPreviewCurrentTime.value = 0;
+  projectPreviewDuration.value = 0;
+  projectPreviewProgress.value = 0;
+  projectPreviewStatus.value = '正在准备预览...';
+  projectPreviewModalVisible.value = true;
+  projectPreviewRunning.value = true;
+
+  const previewId = `composer-preview-${Date.now()}`;
+
+  try {
+    await flushSelectedVideoOffsetPersist();
+    await flushPendingAssetPropertyUpdates();
+
+    projectPreviewProgressUnlisten?.();
+    projectPreviewProgressUnlisten = await listen(
+      'composer-export-progress',
+      (event) => {
+        const payload = event.payload || {};
+        if (payload.exportId !== previewId) return;
+
+        projectPreviewProgress.value = Math.max(
+          0,
+          Math.min(100, Number(payload.progress) || 0),
+        );
+        projectPreviewStatus.value =
+          payload.status || projectPreviewStatus.value;
+      },
+    );
+
+    const result = await invoke('preview_project_video', {
+      templatePath,
+      projectDir,
+      previewId,
+    });
+    const outputPath = String(result?.outputPath || '').trim();
+    if (!outputPath) {
+      throw new Error('预览视频生成完成，但未返回文件路径');
+    }
+
+    projectPreviewProgress.value = 100;
+    projectPreviewStatus.value = '预览生成完成';
+    const source = convertFileSrc(outputPath);
+    projectPreviewSource.value = `${source}${source.includes('?') ? '&' : '?'}v=${Date.now()}`;
+    await nextTick();
+    projectPreviewVideoRef.value?.load?.();
+  } catch (error) {
+    projectPreviewProgress.value = 0;
+    projectPreviewStatus.value =
+      error?.message || String(error || '整片预览生成失败');
+    systemMessage.error(projectPreviewStatus.value);
+  } finally {
+    projectPreviewRunning.value = false;
+    projectPreviewProgressUnlisten?.();
+    projectPreviewProgressUnlisten = null;
+  }
+}
+
+async function closeProjectPreviewModal() {
+  if (projectPreviewRunning.value) return;
+  projectPreviewVideoRef.value?.pause?.();
+  if (projectPreviewFullscreen.value) {
+    await leaveProjectPreviewFullscreen();
+  }
+  projectPreviewModalVisible.value = false;
+}
+
+function updateProjectPreviewControls() {
+  const video = projectPreviewVideoRef.value;
+  if (!video) return;
+
+  projectPreviewPaused.value = video.paused;
+  projectPreviewCurrentTime.value = Number.isFinite(video.currentTime)
+    ? video.currentTime
+    : 0;
+  projectPreviewDuration.value = Number.isFinite(video.duration)
+    ? video.duration
+    : 0;
+  projectPreviewPlaybackRate.value = video.playbackRate || 1;
+  projectPreviewVolume.value = video.volume;
+  projectPreviewMuted.value = video.muted || video.volume === 0;
+}
+
+function toggleProjectPreviewPlayback() {
+  const video = projectPreviewVideoRef.value;
+  if (!video) return;
+
+  if (video.paused) {
+    video.play().catch(() => {
+      projectPreviewPaused.value = true;
+    });
+  } else {
+    video.pause();
+  }
+  updateProjectPreviewControls();
+}
+
+function seekProjectPreview(event) {
+  const video = projectPreviewVideoRef.value;
+  if (!video) return;
+
+  const nextTime = Number(event.target.value);
+  if (!Number.isFinite(nextTime)) return;
+  video.currentTime = Math.max(
+    0,
+    Math.min(projectPreviewDuration.value || 0, nextTime),
+  );
+  updateProjectPreviewControls();
+}
+
+function cycleProjectPreviewPlaybackRate() {
+  const video = projectPreviewVideoRef.value;
+  if (!video) return;
+
+  const rates = [0.5, 1, 1.25, 1.5, 2];
+  const currentIndex = rates.indexOf(projectPreviewPlaybackRate.value);
+  const nextRate = rates[(currentIndex + 1) % rates.length];
+  video.playbackRate = nextRate;
+  projectPreviewPlaybackRate.value = nextRate;
+}
+
+function setProjectPreviewVolume(event) {
+  const video = projectPreviewVideoRef.value;
+  if (!video) return;
+
+  const volume = Math.max(0, Math.min(1, Number(event.target.value) || 0));
+  video.volume = volume;
+  video.muted = volume === 0;
+  updateProjectPreviewControls();
+}
+
+function toggleProjectPreviewMute() {
+  const video = projectPreviewVideoRef.value;
+  if (!video) return;
+  video.muted = !video.muted;
+  updateProjectPreviewControls();
+}
+
+async function leaveProjectPreviewFullscreen() {
+  try {
+    if (!projectPreviewWindowWasFullscreen) {
+      await getCurrentWindow().setFullscreen(false);
+    }
+  } catch (error) {
+    console.warn('[preview] failed to leave window fullscreen:', error);
+  } finally {
+    projectPreviewFullscreen.value = false;
+    projectPreviewWindowWasFullscreen = false;
+  }
+}
+
+async function toggleProjectPreviewFullscreen() {
+  if (!projectPreviewPlayerRef.value) return;
+
+  try {
+    if (projectPreviewFullscreen.value) {
+      await leaveProjectPreviewFullscreen();
+      return;
+    }
+
+    const appWindow = getCurrentWindow();
+    projectPreviewWindowWasFullscreen = await appWindow.isFullscreen();
+    if (!projectPreviewWindowWasFullscreen) {
+      await appWindow.setFullscreen(true);
+    }
+    projectPreviewFullscreen.value = true;
+  } catch (error) {
+    systemMessage.error(error?.message || '无法进入全屏播放');
+    projectPreviewFullscreen.value = false;
+    projectPreviewWindowWasFullscreen = false;
+  }
+}
+
 async function processBeautyVideoPreview(request) {
   beautyVideoPreviewRunning = true;
   try {
@@ -5149,99 +5328,6 @@ function getStoredUserInfo() {
   }
 }
 
-function getStoredUserProfile() {
-  const userInfo = getStoredUserInfo();
-  return userInfo.user || userInfo.profile || userInfo.sysUser || userInfo;
-}
-
-function normalizeUserInfoPayload(response) {
-  const payload = getResponsePayload(response) || {};
-  const user =
-    payload.user ||
-    payload.profile ||
-    payload.sysUser ||
-    response?.user ||
-    payload ||
-    {};
-
-  return {
-    ...user,
-    userId: user.userId || payload.userId || '',
-    tenantId:
-      user.tenantId ||
-      user.renterId ||
-      payload.tenantId ||
-      payload.renterId ||
-      '',
-    renterId:
-      user.renterId ||
-      user.tenantId ||
-      payload.renterId ||
-      payload.tenantId ||
-      '',
-    phone: user.phone || user.phonenumber || payload.phone || '',
-    roles: response?.roles || payload.roles || [],
-    permissions: response?.permissions || payload.permissions || [],
-  };
-}
-
-function syncStoredUserInfo(nextProfile) {
-  if (!nextProfile || typeof nextProfile !== 'object') return;
-
-  const currentUserInfo = getStoredUserInfo();
-  const mergedUserInfo = {
-    ...currentUserInfo,
-    ...nextProfile,
-    userId: nextProfile.userId || currentUserInfo.userId || '',
-    tenantId: nextProfile.tenantId || currentUserInfo.tenantId || '',
-    renterId: nextProfile.renterId || currentUserInfo.renterId || '',
-    tenantName: nextProfile.tenantName || currentUserInfo.tenantName || '',
-    renterName: nextProfile.renterName || currentUserInfo.renterName || '',
-  };
-
-  for (const key of ['user', 'profile', 'sysUser']) {
-    if (currentUserInfo[key] && typeof currentUserInfo[key] === 'object') {
-      mergedUserInfo[key] = {
-        ...currentUserInfo[key],
-        ...nextProfile,
-      };
-    }
-  }
-
-  localStorage.setItem('userInfo', JSON.stringify(mergedUserInfo));
-  userInfoRevision.value += 1;
-}
-
-async function refreshUserInfo() {
-  if (profileRefreshing.value) return;
-
-  profileRefreshing.value = true;
-  try {
-    const response = await getUserInfo({
-      renterId: getStoredTenantId(),
-      userId: getStoredUserId(),
-    });
-    if (response?.code !== undefined && Number(response.code) !== 0) {
-      throw new Error(response?.msg || '用户信息查询失败');
-    }
-
-    syncStoredUserInfo(normalizeUserInfoPayload(response));
-  } catch (error) {
-    systemMessage.error(error?.message || '用户信息刷新失败');
-  } finally {
-    profileRefreshing.value = false;
-  }
-}
-
-function formatAccountBalance(value) {
-  const balance = Number(value);
-  if (!Number.isFinite(balance)) return '--';
-
-  return new Intl.NumberFormat('zh-CN', {
-    maximumFractionDigits: 2,
-  }).format(balance);
-}
-
 function getStoredTenantId() {
   const userInfo = getStoredUserInfo();
   return userInfo.tenantId || userInfo.renterId || '';
@@ -5845,152 +5931,8 @@ async function loadMyProjects() {
   }
 }
 
-// 账户菜单、密码修改、帮助中心和退出登录。
-function toggleAccountMenu() {
-  accountMenuVisible.value = !accountMenuVisible.value;
-}
-
-function closeAccountMenu() {
-  accountMenuVisible.value = false;
-}
-
-function showProfileModal() {
-  profileModalVisible.value = true;
-  closeAccountMenu();
-  refreshUserInfo();
-}
-
-function hideProfileModal() {
-  profileModalVisible.value = false;
-}
-
-function resetPasswordForm() {
-  passwordForm.oldPassword = '';
-  passwordForm.newPassword = '';
-  passwordForm.confirmPassword = '';
-}
-
-function showPasswordModal() {
-  passwordModalVisible.value = true;
-  closeAccountMenu();
-}
-
-function hidePasswordModal() {
-  if (passwordSubmitting.value) return;
-
-  passwordModalVisible.value = false;
-  resetPasswordForm();
-}
-
-async function submitPasswordReset() {
-  if (passwordSubmitting.value) return;
-
-  const oldPassword = passwordForm.oldPassword.trim();
-  const newPassword = passwordForm.newPassword.trim();
-  const confirmPassword = passwordForm.confirmPassword.trim();
-
-  if (!oldPassword) {
-    systemMessage.error('请输入旧密码');
-    return;
-  }
-
-  if (!newPassword) {
-    systemMessage.error('请输入新密码');
-    return;
-  }
-
-  if (!confirmPassword) {
-    systemMessage.error('请确认新密码');
-    return;
-  }
-
-  if (newPassword !== confirmPassword) {
-    systemMessage.error('两次输入的新密码不一致');
-    return;
-  }
-
-  const profile = getStoredUserProfile();
-  const renterId = getStoredTenantId();
-  const userId = getStoredUserId();
-  const phone = profile.phone || profile.phonenumber || '';
-
-  if (!renterId || !userId || !phone) {
-    systemMessage.error('用户信息不完整，无法修改密码');
-    return;
-  }
-
-  passwordSubmitting.value = true;
-  try {
-    const response = await resetPassword({
-      renterId,
-      userId: normalizeBackendId(userId),
-      phone,
-      modifyType: 0,
-      oldPassword,
-      newPassword,
-    });
-
-    if (response?.code !== undefined && Number(response.code) !== 0) {
-      throw new Error(response?.msg || '修改密码失败');
-    }
-
-    systemMessage.success(response?.msg || '修改密码成功，请重新登录');
-    passwordModalVisible.value = false;
-    resetPasswordForm();
-    emit('logout');
-  } catch (error) {
-    systemMessage.error(error?.message || '修改密码失败');
-  } finally {
-    passwordSubmitting.value = false;
-  }
-}
-
-function showHelpCenter() {
-  helpCenterVisible.value = true;
-  closeAccountMenu();
-}
-
-function hideHelpCenter() {
-  helpCenterVisible.value = false;
-}
-
 function showCreateTemplate() {
-  closeAccountMenu();
   router.push({ name: 'create-template' });
-}
-
-function switchHelpTab(tab) {
-  activeHelpTab.value = tab;
-}
-
-async function downloadHelpGuide() {
-  if (helpGuideDownloading.value) return;
-
-  helpGuideDownloading.value = true;
-  try {
-    const selectedDirectory = await openDialog({
-      directory: true,
-      multiple: false,
-      title: '选择指南保存目录',
-    });
-    if (!selectedDirectory) return;
-
-    const outputDir = Array.isArray(selectedDirectory)
-      ? selectedDirectory[0]
-      : selectedDirectory;
-    if (!outputDir) return;
-
-    await invoke('download_help_guide', {
-      apiBaseUrl: API_BASE_URL,
-      authorizationToken: localStorage.getItem('token') || '',
-      outputDir,
-    });
-    systemMessage.success('指南下载成功');
-  } catch (error) {
-    systemMessage.error(error?.message || String(error || '指南下载失败'));
-  } finally {
-    helpGuideDownloading.value = false;
-  }
 }
 
 function formatFileSize(value) {
@@ -6007,39 +5949,8 @@ function formatFileSize(value) {
   return `${size.toFixed(decimals)} ${units[unitIndex]}`;
 }
 
-function showLogoutConfirm() {
-  logoutConfirmVisible.value = true;
-  closeAccountMenu();
-}
-
-function hideLogoutConfirm() {
-  if (logoutSubmitting.value) return;
-
-  logoutConfirmVisible.value = false;
-}
-
-async function confirmLogout() {
-  if (logoutSubmitting.value) return;
-
-  logoutSubmitting.value = true;
-  try {
-    const response = await logoutUser();
-    if (response?.code !== undefined && Number(response.code) !== 0) {
-      throw new Error(response?.msg || '退出登录失败');
-    }
-
-    logoutConfirmVisible.value = false;
-    emit('logout');
-  } catch (error) {
-    systemMessage.error(error?.message || '退出登录失败');
-  } finally {
-    logoutSubmitting.value = false;
-  }
-}
-
 // 点击页面空白处时关闭临时浮层。
 function handleWorkspaceClick() {
-  closeAccountMenu();
   activeAudioDropdownClipId.value = '';
   hoveredAudioTextName.value = '';
   hoveredSubtitleClip.value = null;
@@ -6048,6 +5959,7 @@ function handleWorkspaceClick() {
 
 // 初始化页面数据、窗口监听和播放器尺寸观察。
 onMounted(() => {
+  const shouldOpenDraftLibrary = route.query.open === 'draft-library';
   document.title = '艾咔 · AICut - 视频快速剪辑软件';
   document.documentElement.classList.add('dark');
   window.addEventListener('resize', schedulePlayerResize);
@@ -6061,7 +5973,14 @@ onMounted(() => {
   }
   loadTemplateCategories();
   loadRecommendedTemplates();
-  loadMyProjects();
+  if (shouldOpenDraftLibrary) {
+    showDraftLibrary();
+    const nextQuery = { ...route.query };
+    delete nextQuery.open;
+    void router.replace({ name: 'home', query: nextQuery });
+  } else {
+    loadMyProjects();
+  }
   nextTick(() => {
     updatePlayerControls();
     schedulePlayerResize();
@@ -6071,6 +5990,9 @@ onMounted(() => {
 // 离开页面时释放全局监听、定时器和本地视频 URL。
 onBeforeUnmount(() => {
   void flushPendingAssetPropertyUpdates();
+  if (projectPreviewFullscreen.value) {
+    void leaveProjectPreviewFullscreen();
+  }
   invalidateBeautyPreview();
   cacheCurrentVideoTimelineState();
   document.documentElement.classList.remove('dark');
@@ -6078,6 +6000,8 @@ onBeforeUnmount(() => {
   if (exportInterval) {
     clearInterval(exportInterval);
   }
+  projectPreviewProgressUnlisten?.();
+  projectPreviewProgressUnlisten = null;
   if (timelineMoveHandler) {
     window.removeEventListener('pointermove', timelineMoveHandler);
   }
@@ -6197,67 +6121,34 @@ onBeforeUnmount(() => {
           class="h-9 w-24 flex items-center justify-center gap-1.5 bg-surface-container-low/50 text-on-surface-variant hover:text-electric-blue rounded-lg font-bold shadow-sm hover:bg-surface-container-high active:scale-95 transition-all shrink-0 border border-outline-variant/20"
           :class="{
             'opacity-45 cursor-not-allowed hover:text-on-surface-variant hover:bg-surface-container-low/50 active:scale-100':
-              !canExport || exportRunning,
+              !canExport || exportRunning || projectPreviewRunning,
           }"
           type="button"
-          :disabled="!canExport || exportRunning"
+          :disabled="!canExport || exportRunning || projectPreviewRunning"
+          @click="handleSidebarVideoPreview"
+        >
+          <span class="text-[13px] uppercase tracking-wide whitespace-nowrap">
+            {{ projectPreviewRunning ? '生成中...' : '预览' }}
+          </span>
+        </button>
+        <button
+          class="h-9 w-24 flex items-center justify-center gap-1.5 bg-surface-container-low/50 text-on-surface-variant hover:text-electric-blue rounded-lg font-bold shadow-sm hover:bg-surface-container-high active:scale-95 transition-all shrink-0 border border-outline-variant/20"
+          :class="{
+            'opacity-45 cursor-not-allowed hover:text-on-surface-variant hover:bg-surface-container-low/50 active:scale-100':
+              !canExport || exportRunning || projectPreviewRunning,
+          }"
+          type="button"
+          :disabled="!canExport || exportRunning || projectPreviewRunning"
           @click="showExportConfirmation"
         >
           <span class="text-[13px] uppercase tracking-wide whitespace-nowrap"
             >导出</span
           >
         </button>
-        <div class="relative z-[130]" @click.stop>
-          <button
-            class="h-9 w-24 shrink-0 flex items-center justify-center gap-1.5 bg-surface-container-low/50 text-on-surface-variant shadow-sm hover:bg-surface-container-high hover:text-electric-blue focus:bg-electric-blue focus:text-white rounded-lg transition-all focus:outline-none active:scale-95 border border-outline-variant/20"
-            type="button"
-            @click="toggleAccountMenu"
-          >
-            <span class="text-[13px] font-bold">个人中心</span>
-          </button>
-          <div
-            class="absolute top-full right-0 mt-2 w-36 bg-surface-container-highest/95 backdrop-blur-xl border border-white/10 rounded-xl shadow-[0_20px_50px_rgba(0,0,0,0.5)] transition-all duration-200 ease-out z-[110] py-2 overflow-hidden"
-            :class="
-              accountMenuVisible
-                ? 'opacity-100 translate-y-0 pointer-events-auto'
-                : 'opacity-0 translate-y-2 pointer-events-none'
-            "
-          >
-            <button
-              class="w-full flex items-center gap-3 px-4 py-2.5 text-[13px] text-on-surface-variant hover:bg-electric-blue/10 hover:text-white transition-colors text-left"
-              type="button"
-              @click="showProfileModal"
-            >
-              <AppIcon name="account_circle" :size="18" />
-              <span>个人信息</span>
-            </button>
-            <div class="mx-2 my-1 border-t border-outline-variant/30"></div>
-            <button
-              class="w-full flex items-center gap-3 px-4 py-2.5 text-[13px] text-on-surface-variant hover:bg-electric-blue/10 hover:text-white transition-colors text-left"
-              type="button"
-              @click="showPasswordModal"
-            >
-              <AppIcon name="lock_reset" :size="18" />
-              <span>修改密码</span>
-            </button>
-            <div class="mx-2 my-1 border-t border-outline-variant/30"></div>
-            <button
-              class="w-full flex items-center gap-3 px-4 py-2.5 text-[13px] text-on-surface-variant hover:bg-electric-blue/10 hover:text-white transition-colors text-left"
-              type="button"
-              @click="showHelpCenter"
-            >
-              <AppIcon name="help_center" :size="18" />
-              <span>帮助中心</span>
-            </button>
-            <div class="mx-2 my-1 border-t border-outline-variant/30"></div>
-            <a
-              class="flex items-center gap-3 px-4 py-2.5 text-[13px] text-[#ec4034] hover:bg-[#ec4034]/10 transition-colors"
-              href="#"
-              @click.prevent="showLogoutConfirm"
-              ><AppIcon name="logout" :size="18" /><span>退出登录</span></a
-            >
-          </div>
-        </div>
+        <AccountCenterMenu
+          :refresh-key="userInfoRevision"
+          @logout="emit('logout')"
+        />
       </div>
 
       <div
@@ -6367,6 +6258,7 @@ onBeforeUnmount(() => {
                   (currentViewState === 'import' && !editingFromDraftLibrary)
                 "
                 class="flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-electric-blue text-[12px] text-white font-bold shrink-0 hover:brightness-110 active:scale-95 transition-all"
+                type="button"
                 @click="handleSidebarBack"
               >
                 <span class="text-[11px]">返回</span>
@@ -7603,364 +7495,6 @@ onBeforeUnmount(() => {
           </div>
 
           <div
-            class="fixed inset-0 z-[440] flex items-center justify-center transition-all duration-300"
-            :class="{ hidden: !helpCenterVisible }"
-          >
-            <div
-              class="absolute inset-0 bg-black/60 backdrop-blur-sm"
-              @click="hideHelpCenter"
-            ></div>
-            <div
-              class="relative w-[90vw] h-[85vh] bg-surface-container rounded-3xl border border-white/10 shadow-[0_32px_64px_-12px_rgba(0,0,0,0.8)] overflow-hidden flex flex-col modal-pop-in"
-            >
-              <div
-                class="h-16 shrink-0 bg-surface-container-highest border-b border-white/10 px-8 flex items-center justify-between"
-              >
-                <div class="flex items-center gap-3">
-                  <div
-                    class="w-8 h-8 bg-electric-blue rounded-lg flex items-center justify-center"
-                  >
-                    <AppIcon name="menu_book" :size="20" class="text-white" />
-                  </div>
-                  <h3 class="text-lg font-black text-white">产品帮助中心</h3>
-                </div>
-                <button
-                  class="p-2 hover:bg-white/10 rounded-full text-on-surface-variant transition-colors"
-                  type="button"
-                  @click="hideHelpCenter"
-                >
-                  <AppIcon name="close" :size="24" />
-                </button>
-              </div>
-              <div class="flex-1 flex overflow-hidden">
-                <aside
-                  class="w-64 shrink-0 bg-black/20 border-r border-white/5 p-4 flex flex-col gap-1"
-                >
-                  <button
-                    class="help-nav-item flex items-center gap-3 px-4 py-3 rounded-xl transition-all text-left"
-                    :class="
-                      activeHelpTab === 'guide'
-                        ? 'bg-electric-blue/10 text-electric-blue font-bold'
-                        : 'text-on-surface-variant hover:bg-white/5'
-                    "
-                    type="button"
-                    @click="switchHelpTab('guide')"
-                  >
-                    <AppIcon name="explore" :size="20" />
-                    <span>使用指南</span>
-                  </button>
-                  <button
-                    class="help-nav-item flex items-center gap-3 px-4 py-3 rounded-xl transition-all text-left"
-                    :class="
-                      activeHelpTab === 'faq'
-                        ? 'bg-electric-blue/10 text-electric-blue font-bold'
-                        : 'text-on-surface-variant hover:bg-white/5'
-                    "
-                    type="button"
-                    @click="switchHelpTab('faq')"
-                  >
-                    <AppIcon name="quiz" :size="20" />
-                    <span>常见问题</span>
-                  </button>
-                  <button
-                    class="help-nav-item flex items-center gap-3 px-4 py-3 rounded-xl transition-all text-left"
-                    :class="
-                      activeHelpTab === 'changelog'
-                        ? 'bg-electric-blue/10 text-electric-blue font-bold'
-                        : 'text-on-surface-variant hover:bg-white/5'
-                    "
-                    type="button"
-                    @click="switchHelpTab('changelog')"
-                  >
-                    <AppIcon name="history" :size="20" />
-                    <span>更新日志</span>
-                  </button>
-                </aside>
-                <main
-                  class="flex-1 flex flex-col bg-surface-container-lowest p-8 overflow-hidden relative"
-                >
-                  <div
-                    class="flex-1 bg-surface-container rounded-2xl border border-white/5 shadow-inner overflow-y-auto custom-scrollbar p-12"
-                  >
-                    <div
-                      v-if="activeHelpTab === 'guide'"
-                      class="max-w-2xl mx-auto space-y-8"
-                    >
-                      <div class="space-y-4">
-                        <h1 class="text-3xl font-black text-white">
-                          核心使用指南 V1.0
-                        </h1>
-                        <p class="text-on-surface-variant leading-relaxed">
-                          欢迎使用 AICut
-                          专业版剪辑系统。这里可以快速了解模板选择、素材导入、开始编辑和导出成片的核心流程。
-                        </p>
-                      </div>
-                      <div class="grid grid-cols-2 gap-6">
-                        <div
-                          class="p-6 bg-white/5 rounded-2xl border border-white/10"
-                        >
-                          <h4 class="text-electric-blue font-bold mb-2">
-                            智能模板匹配
-                          </h4>
-                          <p class="text-[13px] text-on-surface-variant/80">
-                            选择模板后，系统会按模板素材位展示所需视频数量和时长范围。
-                          </p>
-                        </div>
-                        <div
-                          class="p-6 bg-white/5 rounded-2xl border border-white/10"
-                        >
-                          <h4 class="text-electric-blue font-bold mb-2">
-                            一键批量导入
-                          </h4>
-                          <p class="text-[13px] text-on-surface-variant/80">
-                            可以按分类批量替换素材，也可以单独替换某一个素材位。
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                    <div
-                      v-else-if="activeHelpTab === 'faq'"
-                      class="max-w-2xl mx-auto space-y-6"
-                    >
-                      <h1 class="text-3xl font-black text-white">常见问题</h1>
-                      <div class="space-y-4">
-                        <div
-                          class="p-5 bg-white/5 rounded-2xl border border-white/10"
-                        >
-                          <h4 class="text-white font-bold mb-2">
-                            导入素材后为什么不能导出？
-                          </h4>
-                          <p class="text-[13px] text-on-surface-variant/80">
-                            需要先点击开始编辑，生成工程文件后导出按钮才会可用。
-                          </p>
-                        </div>
-                        <div
-                          class="p-5 bg-white/5 rounded-2xl border border-white/10"
-                        >
-                          <h4 class="text-white font-bold mb-2">
-                            时间滑块有什么作用？
-                          </h4>
-                          <p class="text-[13px] text-on-surface-variant/80">
-                            时间滑块用于选择素材在原视频中的起始片段，工程文件会同步记录偏移时间。
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                    <div v-else class="max-w-2xl mx-auto space-y-6">
-                      <h1 class="text-3xl font-black text-white">更新日志</h1>
-                      <div
-                        class="p-5 bg-white/5 rounded-2xl border border-white/10"
-                      >
-                        <h4 class="text-electric-blue font-bold mb-2">
-                          当前版本
-                        </h4>
-                        <p class="text-[13px] text-on-surface-variant/80">
-                          优化模板素材导入、时间轴偏移、工程创建和导出流程。
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                  <div class="absolute bottom-12 right-12">
-                    <button
-                      class="flex items-center gap-2 px-6 py-3 bg-electric-blue text-white rounded-full font-black shadow-2xl shadow-electric-blue/40 hover:scale-105 active:scale-95 transition-all disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:scale-100 disabled:active:scale-100"
-                      type="button"
-                      :disabled="helpGuideDownloading"
-                      @click="downloadHelpGuide"
-                    >
-                      <AppIcon
-                        :name="
-                          helpGuideDownloading
-                            ? 'progress_activity'
-                            : 'download'
-                        "
-                        :size="24"
-                        :class="{
-                          'start-editing-spinner': helpGuideDownloading,
-                        }"
-                      />
-                      <span>{{
-                        helpGuideDownloading ? '下载中...' : '下载离线指南'
-                      }}</span>
-                    </button>
-                  </div>
-                </main>
-              </div>
-            </div>
-          </div>
-
-          <div
-            class="fixed inset-0 z-[430] flex items-center justify-center transition-opacity duration-300"
-            :class="{ hidden: !profileModalVisible }"
-          >
-            <div
-              class="absolute inset-0 bg-black/60 backdrop-blur-sm"
-              @click="hideProfileModal"
-            ></div>
-            <div
-              class="relative w-full max-w-md bg-surface-container-highest rounded-2xl border border-white/10 shadow-2xl modal-pop-in p-8 text-center"
-            >
-              <button
-                class="absolute top-4 right-4 text-on-surface-variant hover:text-white transition-colors"
-                type="button"
-                @click="hideProfileModal"
-              >
-                <AppIcon name="close" :size="24" />
-              </button>
-              <div
-                class="w-16 h-16 bg-electric-blue/10 rounded-full flex items-center justify-center mx-auto mb-4"
-              >
-                <AppIcon name="person" :size="30" class="text-electric-blue" />
-              </div>
-              <h3 class="text-xl font-black text-white mb-6">个人信息</h3>
-              <div
-                class="space-y-3 text-left bg-black/20 p-5 rounded-xl border border-white/5"
-              >
-                <div class="flex justify-between gap-4">
-                  <span class="text-on-surface-variant/60 text-xs shrink-0"
-                    >账号</span
-                  >
-                  <span class="text-white text-xs font-bold truncate">{{
-                    accountDisplayName
-                  }}</span>
-                </div>
-                <div class="flex justify-between gap-4">
-                  <span class="text-on-surface-variant/60 text-xs shrink-0"
-                    >昵称</span
-                  >
-                  <span class="text-white text-xs font-bold truncate">{{
-                    accountVersionName
-                  }}</span>
-                </div>
-                <div class="flex justify-between gap-4">
-                  <span class="text-on-surface-variant/60 text-xs shrink-0"
-                    >所属租户</span
-                  >
-                  <span class="text-electric-blue text-xs font-bold truncate">{{
-                    accountTenantName
-                  }}</span>
-                </div>
-                <div
-                  class="pt-3 border-t border-white/10 flex justify-between items-baseline gap-4"
-                >
-                  <span class="text-on-surface-variant/60 text-xs shrink-0"
-                    >剩余积分</span
-                  >
-                  <span class="text-2xl font-black text-electric-blue"
-                    >{{ accountBalance }}
-                    <span class="text-[10px]">pts</span></span
-                  >
-                </div>
-              </div>
-              <button
-                class="w-full mt-6 py-3 bg-white/5 text-on-surface-variant font-bold rounded-xl hover:text-white hover:bg-white/10 transition-all"
-                type="button"
-                @click="hideProfileModal"
-              >
-                关闭
-              </button>
-            </div>
-          </div>
-
-          <div
-            class="fixed inset-0 z-[430] flex items-center justify-center transition-opacity duration-300"
-            :class="{ hidden: !passwordModalVisible }"
-          >
-            <div
-              class="absolute inset-0 bg-black/60 backdrop-blur-sm"
-              @click="hidePasswordModal"
-            ></div>
-            <div
-              class="relative w-full max-w-sm bg-surface-container-highest rounded-2xl border border-white/10 shadow-2xl modal-pop-in p-6"
-            >
-              <h3
-                class="text-lg font-black text-white mb-6 flex items-center gap-2"
-              >
-                <AppIcon
-                  name="lock_reset"
-                  :size="24"
-                  class="text-electric-blue"
-                />
-                修改密码
-              </h3>
-              <div class="space-y-4">
-                <input
-                  v-model="passwordForm.oldPassword"
-                  class="w-full bg-surface-container-low border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:border-electric-blue/50 outline-none"
-                  :disabled="passwordSubmitting"
-                  placeholder="旧密码"
-                  type="password"
-                  @keydown.enter.prevent="submitPasswordReset"
-                />
-                <input
-                  v-model="passwordForm.newPassword"
-                  class="w-full bg-surface-container-low border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:border-electric-blue/50 outline-none"
-                  :disabled="passwordSubmitting"
-                  placeholder="新密码"
-                  type="password"
-                  @keydown.enter.prevent="submitPasswordReset"
-                />
-                <input
-                  v-model="passwordForm.confirmPassword"
-                  class="w-full bg-surface-container-low border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:border-electric-blue/50 outline-none"
-                  :disabled="passwordSubmitting"
-                  placeholder="确认新密码"
-                  type="password"
-                  @keydown.enter.prevent="submitPasswordReset"
-                />
-                <button
-                  class="w-full py-3 bg-electric-blue text-white font-black rounded-xl hover:brightness-110 transition-all disabled:opacity-60 disabled:cursor-not-allowed"
-                  type="button"
-                  :disabled="passwordSubmitting"
-                  @click="submitPasswordReset"
-                >
-                  {{ passwordSubmitting ? '正在保存...' : '保存修改' }}
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <div
-            class="fixed inset-0 z-[450] flex items-center justify-center transition-opacity duration-300"
-            :class="{ hidden: !logoutConfirmVisible }"
-          >
-            <div
-              class="absolute inset-0 bg-black/60 backdrop-blur-sm"
-              @click="hideLogoutConfirm"
-            ></div>
-            <div
-              class="relative w-full max-w-sm bg-surface-container-highest rounded-2xl p-8 border border-white/10 shadow-2xl modal-pop-in text-center"
-            >
-              <div
-                class="w-16 h-16 bg-white/5 rounded-full flex items-center justify-center mx-auto mb-4 border border-white/10"
-              >
-                <AppIcon name="logout" :size="30" class="text-[#ec4034]" />
-              </div>
-              <h3 class="text-xl font-black text-white mb-2">退出登录</h3>
-              <p class="text-on-surface-variant text-sm mb-6">
-                确认退出当前账号吗？
-              </p>
-              <div class="flex flex-col gap-3">
-                <button
-                  class="w-full py-3 bg-[#ec4034] text-white font-bold rounded-xl hover:brightness-110 transition-all active:scale-95 disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100"
-                  type="button"
-                  :disabled="logoutSubmitting"
-                  @click="confirmLogout"
-                >
-                  {{ logoutSubmitting ? '正在退出...' : '确认退出' }}
-                </button>
-                <button
-                  class="w-full py-3 bg-transparent text-on-surface-variant font-bold rounded-xl hover:text-white transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
-                  type="button"
-                  :disabled="logoutSubmitting"
-                  @click="hideLogoutConfirm"
-                >
-                  取消
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <div
             class="fixed inset-0 z-[410] flex items-center justify-center"
             :class="{ hidden: !importOverwriteConfirmVisible }"
           >
@@ -8168,6 +7702,176 @@ onBeforeUnmount(() => {
                 >
                   {{ templateDownloadCanceling ? '正在暂停...' : '暂停下载' }}
                 </button>
+              </div>
+            </div>
+          </div>
+
+          <div
+            v-if="projectPreviewModalVisible"
+            class="fixed inset-0 z-[430] flex items-center justify-center"
+            :class="projectPreviewFullscreen ? 'p-0' : 'p-6'"
+          >
+            <div class="absolute inset-0 bg-black/70 backdrop-blur-xl"></div>
+            <div
+              class="relative w-full overflow-hidden bg-surface-container-highest shadow-2xl modal-pop-in"
+              :class="
+                projectPreviewFullscreen
+                  ? 'h-full max-w-none border-0 rounded-none'
+                  : 'max-w-4xl rounded-2xl border border-white/10'
+              "
+            >
+              <div
+                v-if="!projectPreviewFullscreen"
+                class="flex h-14 items-center justify-between border-b border-white/10 px-5"
+              >
+                <div class="flex min-w-0 items-center gap-2">
+                  <AppIcon name="smart_display" :size="21" class="text-electric-blue" />
+                  <h3 class="truncate text-[15px] font-black text-white">
+                    整片视频预览
+                  </h3>
+                </div>
+                <button
+                  class="flex h-8 w-8 items-center justify-center rounded-full text-white/70 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-30"
+                  type="button"
+                  :disabled="projectPreviewRunning"
+                  @click="closeProjectPreviewModal"
+                >
+                  <AppIcon name="close" :size="20" />
+                </button>
+              </div>
+
+              <div
+                v-if="!projectPreviewSource"
+                class="flex aspect-video flex-col items-center justify-center gap-6 bg-black/80 px-8 text-center"
+              >
+                <div
+                  class="circular-progress"
+                  :style="{ '--progress': `${projectPreviewProgress}%` }"
+                >
+                  <div class="absolute inset-0 flex items-center justify-center">
+                    <span class="text-2xl font-black text-electric-blue">
+                      {{ projectPreviewProgress }}%
+                    </span>
+                  </div>
+                </div>
+                <div class="w-full max-w-md space-y-3">
+                  <p class="break-words text-sm font-bold text-white">
+                    {{ projectPreviewStatus }}
+                  </p>
+                  <div class="h-1.5 w-full overflow-hidden rounded-full bg-white/10">
+                    <div
+                      class="h-full bg-electric-blue transition-all duration-300"
+                      :style="{ width: `${projectPreviewProgress}%` }"
+                    ></div>
+                  </div>
+                  <button
+                    v-if="!projectPreviewRunning"
+                    class="mt-3 rounded-lg bg-white/10 px-8 py-2 text-sm font-bold text-white transition-colors hover:bg-white/15"
+                    type="button"
+                    @click="closeProjectPreviewModal"
+                  >
+                    关闭
+                  </button>
+                </div>
+              </div>
+
+              <div
+                v-else
+                ref="projectPreviewPlayerRef"
+                class="group relative bg-black"
+                :class="projectPreviewFullscreen ? 'h-full' : 'aspect-video'"
+              >
+                <video
+                  ref="projectPreviewVideoRef"
+                  class="h-full w-full bg-black object-contain"
+                  :src="projectPreviewSource"
+                  disablepictureinpicture
+                  playsinline
+                  preload="metadata"
+                  @click="toggleProjectPreviewPlayback"
+                  @loadedmetadata="updateProjectPreviewControls"
+                  @timeupdate="updateProjectPreviewControls"
+                  @play="updateProjectPreviewControls"
+                  @pause="updateProjectPreviewControls"
+                  @ended="updateProjectPreviewControls"
+                  @ratechange="updateProjectPreviewControls"
+                  @volumechange="updateProjectPreviewControls"
+                ></video>
+                <div
+                  class="pointer-events-none absolute inset-x-0 bottom-0 translate-y-2 bg-gradient-to-t from-black/95 via-black/70 to-transparent px-5 pb-4 pt-10 opacity-0 transition-all duration-200 group-hover:pointer-events-auto group-hover:translate-y-0 group-hover:opacity-100"
+                >
+                  <input
+                    class="mb-3 h-1.5 w-full cursor-pointer accent-[#4a8eff]"
+                    type="range"
+                    min="0"
+                    :max="projectPreviewDuration || 0"
+                    step="0.01"
+                    :value="projectPreviewCurrentTime"
+                    aria-label="预览播放进度"
+                    @input="seekProjectPreview"
+                  />
+                  <div class="flex items-center gap-3 text-white">
+                    <button
+                      class="flex h-9 w-9 items-center justify-center rounded-full bg-electric-blue text-white transition-all hover:brightness-110 active:scale-95"
+                      type="button"
+                      :aria-label="projectPreviewPaused ? '播放' : '暂停'"
+                      @click="toggleProjectPreviewPlayback"
+                    >
+                      <AppIcon
+                        :name="projectPreviewPaused ? 'play_arrow' : 'pause'"
+                        :size="21"
+                        filled
+                      />
+                    </button>
+                    <span class="text-[11px] tabular-nums text-white/75">
+                      {{ formatPlayerTime(projectPreviewCurrentTime) }} /
+                      {{ formatPlayerTime(projectPreviewDuration) }}
+                    </span>
+                    <div class="flex-1"></div>
+                    <button
+                      class="h-8 min-w-14 rounded-md border border-white/15 bg-white/10 px-2 text-[11px] font-bold text-white/85 transition-colors hover:bg-white/15 hover:text-white"
+                      type="button"
+                      title="切换播放倍速"
+                      @click="cycleProjectPreviewPlaybackRate"
+                    >
+                      {{ projectPreviewPlaybackRate }}x
+                    </button>
+                    <div class="flex items-center gap-2">
+                      <button
+                        class="flex h-8 w-8 items-center justify-center rounded-md text-white/80 transition-colors hover:bg-white/10 hover:text-white"
+                        type="button"
+                        :aria-label="projectPreviewMuted ? '打开声音' : '静音'"
+                        @click="toggleProjectPreviewMute"
+                      >
+                        <AppIcon
+                          :name="projectPreviewMuted ? 'volume_off' : 'volume_up'"
+                          :size="18"
+                        />
+                      </button>
+                      <input
+                        class="h-1.5 w-20 cursor-pointer accent-[#4a8eff]"
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.01"
+                        :value="projectPreviewMuted ? 0 : projectPreviewVolume"
+                        aria-label="预览音量"
+                        @input="setProjectPreviewVolume"
+                      />
+                    </div>
+                    <button
+                      class="flex h-8 w-8 items-center justify-center rounded-md text-white/80 transition-colors hover:bg-white/10 hover:text-white"
+                      type="button"
+                      :aria-label="projectPreviewFullscreen ? '退出全屏' : '全屏播放'"
+                      @click="toggleProjectPreviewFullscreen"
+                    >
+                      <AppIcon
+                        :name="projectPreviewFullscreen ? 'fullscreen_exit' : 'fullscreen'"
+                        :size="19"
+                      />
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
           </div>

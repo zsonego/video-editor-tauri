@@ -87,6 +87,7 @@ unsafe extern "C" {
 static DOWNLOAD_CANCEL_FLAGS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
 
 const TEMPLATE_DOWNLOAD_EVENT_NAME: &str = "template-download-progress";
+#[cfg(target_os = "windows")]
 const WINDOWS_RUNTIME_DOWNLOAD_EVENT_NAME: &str = "windows-runtime-download-progress";
 
 #[cfg(target_os = "windows")]
@@ -133,6 +134,7 @@ struct PrBridgeInfo {
     page: &'static str,
     session_id: String,
     port: u16,
+    output_directory: String,
 }
 
 #[derive(Deserialize)]
@@ -162,13 +164,14 @@ struct PrBridgeHttpRequest {
     body: Vec<u8>,
 }
 
-fn pr_bridge_info(session_id: &str) -> PrBridgeInfo {
+fn pr_bridge_info(session_id: &str, output_directory: String) -> PrBridgeInfo {
     PrBridgeInfo {
         service: "aicut-template-bridge",
         protocol_version: PR_BRIDGE_PROTOCOL_VERSION,
         page: "create-template",
         session_id: session_id.to_string(),
         port: PR_BRIDGE_PORT,
+        output_directory,
     }
 }
 
@@ -583,7 +586,10 @@ fn start_pr_bridge(
         .map_err(|error| format!("无法配置 PR 对接服务：{error}"))?;
 
     let session_id = new_pr_bridge_session_id();
-    let info = pr_bridge_info(&session_id);
+    let output_directory = aicut_root_dir()?.join("custom").join("temp");
+    fs::create_dir_all(&output_directory)
+        .map_err(|error| format!("无法创建 PR 模板临时输出目录：{error}"))?;
+    let info = pr_bridge_info(&session_id, path_to_xml_filepath(output_directory));
     let running = Arc::new(AtomicBool::new(true));
     let thread_running = running.clone();
     let thread_info = info.clone();
@@ -649,6 +655,42 @@ struct ProjectWorkspace {
     project_dir: String,
     template_file_path: String,
     project_xml: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedCustomTemplate {
+    template_file_path: String,
+    assets_dir: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CustomTemplateSummary {
+    template_id: String,
+    name: String,
+    duration_ms: u64,
+    resolution: String,
+    preview_path: String,
+    updated_at: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CustomTemplateDetail {
+    template_id: String,
+    template_file_path: String,
+    project_root: String,
+    xml_content: String,
+    fixed_material_path: String,
+    is_pr_imported: bool,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CustomTemplateEditorState {
+    fixed_material_file: String,
+    is_pr_imported: bool,
 }
 
 #[derive(Serialize)]
@@ -934,6 +976,8 @@ struct ComposerRuntime {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     compose: Option<ComposerComposeFn>,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
+    compose_with_options: Option<ComposerComposeWithOptionsFn>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     cleanup: Option<ComposerCleanupFn>,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     get_last_error: Option<ComposerGetLastErrorFn>,
@@ -957,6 +1001,15 @@ type ComposerCleanupFn = unsafe extern "C" fn();
 type ComposerProgressCallback = extern "C" fn(c_int, c_int, *const c_char, *mut c_void);
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 type ComposerComposeFn = unsafe extern "C" fn(
+    *const c_char,
+    *const c_char,
+    *const c_char,
+    Option<ComposerProgressCallback>,
+    *mut c_void,
+) -> c_int;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+type ComposerComposeWithOptionsFn = unsafe extern "C" fn(
+    *const c_char,
     *const c_char,
     *const c_char,
     *const c_char,
@@ -1085,16 +1138,9 @@ fn composer_error_message(code: i32) -> String {
 }
 
 impl ComposerRuntime {
+    #[cfg(target_os = "windows")]
     fn is_available(&self) -> bool {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        {
-            self.init_error.is_none() && self.initialized
-        }
-
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        {
-            false
-        }
+        self.init_error.is_none() && self.initialized
     }
 
     fn initialize() -> Self {
@@ -1116,6 +1162,8 @@ impl ComposerRuntime {
             _library: None,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             compose: None,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            compose_with_options: None,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             cleanup: None,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -1192,11 +1240,33 @@ impl ComposerRuntime {
                     .map_err(|error| format!("读取 composer_init 失败: {error}"))?
             };
             app_log_info("[composer] resolving composer_compose");
-            let compose: ComposerComposeFn = unsafe {
-                *library
-                    .get(b"composer_compose\0")
-                    .map_err(|error| format!("读取 composer_compose 失败: {error}"))?
+            let compose: Option<ComposerComposeFn> = unsafe {
+                match library.get(b"composer_compose\0") {
+                    Ok(symbol) => Some(*symbol),
+                    Err(error) => {
+                        app_log_error(format!("[composer] composer_compose unavailable: {error}"));
+                        None
+                    }
+                }
             };
+            app_log_info("[composer] resolving composer_compose_with_options");
+            let compose_with_options: Option<ComposerComposeWithOptionsFn> = unsafe {
+                match library.get(b"composer_compose_with_options\0") {
+                    Ok(symbol) => {
+                        app_log_info("[composer] composer_compose_with_options resolved");
+                        Some(*symbol)
+                    }
+                    Err(error) => {
+                        app_log_error(format!(
+                            "[composer] composer_compose_with_options unavailable: {error}"
+                        ));
+                        None
+                    }
+                }
+            };
+            if compose.is_none() && compose_with_options.is_none() {
+                return Err("Composer 动态库未提供视频合成接口".to_string());
+            }
             app_log_info("[composer] resolving composer_cleanup");
             let cleanup: ComposerCleanupFn = unsafe {
                 *library
@@ -1295,7 +1365,8 @@ impl ComposerRuntime {
             Ok(Self {
                 init_error: None,
                 _library: Some(library),
-                compose: Some(compose),
+                compose,
+                compose_with_options,
                 cleanup: Some(cleanup),
                 get_last_error,
                 get_last_cmd,
@@ -1320,6 +1391,8 @@ impl ComposerRuntime {
         template_path: &str,
         project_path: &str,
         output_path: &str,
+        json_params: &str,
+        allow_legacy_fallback: bool,
         app: AppHandle,
         export_id: String,
     ) -> Result<(), String> {
@@ -1336,30 +1409,52 @@ impl ComposerRuntime {
             app_log_info(format!("[composer] template_path={template_path}"));
             app_log_info(format!("[composer] project_path={project_path}"));
             app_log_info(format!("[composer] output_path={output_path}"));
+            app_log_info(format!("[composer] json_params={json_params}"));
             let template_path_text = template_path.to_string();
             let project_path_text = project_path.to_string();
             let output_path_text = output_path.to_string();
+            let json_params_text = json_params.to_string();
             let export_id_text = export_id.clone();
-            let Some(compose) = self.compose else {
-                let error = "composer_compose 函数未加载".to_string();
+            if self.compose_with_options.is_none() && !allow_legacy_fallback {
+                let error =
+                    "当前 Composer 动态库版本不支持整片水印预览，请更新本机动态库".to_string();
                 app_log_error(format!("[composer] {error}"));
                 return Err(error);
-            };
+            }
             let template_path =
                 CString::new(template_path).map_err(|_| "模板路径包含非法字符".to_string())?;
             let project_path =
                 CString::new(project_path).map_err(|_| "工程路径包含非法字符".to_string())?;
             let output_path =
                 CString::new(output_path).map_err(|_| "输出路径包含非法字符".to_string())?;
+            let json_params =
+                CString::new(json_params).map_err(|_| "合成参数包含非法字符".to_string())?;
             let mut context = ComposerCallbackContext { app, export_id };
             let result = unsafe {
-                compose(
-                    template_path.as_ptr(),
-                    project_path.as_ptr(),
-                    output_path.as_ptr(),
-                    Some(composer_progress_callback),
-                    (&mut context as *mut ComposerCallbackContext).cast::<c_void>(),
-                )
+                if let Some(compose_with_options) = self.compose_with_options {
+                    compose_with_options(
+                        template_path.as_ptr(),
+                        project_path.as_ptr(),
+                        output_path.as_ptr(),
+                        json_params.as_ptr(),
+                        Some(composer_progress_callback),
+                        (&mut context as *mut ComposerCallbackContext).cast::<c_void>(),
+                    )
+                } else {
+                    let Some(compose) = self.compose else {
+                        return Err("Composer 视频合成函数未加载".to_string());
+                    };
+                    app_log_info(
+                        "[composer] composer_compose_with_options unavailable; using legacy composer_compose",
+                    );
+                    compose(
+                        template_path.as_ptr(),
+                        project_path.as_ptr(),
+                        output_path.as_ptr(),
+                        Some(composer_progress_callback),
+                        (&mut context as *mut ComposerCallbackContext).cast::<c_void>(),
+                    )
+                }
             };
 
             if result == 0 {
@@ -1381,6 +1476,7 @@ impl ComposerRuntime {
                      template_path: {template_path_text}\n\
                      project_path: {project_path_text}\n\
                      output_path: {output_path_text}\n\
+                     json_params: {json_params_text}\n\
                      error_code: {result}\n\
                      error_message: {error_message}\n\
                      composer_get_last_error(NULL): {composer_last_error}\n\
@@ -1400,7 +1496,15 @@ impl ComposerRuntime {
 
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
-            let _ = (template_path, project_path, output_path, app, export_id);
+            let _ = (
+                template_path,
+                project_path,
+                output_path,
+                json_params,
+                allow_legacy_fallback,
+                app,
+                export_id,
+            );
             app_log_error("[composer] compose requested on unsupported platform");
             Err("Composer 动态库当前只支持 macOS 和 Windows".to_string())
         }
@@ -4664,6 +4768,284 @@ fn read_original_template_xml(template_id: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn save_custom_template_xml(
+    template_id: String,
+    template_xml: String,
+    resource_paths: Vec<String>,
+    fixed_material_path: String,
+    is_pr_imported: bool,
+) -> Result<SavedCustomTemplate, String> {
+    let template_id = template_id.trim();
+    if template_id.is_empty() {
+        return Err("templateId 不能为空".to_string());
+    }
+    if template_xml.trim().is_empty() {
+        return Err("模板 XML 不能为空".to_string());
+    }
+
+    let sanitized_template_id = sanitize_name(template_id);
+    if sanitized_template_id.eq_ignore_ascii_case("temp") {
+        return Err("templateId 不能为 temp".to_string());
+    }
+    let custom_root = aicut_root_dir()?.join("custom");
+    let custom_template_dir = custom_root.join(sanitized_template_id);
+    fs::create_dir_all(&custom_template_dir).map_err(|error| error.to_string())?;
+
+    let assets_dir = custom_template_dir.join("assets");
+    let staging_assets_dir = custom_template_dir.join(".assets.tmp");
+    if staging_assets_dir.exists() {
+        fs::remove_dir_all(&staging_assets_dir).map_err(|error| error.to_string())?;
+    }
+    fs::create_dir_all(&staging_assets_dir).map_err(|error| error.to_string())?;
+
+    let fixed_material_file = PathBuf::from(fixed_material_path.trim())
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let mut copied_assets = HashMap::<String, PathBuf>::new();
+    for resource_path in resource_paths {
+        let source_path = PathBuf::from(resource_path.trim());
+        if !source_path.is_file() {
+            let _ = fs::remove_dir_all(&staging_assets_dir);
+            return Err(format!("模板素材不存在：{}", source_path.display()));
+        }
+        let file_name = source_path
+            .file_name()
+            .ok_or_else(|| format!("无法读取模板素材文件名：{}", source_path.display()))?;
+        let destination_key = file_name.to_string_lossy().to_lowercase();
+        let canonical_source =
+            fs::canonicalize(&source_path).unwrap_or_else(|_| source_path.clone());
+        if let Some(existing_source) = copied_assets.get(&destination_key) {
+            if existing_source != &canonical_source {
+                let _ = fs::remove_dir_all(&staging_assets_dir);
+                return Err(format!(
+                    "存在两个同名模板素材，无法保存：{}",
+                    file_name.to_string_lossy()
+                ));
+            }
+            continue;
+        }
+
+        fs::copy(&source_path, staging_assets_dir.join(file_name)).map_err(|error| {
+            let _ = fs::remove_dir_all(&staging_assets_dir);
+            format!("模板素材复制失败（{}）：{error}", source_path.display())
+        })?;
+        copied_assets.insert(destination_key, canonical_source);
+    }
+
+    if assets_dir.exists() {
+        fs::remove_dir_all(&assets_dir).map_err(|error| format!("旧模板素材清理失败：{error}"))?;
+    }
+    fs::rename(&staging_assets_dir, &assets_dir)
+        .map_err(|error| format!("模板素材目录更新失败：{error}"))?;
+
+    let template_file_path = custom_template_dir.join("template.xml");
+    fs::write(&template_file_path, template_xml.as_bytes())
+        .map_err(|error| format!("模板 XML 保存失败：{error}"))?;
+
+    let editor_state = CustomTemplateEditorState {
+        fixed_material_file,
+        is_pr_imported,
+    };
+    let editor_state_content = serde_json::to_vec_pretty(&editor_state)
+        .map_err(|error| format!("模板编辑状态序列化失败：{error}"))?;
+    fs::write(
+        custom_template_dir.join(".editor-state.json"),
+        editor_state_content,
+    )
+    .map_err(|error| format!("模板编辑状态保存失败：{error}"))?;
+
+    let temp_dir = custom_root.join("temp");
+    if temp_dir.exists() {
+        fs::remove_dir_all(&temp_dir).map_err(|error| format!("PR 临时素材清理失败：{error}"))?;
+    }
+    fs::create_dir_all(&temp_dir).map_err(|error| format!("PR 临时目录重建失败：{error}"))?;
+
+    Ok(SavedCustomTemplate {
+        template_file_path: path_to_xml_filepath(template_file_path),
+        assets_dir: path_to_xml_filepath(assets_dir),
+    })
+}
+
+fn custom_template_editor_state(template_dir: &Path) -> CustomTemplateEditorState {
+    let state_path = template_dir.join(".editor-state.json");
+    fs::read(state_path)
+        .ok()
+        .and_then(|content| serde_json::from_slice(&content).ok())
+        .unwrap_or_default()
+}
+
+fn custom_template_video_details(xml_content: &str) -> (u64, String, String) {
+    let video_inner = find_xml_element_blocks(xml_content, "video")
+        .into_iter()
+        .next()
+        .map(|(_, inner)| inner)
+        .unwrap_or_default();
+    let element_text = |tag_name: &str| {
+        find_xml_element_blocks(&video_inner, tag_name)
+            .into_iter()
+            .next()
+            .map(|(_, inner)| unescape_xml_value(inner.trim()))
+            .unwrap_or_default()
+    };
+    (
+        element_text("duration").parse::<u64>().unwrap_or(0),
+        element_text("resolution"),
+        element_text("demo-path"),
+    )
+}
+
+fn custom_template_name(xml_content: &str, fallback: &str) -> String {
+    find_xml_element_blocks(xml_content, "template")
+        .into_iter()
+        .next()
+        .and_then(|(tag, _)| xml_attribute_value(&tag, "name"))
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn custom_template_fixed_material_path(
+    template_dir: &Path,
+    assets_dir: &Path,
+    xml_content: &str,
+    editor_state: &CustomTemplateEditorState,
+) -> String {
+    if !editor_state.fixed_material_file.trim().is_empty() {
+        let path = assets_dir.join(&editor_state.fixed_material_file);
+        if path.is_file() {
+            return path_to_xml_filepath(path);
+        }
+    }
+
+    let tmp_top = assets_dir.join("tmptop.mov");
+    if tmp_top.is_file() {
+        return path_to_xml_filepath(tmp_top);
+    }
+
+    let background_path = find_xml_element_blocks(xml_content, "track")
+        .into_iter()
+        .find(|(tag, _)| xml_attribute_value(tag, "id").as_deref() == Some("bg"))
+        .and_then(|(_, inner)| {
+            find_xml_element_blocks(&inner, "filepath")
+                .into_iter()
+                .next()
+                .map(|(_, value)| unescape_xml_value(value.trim()))
+        })
+        .unwrap_or_default();
+    let background_name = Path::new(&background_path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if background_name.eq_ignore_ascii_case("top.mov")
+        || background_name.eq_ignore_ascii_case("tmptop.mov")
+    {
+        let resolved = PathBuf::from(resolve_template_resource_filepath(
+            template_dir,
+            assets_dir,
+            &background_path,
+        ));
+        if resolved.is_file() {
+            return path_to_xml_filepath(resolved);
+        }
+    }
+
+    String::new()
+}
+
+#[tauri::command]
+fn list_custom_templates() -> Result<Vec<CustomTemplateSummary>, String> {
+    let custom_root = aicut_root_dir()?.join("custom");
+    fs::create_dir_all(&custom_root).map_err(|error| error.to_string())?;
+    let mut templates = Vec::new();
+
+    for entry in fs::read_dir(&custom_root).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let file_type = entry.file_type().map_err(|error| error.to_string())?;
+        if !file_type.is_dir() {
+            continue;
+        }
+        let template_id = entry.file_name().to_string_lossy().to_string();
+        if template_id.eq_ignore_ascii_case("temp") {
+            continue;
+        }
+        let template_dir = entry.path();
+        let template_file_path = template_dir.join("template.xml");
+        if !template_file_path.is_file() {
+            continue;
+        }
+        let xml_content = match fs::read_to_string(&template_file_path) {
+            Ok(content) => content,
+            Err(_) => continue,
+        };
+        let (duration_ms, resolution, demo_path) = custom_template_video_details(&xml_content);
+        let assets_dir = template_dir.join("assets");
+        let resolved_preview =
+            resolve_template_resource_filepath(&template_dir, &assets_dir, &demo_path);
+        let preview_path = if Path::new(&resolved_preview).is_file() {
+            resolved_preview
+        } else {
+            String::new()
+        };
+        let updated_ms = fs::metadata(&template_file_path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis())
+            .unwrap_or(0);
+
+        templates.push(CustomTemplateSummary {
+            name: custom_template_name(&xml_content, &template_id),
+            template_id,
+            duration_ms,
+            resolution,
+            preview_path,
+            updated_at: format_timestamp(updated_ms),
+        });
+    }
+
+    templates.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    Ok(templates)
+}
+
+#[tauri::command]
+fn read_custom_template(template_id: String) -> Result<CustomTemplateDetail, String> {
+    let template_id = template_id.trim();
+    if template_id.is_empty() {
+        return Err("templateId 不能为空".to_string());
+    }
+    let sanitized_template_id = sanitize_name(template_id);
+    if sanitized_template_id.eq_ignore_ascii_case("temp") {
+        return Err("不能读取临时模板目录".to_string());
+    }
+    let template_dir = aicut_root_dir()?
+        .join("custom")
+        .join(&sanitized_template_id);
+    let template_file_path = template_dir.join("template.xml");
+    if !template_file_path.is_file() {
+        return Err("我的模板中不存在该模板".to_string());
+    }
+    let xml_content = fs::read_to_string(&template_file_path)
+        .map_err(|error| format!("模板 XML 读取失败：{error}"))?;
+    let assets_dir = template_dir.join("assets");
+    let editor_state = custom_template_editor_state(&template_dir);
+    let fixed_material_path = custom_template_fixed_material_path(
+        &template_dir,
+        &assets_dir,
+        &xml_content,
+        &editor_state,
+    );
+
+    Ok(CustomTemplateDetail {
+        template_id: template_id.to_string(),
+        template_file_path: path_to_xml_filepath(template_file_path),
+        project_root: path_to_xml_filepath(template_dir),
+        xml_content,
+        fixed_material_path,
+        is_pr_imported: editor_state.is_pr_imported || assets_dir.join("tmptop.mov").is_file(),
+    })
+}
+
+#[tauri::command]
 async fn prepare_template_assets(
     app: AppHandle,
     template_id: String,
@@ -5230,6 +5612,8 @@ async fn compose_project_video(
             &template_path_string,
             &project_path_string,
             &output_path_string,
+            r#"{"watermark":false}"#,
+            true,
             app_for_progress,
             export_id_for_progress,
         )
@@ -5241,6 +5625,75 @@ async fn compose_project_video(
         "[composer] compose_project_video finished export_id={export_id}"
     ));
     emit_composer_progress(&app, &export_id, 100, "导出完成");
+
+    Ok(ComposerExportResult {
+        output_path: output_path.to_string_lossy().to_string(),
+    })
+}
+
+#[tauri::command]
+async fn preview_project_video(
+    app: AppHandle,
+    composer: tauri::State<'_, ComposerState>,
+    template_path: String,
+    project_dir: String,
+    preview_id: String,
+) -> Result<ComposerExportResult, String> {
+    app_log_info(format!(
+        "[composer] preview_project_video requested preview_id={preview_id}"
+    ));
+
+    let template_path = PathBuf::from(template_path);
+    if !template_path.is_file() {
+        return Err("模板 XML 文件不存在".to_string());
+    }
+
+    let (_, project_root) = ensure_aicut_dirs()?;
+    let project_root = fs::canonicalize(project_root).map_err(|error| error.to_string())?;
+    let project_dir =
+        fs::canonicalize(PathBuf::from(project_dir)).map_err(|error| error.to_string())?;
+    if !project_dir.starts_with(&project_root) {
+        return Err("项目目录无效".to_string());
+    }
+
+    let project_path = project_dir.join("projectFile.xml");
+    if !project_path.is_file() {
+        return Err("projectFile.xml 不存在".to_string());
+    }
+
+    let preview_dir = project_dir.join("preview");
+    fs::create_dir_all(&preview_dir).map_err(|error| format!("创建预览目录失败: {error}"))?;
+    let output_path = preview_dir.join("template-preview.mp4");
+    if output_path.is_file() {
+        fs::remove_file(&output_path).map_err(|error| format!("覆盖旧预览视频失败: {error}"))?;
+    }
+
+    let output_path_string = output_path.to_string_lossy().to_string();
+    let template_path_string = template_path.to_string_lossy().to_string();
+    let project_path_string = project_path.to_string_lossy().to_string();
+    let composer = composer.inner().clone();
+    let preview_id_for_progress = preview_id.clone();
+    let app_for_progress = app.clone();
+
+    emit_composer_progress(&app, &preview_id, 0, "正在准备预览...");
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let composer = composer.lock().map_err(|error| error.to_string())?;
+        let _wake_guard = ExportWakeGuard::acquire().ok();
+        composer.compose_video(
+            &template_path_string,
+            &project_path_string,
+            &output_path_string,
+            r#"{"watermark":true}"#,
+            false,
+            app_for_progress,
+            preview_id_for_progress,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+
+    emit_composer_progress(&app, &preview_id, 100, "预览生成完成");
 
     Ok(ComposerExportResult {
         output_path: output_path.to_string_lossy().to_string(),
@@ -6020,6 +6473,9 @@ pub fn run() {
             prepare_windows_runtime,
             get_cached_template_assets,
             read_original_template_xml,
+            save_custom_template_xml,
+            list_custom_templates,
+            read_custom_template,
             prepare_template_assets,
             cancel_template_download,
             ensure_default_output_dir,
@@ -6033,6 +6489,7 @@ pub fn run() {
             reset_project_asset_generated_video,
             apply_project_subtitle,
             compose_project_video,
+            preview_project_video,
             resolve_lut_resource_path,
             preview_composer_beauty_frame,
             preview_composer_beauty_file,

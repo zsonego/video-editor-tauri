@@ -1,5 +1,12 @@
 import { request } from "./request";
 
+export function createTemplateDraft(renterId = "-1") {
+  const query = new URLSearchParams({
+    renterId: String(renterId || "-1"),
+  });
+  return request(`/aicut/template/draft?${query.toString()}`);
+}
+
 export function getTemplateCategories(data = {}) {
   return request("/api/template/category", { data });
 }

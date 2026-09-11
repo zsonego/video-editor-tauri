@@ -3,10 +3,12 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
+import { getFileDownloadUrl } from './api/file';
 import SessionExpiredDialogHost from './components/SessionExpiredDialogHost.vue';
 import SystemMessageHost from './components/SystemMessageHost.vue';
 import {
-  WINDOWS_RUNTIME_DOWNLOAD_URL,
+  encodeBase64Url,
+  WINDOWS_RUNTIME_DOWNLOAD_PATH,
   WINDOWS_RUNTIME_VERSION,
 } from './config/windowsRuntime';
 
@@ -39,9 +41,22 @@ function formatFileSize(bytes) {
 function runtimeErrorMessage(error) {
   const message = String(error?.message || error || '运行环境准备失败');
   if (/HTTP (401|403)/i.test(message)) {
-    return '运行环境下载链接已失效，请更新下载地址后重试';
+    return '运行环境下载链接已失效，请重试';
   }
   return message;
+}
+
+async function fetchWindowsRuntimeDownloadUrl() {
+  const encodedPath = encodeBase64Url(WINDOWS_RUNTIME_DOWNLOAD_PATH);
+  const response = await getFileDownloadUrl(encodedPath);
+  if (response?.code !== undefined && Number(response.code) !== 0) {
+    throw new Error(response.msg || '获取运行库下载地址失败');
+  }
+  const downloadUrl = String(response?.data?.url || '').trim();
+  if (!downloadUrl) {
+    throw new Error('运行库下载接口未返回下载地址');
+  }
+  return downloadUrl;
 }
 
 async function prepareWindowsRuntime() {
@@ -58,8 +73,10 @@ async function prepareWindowsRuntime() {
   activeRuntimeDownloadId.value = downloadId;
 
   try {
+    appBootStatus.value = '正在获取运行库下载地址...';
+    const downloadUrl = await fetchWindowsRuntimeDownloadUrl();
     const result = await invoke('prepare_windows_runtime', {
-      downloadUrl: WINDOWS_RUNTIME_DOWNLOAD_URL,
+      downloadUrl,
       runtimeVersion: WINDOWS_RUNTIME_VERSION,
       downloadId,
     });
@@ -184,7 +201,9 @@ const routeViewListeners = computed(() => {
     </div>
   </Transition>
   <RouterView v-if="appBootReady" v-slot="{ Component }">
-    <component :is="Component" v-on="routeViewListeners" />
+    <KeepAlive include="CreateTemplatePage">
+      <component :is="Component" v-on="routeViewListeners" />
+    </KeepAlive>
   </RouterView>
   <SessionExpiredDialogHost @confirm="handleSessionExpiredConfirm" />
   <SystemMessageHost />

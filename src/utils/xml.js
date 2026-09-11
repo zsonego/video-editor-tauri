@@ -485,6 +485,7 @@ export function parseXml(xmlText) {
     progress: 0,
     demoPath: childText(video, 'demo-path'),
     tracks: {
+      fixedMaterial: '',
       background: readTrackPath('bg'),
       overlay: readTrackPath('overlay'),
       audioBackground: readTrackPath('audio-bg'),

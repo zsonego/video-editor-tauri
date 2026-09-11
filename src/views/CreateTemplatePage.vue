@@ -1,6 +1,15 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
-import { useRouter } from 'vue-router';
+import {
+  computed,
+  onActivated,
+  onBeforeUnmount,
+  onDeactivated,
+  onMounted,
+  reactive,
+  ref,
+  watch,
+} from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
@@ -38,10 +47,15 @@ import {
   X,
 } from '@lucide/vue';
 import logoImage from '../assets/logo.png';
+import { createTemplateDraft } from '../api/template';
+import AccountCenterMenu from '../components/AccountCenterMenu.vue';
 import { assetPath, buildXml, generateId, parseXml } from '../utils/xml';
 import lutManifest from '../../src-tauri/resources/luts/luts.json';
 
+defineOptions({ name: 'CreateTemplatePage' });
+
 const router = useRouter();
+const route = useRoute();
 
 const storedAccountProfile = computed(() => {
   try {
@@ -60,6 +74,19 @@ const accountDisplayName = computed(
 
 function goWorkspaceHome() {
   router.push({ name: 'home' });
+}
+
+function openWorkspaceLibrary() {
+  router.push({
+    name: 'home',
+    query: { open: 'draft-library' },
+  });
+}
+
+function handleAccountLogout() {
+  localStorage.removeItem('token');
+  localStorage.removeItem('userInfo');
+  router.replace('/login');
 }
 
 const transitionEffects = [
@@ -188,6 +215,7 @@ const createInitialModel = () => ({
   progress: 0,
   demoPath: '',
   tracks: {
+    fixedMaterial: '',
     background: '',
     overlay: '',
     audioBackground: '',
@@ -201,12 +229,16 @@ const model = reactive(createInitialModel());
 const globalLutInheritedAreaIds = new Set();
 const selectedFilePaths = reactive({
   demo: '',
+  fixedMaterial: '',
   background: '',
   overlay: '',
   audioBackground: '',
   recording: '',
 });
 const selectedClipId = ref('');
+const isPrImportedTemplate = ref(false);
+const templateDraftCreating = ref(false);
+const activeDraftTemplateId = ref('');
 const areaDialogOpen = ref(false);
 const areaDraft = ref(null);
 const areaModalSectionsExpanded = reactive({
@@ -466,7 +498,7 @@ const subtitlePreviewText = computed(
   () => subtitleDraft.value?.defaultText?.trim() || '字幕预览',
 );
 
-function replaceModel(next) {
+function replaceModel(next, { fromPr = false } = {}) {
   if (!next || !Array.isArray(next.clips) || !Array.isArray(next.mediaGroups)) {
     throw new Error('模板数据缺少片段或素材目录。');
   }
@@ -483,6 +515,8 @@ function replaceModel(next) {
     selectedFilePaths[key] = '';
   });
   selectedClipId.value = '';
+  isPrImportedTemplate.value = fromPr;
+  activeDraftTemplateId.value = '';
   globalLutInheritedAreaIds.clear();
   stopClipPreview();
 }
@@ -829,6 +863,7 @@ function removeAsset(group, asset) {
 }
 
 function createClip() {
+  if (isPrImportedTemplate.value) return;
   const previous = model.clips.at(-1);
   const clip = {
     id: generateId(),
@@ -2185,7 +2220,7 @@ function validateModel() {
     return '视频总时长需填写为正整数。';
   }
   if (!model.demoPath) return '请先上传模板示例视频。';
-  if (!model.tracks.background) return '请先上传必需的固定素材视频。';
+  if (!model.tracks.fixedMaterial) return '请先上传必需的固定素材视频。';
 
   const assetIds = new Set(allAssets.value.map((asset) => asset.id));
   for (const group of model.mediaGroups) {
@@ -2263,12 +2298,12 @@ function validateModel() {
   return '';
 }
 
-async function exportXml() {
+async function generateTemplateXml() {
   applyGlobalLutToVariableAreas();
   const error = validateModel();
   if (error) {
     showToast(error, 'error');
-    return;
+    return null;
   }
   const selectedLutIds = new Set(
     model.clips.flatMap((clip) =>
@@ -2291,20 +2326,142 @@ async function exportXml() {
     );
   } catch (resolveError) {
     showToast(resolveError?.message || 'LUT 文件路径解析失败。', 'error');
-    return;
+    return null;
   }
   const xml = buildXml(model, {
     resolveLutStyle: (lutStyle) => lutAbsolutePaths.get(lutStyle) || lutStyle,
   });
+  const filename = (model.name || 'template').replace(/[\\/:*?"<>|]/g, '_');
+  return { xml, filename };
+}
+
+function downloadTemplateXml(xml, filename) {
   const blob = new Blob([xml], { type: 'application/xml;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
-  const filename = (model.name || 'template').replace(/[\\/:*?"<>|]/g, '_');
   link.href = url;
   link.download = `${filename}.xml`;
   link.click();
   URL.revokeObjectURL(url);
+}
+
+async function exportXml() {
+  const generated = await generateTemplateXml();
+  if (!generated) return;
+  downloadTemplateXml(generated.xml, generated.filename);
   showToast('XML 已生成并开始下载');
+}
+
+function getStoredRenterId() {
+  try {
+    const userInfo = JSON.parse(localStorage.getItem('userInfo') || 'null') || {};
+    const profile =
+      userInfo.user || userInfo.profile || userInfo.sysUser || userInfo;
+    return (
+      userInfo.renterId ||
+      userInfo.tenantId ||
+      profile.renterId ||
+      profile.tenantId ||
+      '-1'
+    );
+  } catch {
+    return '-1';
+  }
+}
+
+function getCurrentTemplateResourcePaths() {
+  const resourcePaths = [
+    ...Object.values(selectedFilePaths),
+    ...model.mediaGroups.flatMap((group) =>
+      group.assets.map((asset) => asset.sourcePath),
+    ),
+    ...model.clips.map((clip) => clip.topVideoSourcePath),
+  ];
+  return Array.from(
+    new Set(resourcePaths.map((path) => String(path || '').trim()).filter(Boolean)),
+  );
+}
+
+function sourcePathInAssetsDirectory(assetsDirectory, sourcePath) {
+  const name = fileName(sourcePath);
+  if (!assetsDirectory || !name) return '';
+  const separator = String(assetsDirectory).includes('\\') ? '\\' : '/';
+  return `${String(assetsDirectory).replace(/[\\/]+$/, '')}${separator}${name}`;
+}
+
+function rebaseCurrentTemplateResourcePaths(assetsDirectory) {
+  Object.keys(selectedFilePaths).forEach((key) => {
+    if (selectedFilePaths[key]) {
+      selectedFilePaths[key] = sourcePathInAssetsDirectory(
+        assetsDirectory,
+        selectedFilePaths[key],
+      );
+    }
+  });
+  model.mediaGroups.forEach((group) => {
+    group.assets.forEach((asset) => {
+      if (asset.sourcePath) {
+        asset.sourcePath = sourcePathInAssetsDirectory(
+          assetsDirectory,
+          asset.sourcePath,
+        );
+      }
+    });
+  });
+  model.clips.forEach((clip) => {
+    if (clip.topVideoSourcePath) {
+      clip.topVideoSourcePath = sourcePathInAssetsDirectory(
+        assetsDirectory,
+        clip.topVideoSourcePath,
+      );
+    }
+  });
+}
+
+async function createDraftTemplate() {
+  if (templateDraftCreating.value) return;
+
+  templateDraftCreating.value = true;
+  try {
+    const generated = await generateTemplateXml();
+    if (!generated) return;
+
+    let templateId = activeDraftTemplateId.value;
+    const isNewDraft = !templateId;
+    if (isNewDraft) {
+      const response = await createTemplateDraft(getStoredRenterId());
+      if (response?.code !== undefined && Number(response.code) !== 0) {
+        throw new Error(response?.msg || '创建模板草稿失败');
+      }
+
+      templateId = response?.data?.templateId;
+      if (templateId === undefined || templateId === null || templateId === '') {
+        throw new Error('创建模板草稿成功，但接口未返回 templateId');
+      }
+      activeDraftTemplateId.value = String(templateId);
+    }
+
+    const savedTemplate = await invoke('save_custom_template_xml', {
+      templateId: String(templateId),
+      templateXml: generated.xml,
+      resourcePaths: getCurrentTemplateResourcePaths(),
+      fixedMaterialPath: selectedFilePaths.fixedMaterial || '',
+      isPrImported: isPrImportedTemplate.value,
+    });
+    if (!savedTemplate?.assetsDir) {
+      throw new Error('模板已保存，但未返回素材目录');
+    }
+    rebaseCurrentTemplateResourcePaths(savedTemplate.assetsDir);
+    showToast(
+      isNewDraft
+        ? `模板草稿 ${templateId} 已创建并保存`
+        : `模板草稿 ${templateId} 已更新`,
+    );
+  } catch (error) {
+    showToast(error?.message || '模板草稿创建失败。', 'error');
+  } finally {
+    templateDraftCreating.value = false;
+  }
 }
 
 async function importXml(event) {
@@ -2335,14 +2492,28 @@ function resolvePrBridgeResourcePath(projectRoot, resourcePath) {
   return `${root}${separator}${parts.join(separator)}`;
 }
 
-function applyPrTemplateExport(payload) {
+function applyTemplateForEditing(
+  payload,
+  { fromPr = false, templateId = '', fixedMaterialPath = '' } = {},
+) {
   if (!payload?.xmlContent || !payload?.projectRoot) {
-    throw new Error('PR 导出通知缺少模板内容或项目目录。');
+    throw new Error('模板内容或模板目录不完整。');
   }
 
   const nextModel = parseXml(payload.xmlContent);
+  const resolvedFixedMaterialPath = fixedMaterialPath ||
+    (fromPr
+      ? resolvePrBridgeResourcePath(
+          payload.projectRoot,
+          'template/assets/tmptop.mov',
+        )
+      : '');
+  nextModel.tracks.fixedMaterial = resolvedFixedMaterialPath
+    ? assetPath(fileName(resolvedFixedMaterialPath))
+    : '';
   const resolvedSelections = {
     demo: resolvePrBridgeResourcePath(payload.projectRoot, nextModel.demoPath),
+    fixedMaterial: resolvedFixedMaterialPath,
     background: resolvePrBridgeResourcePath(
       payload.projectRoot,
       nextModel.tracks.background,
@@ -2382,7 +2553,8 @@ function applyPrTemplateExport(payload) {
     (left, right) => Number(left.starttime) - Number(right.starttime),
   );
 
-  replaceModel(nextModel);
+  replaceModel(nextModel, { fromPr });
+  if (templateId) activeDraftTemplateId.value = String(templateId);
   Object.assign(selectedFilePaths, resolvedSelections);
   const videoAssets = model.mediaGroups.flatMap((group) =>
     group.assets.filter(
@@ -2391,7 +2563,46 @@ function applyPrTemplateExport(payload) {
   );
   videoAssets.forEach(enqueueThumbnail);
   selectedClipId.value = model.clips[0]?.id || '';
+}
+
+function applyPrTemplateExport(payload) {
+  applyTemplateForEditing(payload, { fromPr: true });
   showToast(`已接收 PR 模板“${model.name}”`);
+}
+
+let customTemplateLoadingId = '';
+
+async function loadCustomTemplateForEditing(templateId) {
+  const normalizedId = String(templateId || '').trim();
+  if (!normalizedId || customTemplateLoadingId === normalizedId) return;
+  customTemplateLoadingId = normalizedId;
+  try {
+    const detail = await invoke('read_custom_template', {
+      templateId: normalizedId,
+    });
+    applyTemplateForEditing(
+      {
+        xmlContent: detail?.xmlContent,
+        projectRoot: detail?.projectRoot,
+      },
+      {
+        fromPr: Boolean(detail?.isPrImported),
+        templateId: detail?.templateId || normalizedId,
+        fixedMaterialPath: detail?.fixedMaterialPath || '',
+      },
+    );
+    showToast(`已打开我的模板“${model.name}”`);
+  } catch (error) {
+    console.error('读取我的模板失败', error);
+    showToast(error?.message || String(error) || '读取我的模板失败。', 'error');
+  } finally {
+    customTemplateLoadingId = '';
+    if (String(route.query.customTemplateId || '') === normalizedId) {
+      const nextQuery = { ...route.query };
+      delete nextQuery.customTemplateId;
+      void router.replace({ name: 'create-template', query: nextQuery });
+    }
+  }
 }
 
 function handlePrTemplateExport(payload) {
@@ -2462,6 +2673,39 @@ async function startPrBridgeForPage() {
       );
     }
   }
+}
+
+function activateCreateTemplatePage() {
+  if (!prBridgePageActive) {
+    prBridgePageActive = true;
+    thumbnailPageDisposed = false;
+    startPrBridgeForPage();
+  }
+  void loadCustomTemplateForEditing(route.query.customTemplateId);
+}
+
+function deactivateCreateTemplatePage() {
+  if (!prBridgePageActive && !prBridgeSessionId) return;
+  prBridgePageActive = false;
+  if (prBridgePollTimer) {
+    window.clearInterval(prBridgePollTimer);
+    prBridgePollTimer = null;
+  }
+  prBridgePolling = false;
+  handledPrBridgeEventIds.clear();
+  const bridgeSessionId = prBridgeSessionId;
+  prBridgeSessionId = '';
+  if (bridgeSessionId) {
+    invoke('stop_pr_bridge', { sessionId: bridgeSessionId }).catch((error) => {
+      console.error('关闭 PR 对接服务失败', error);
+    });
+  }
+  stopPrBridgeEventListener?.();
+  stopPrBridgeEventListener = null;
+  closeAreaContextMenu();
+  stopAreaInteraction();
+  stopSubtitleInteraction();
+  stopClipPreview();
 }
 
 function assetName(assetId) {
@@ -2706,28 +2950,12 @@ watch(
   { deep: true, flush: 'sync' },
 );
 
-onMounted(() => {
-  prBridgePageActive = true;
-  startPrBridgeForPage();
-});
+onMounted(activateCreateTemplatePage);
+onActivated(activateCreateTemplatePage);
+onDeactivated(deactivateCreateTemplatePage);
 
 onBeforeUnmount(() => {
-  prBridgePageActive = false;
-  if (prBridgePollTimer) {
-    window.clearInterval(prBridgePollTimer);
-    prBridgePollTimer = null;
-  }
-  prBridgePolling = false;
-  handledPrBridgeEventIds.clear();
-  const bridgeSessionId = prBridgeSessionId;
-  prBridgeSessionId = '';
-  if (bridgeSessionId) {
-    invoke('stop_pr_bridge', { sessionId: bridgeSessionId }).catch((error) => {
-      console.error('关闭 PR 对接服务失败', error);
-    });
-  }
-  stopPrBridgeEventListener?.();
-  stopPrBridgeEventListener = null;
+  deactivateCreateTemplatePage();
   thumbnailPageDisposed = true;
   closeAreaContextMenu();
   thumbnailQueue.splice(0).forEach(disposeAsset);
@@ -2789,7 +3017,7 @@ onBeforeUnmount(() => {
       <button
         class="h-9 w-24 text-on-surface-variant hover:text-electric-blue shrink-0 flex items-center justify-center gap-1.5 bg-surface-container-low/50 shadow-sm rounded-lg transition-all active:scale-95 hover:bg-surface-container-high border border-outline-variant/20"
         type="button"
-        @click="goWorkspaceHome"
+        @click="openWorkspaceLibrary"
       >
         <span class="text-[13px] font-bold whitespace-nowrap">工程库</span>
       </button>
@@ -2802,12 +3030,7 @@ onBeforeUnmount(() => {
           >导出</span
         >
       </button>
-      <button
-        class="h-9 w-24 shrink-0 flex items-center justify-center gap-1.5 bg-surface-container-low/50 text-on-surface-variant shadow-sm rounded-lg border border-outline-variant/20"
-        type="button"
-      >
-        <span class="text-[13px] font-bold">个人中心</span>
-      </button>
+      <AccountCenterMenu @logout="handleAccountLogout" />
     </div>
   </header>
 
@@ -2848,9 +3071,19 @@ onBeforeUnmount(() => {
           <Play :size="16" />
           预览
         </button>
-        <button class="button button-primary" type="button" @click="exportXml">
-          <Download :size="16" />
-          生成模板
+        <button
+          class="button button-primary"
+          type="button"
+          :disabled="templateDraftCreating"
+          @click="createDraftTemplate"
+        >
+          <LoaderCircle
+            v-if="templateDraftCreating"
+            :size="16"
+            class="draft-create-spinner"
+          />
+          <Download v-else :size="16" />
+          {{ templateDraftCreating ? '创建中...' : '生成模板' }}
         </button>
       </div>
     </header>
@@ -2953,18 +3186,18 @@ onBeforeUnmount(() => {
             <div>
               <strong>固定素材层</strong>
               <small>{{
-                model.tracks.background
-                  ? fileName(model.tracks.background)
+                model.tracks.fixedMaterial
+                  ? fileName(model.tracks.fixedMaterial)
                   : '尚未上传'
               }}</small>
             </div>
             <div class="track-actions">
               <button
-                v-if="model.tracks.background"
+                v-if="model.tracks.fixedMaterial"
                 class="plain-icon danger-hover"
                 type="button"
                 title="移除固定素材"
-                @click="clearTrackFile('background')"
+                @click="clearTrackFile('fixedMaterial')"
               >
                 <X :size="13" />
               </button>
@@ -2972,7 +3205,7 @@ onBeforeUnmount(() => {
                 class="icon-button"
                 type="button"
                 title="上传固定素材"
-                @click="updateTrackFile('background')"
+                @click="updateTrackFile('fixedMaterial')"
               >
                 <Upload :size="14" />
               </button>
@@ -3451,7 +3684,12 @@ onBeforeUnmount(() => {
             </div>
           </article>
 
-          <button class="add-clip-card" type="button" @click="createClip">
+          <button
+            v-if="!isPrImportedTemplate"
+            class="add-clip-card"
+            type="button"
+            @click="createClip"
+          >
             <span><Plus :size="24" /></span>
             <strong>{{ model.clips.length ? '添加片段' : '新建 Clip' }}</strong>
             <small>自动生成片段 ID</small>
@@ -5871,6 +6109,10 @@ label:focus-within {
 }
 
 .thumbnail-spinner {
+  animation: thumbnail-spin 0.8s linear infinite;
+}
+
+.draft-create-spinner {
   animation: thumbnail-spin 0.8s linear infinite;
 }
 
