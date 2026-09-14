@@ -8,6 +8,7 @@ import SessionExpiredDialogHost from './components/SessionExpiredDialogHost.vue'
 import SystemMessageHost from './components/SystemMessageHost.vue';
 import {
   encodeBase64Url,
+  WINDOWS_RUNTIME_AUTO_DOWNLOAD_ENABLED,
   WINDOWS_RUNTIME_DOWNLOAD_PATH,
   WINDOWS_RUNTIME_VERSION,
 } from './config/windowsRuntime';
@@ -95,7 +96,7 @@ async function prepareWindowsRuntime() {
 }
 
 onMounted(async () => {
-  if (!window.__TAURI_INTERNALS__) {
+  if (!WINDOWS_RUNTIME_AUTO_DOWNLOAD_ENABLED || !window.__TAURI_INTERNALS__) {
     appBootReady.value = true;
     return;
   }
