@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { createTemplateDraft } from './template';
 import { request } from './request';
-import baiduSdkUrl from '../../baidubce-sdk.bundle.min.js?url';
+import baiduSdkUrl from '../assets/vendor/baidubce-sdk.bundle.min.js?url';
 
 const CHUNK_SIZE = 20 * 1024 * 1024;
 const MAX_PART_RETRIES = 3;
