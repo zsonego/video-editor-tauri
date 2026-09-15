@@ -59,6 +59,10 @@ export function buildXml(model, options = {}) {
     typeof options.resolveLutStyle === 'function'
       ? options.resolveLutStyle
       : (value) => value;
+  const resolveResourcePath =
+    typeof options.resolveResourcePath === 'function'
+      ? options.resolveResourcePath
+      : (value) => value;
   const lines = [
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<!DOCTYPE xmeml>',
@@ -67,7 +71,7 @@ export function buildXml(model, options = {}) {
     '        <video>',
     `            <duration>${n(model.duration)}</duration>`,
     `            <resolution>${text(model.resolution)}</resolution>`,
-    `            <demo-path>${text(model.demoPath)}</demo-path>`,
+    `            <demo-path>${text(resolveResourcePath(model.demoPath, { type: 'demo' }))}</demo-path>`,
     '        </video>',
     '        <tracks>',
   ];
@@ -75,7 +79,7 @@ export function buildXml(model, options = {}) {
   if (model.tracks.background) {
     lines.push(
       '            <track id="bg" z-index="0">',
-      `                <filepath>${text(model.tracks.background)}</filepath>`,
+      `                <filepath>${text(resolveResourcePath(model.tracks.background, { type: 'track', key: 'background' }))}</filepath>`,
       '            </track>',
     );
   }
@@ -84,7 +88,7 @@ export function buildXml(model, options = {}) {
   if (model.tracks.overlay) {
     lines.push(
       '            <track id="overlay" z-index="2">',
-      `                <filepath>${text(model.tracks.overlay)}</filepath>`,
+      `                <filepath>${text(resolveResourcePath(model.tracks.overlay, { type: 'track', key: 'overlay' }))}</filepath>`,
       '            </track>',
     );
   }
@@ -92,7 +96,7 @@ export function buildXml(model, options = {}) {
   if (model.tracks.audioBackground) {
     lines.push(
       '            <track id="audio-bg" z-index="3">',
-      `                <filepath>${text(model.tracks.audioBackground)}</filepath>`,
+      `                <filepath>${text(resolveResourcePath(model.tracks.audioBackground, { type: 'track', key: 'audioBackground' }))}</filepath>`,
       '            </track>',
     );
   }
@@ -100,7 +104,7 @@ export function buildXml(model, options = {}) {
   if (model.tracks.recording) {
     lines.push(
       '            <track id="recording" z-index="4">',
-      `                <filepath>${text(model.tracks.recording)}</filepath>`,
+      `                <filepath>${text(resolveResourcePath(model.tracks.recording, { type: 'track', key: 'recording' }))}</filepath>`,
       '            </track>',
     );
   }
@@ -119,7 +123,7 @@ export function buildXml(model, options = {}) {
     );
     group.assets.forEach((assetItem) => {
       lines.push(
-        `                <asset id="${attr(assetItem.id)}" filepath="${attr(assetItem.filepath)}" />`,
+        `                <asset id="${attr(assetItem.id)}" filepath="${attr(resolveResourcePath(assetItem.filepath, { type: 'asset', asset: assetItem, group }))}" />`,
       );
     });
     lines.push('            </default-asset>', '        </media-asset>');
@@ -137,7 +141,9 @@ export function buildXml(model, options = {}) {
     );
 
     if (clip.topVideo) {
-      lines.push(`                <top-video>${text(clip.topVideo)}</top-video>`);
+      lines.push(
+        `                <top-video>${text(resolveResourcePath(clip.topVideo, { type: 'topVideo', clip }))}</top-video>`,
+      );
     }
 
     clip.areas.forEach((area) => {

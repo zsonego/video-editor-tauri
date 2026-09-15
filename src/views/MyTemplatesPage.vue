@@ -5,12 +5,20 @@ import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import logoImage from '../assets/logo.png';
 import AccountCenterMenu from '../components/AccountCenterMenu.vue';
 import AppIcon from '../components/AppIcon.vue';
+import { submitLocalTemplate } from '../api/templateUpload';
 import { systemMessage } from '../utils/message';
 
 const router = useRouter();
 const templates = ref([]);
 const loading = ref(false);
 const openingTemplateId = ref('');
+const submittingTemplateKey = ref('');
+const uploadDialogOpen = ref(false);
+const uploadProgress = ref(0);
+const uploadStage = ref('');
+const uploadError = ref('');
+const uploadComplete = ref(false);
+const uploadTemplate = ref(null);
 
 const storedAccountProfile = computed(() => {
   try {
@@ -94,8 +102,34 @@ async function editTemplate(template) {
   }
 }
 
-function submitTemplate() {
-  systemMessage.info('模板提交上传功能暂未接入');
+async function submitTemplate(template) {
+  if (!template?.templateId || submittingTemplateKey.value) return;
+  uploadTemplate.value = template;
+  submittingTemplateKey.value = String(template.templateId);
+  uploadDialogOpen.value = true;
+  uploadProgress.value = 0;
+  uploadStage.value = '正在准备上传...';
+  uploadError.value = '';
+  uploadComplete.value = false;
+  try {
+    await submitLocalTemplate(template, (update) => {
+      uploadStage.value = update.stage || uploadStage.value;
+      uploadProgress.value = Math.max(0, Math.min(100, Number(update.progress) || 0));
+    });
+    uploadComplete.value = true;
+    systemMessage.success('模板上传成功');
+  } catch (error) {
+    uploadError.value = error?.message || String(error) || '模板上传失败';
+    uploadStage.value = '上传失败';
+    systemMessage.error(uploadError.value);
+  } finally {
+    submittingTemplateKey.value = '';
+  }
+}
+
+function closeUploadDialog() {
+  if (submittingTemplateKey.value) return;
+  uploadDialogOpen.value = false;
 }
 
 onMounted(() => {
@@ -169,7 +203,6 @@ onMounted(() => {
         <div v-else-if="!templates.length" class="library-state">
           <span class="state-icon"><AppIcon name="video_library" :size="38" /></span>
           <strong>还没有自己创建的模板</strong>
-          <p>在模板加工厂点击“生成模板”后，模板会显示在这里。</p>
           <button type="button" @click="createTemplate">去创建模板</button>
         </div>
 
@@ -215,10 +248,15 @@ onMounted(() => {
                   type="button"
                   title="提交模板"
                   aria-label="提交模板"
+                  :disabled="Boolean(submittingTemplateKey)"
                   @click.stop="submitTemplate(template)"
                 >
-                  <AppIcon name="publish" :size="17" />
-                  <span>提交</span>
+                  <AppIcon
+                    :name="submittingTemplateKey === String(template.templateId) ? 'progress_activity' : 'publish'"
+                    :size="17"
+                    :class="{ spinning: submittingTemplateKey === String(template.templateId) }"
+                  />
+                  <span>{{ submittingTemplateKey === String(template.templateId) ? '上传中' : '提交' }}</span>
                 </button>
               </div>
               <div class="template-meta">
@@ -230,6 +268,20 @@ onMounted(() => {
         </div>
       </section>
     </main>
+    <div v-if="uploadDialogOpen" class="upload-dialog-backdrop" role="presentation">
+      <section class="upload-dialog" role="dialog" aria-modal="true" aria-labelledby="upload-dialog-title">
+        <h2 id="upload-dialog-title">{{ uploadComplete ? '模板上传完成' : uploadError ? '模板上传失败' : '正在上传模板' }}</h2>
+        <p class="upload-template-name" :title="uploadTemplate?.name">{{ uploadTemplate?.name }}</p>
+        <p class="upload-stage">{{ uploadStage }}</p>
+        <div class="upload-progress-heading"><span>总进度</span><span>{{ uploadProgress }}%</span></div>
+        <div class="upload-progress-track"><div :style="{ width: `${uploadProgress}%` }"></div></div>
+        <p v-if="uploadError" class="upload-error">{{ uploadError }}</p>
+        <div v-if="!submittingTemplateKey" class="upload-dialog-actions">
+          <button v-if="uploadError" type="button" class="upload-retry" @click="submitTemplate(uploadTemplate)">重试上传</button>
+          <button type="button" class="upload-dismiss" @click="closeUploadDialog">{{ uploadComplete ? '完成' : '关闭' }}</button>
+        </div>
+      </section>
+    </div>
   </div>
 </template>
 
@@ -405,6 +457,101 @@ onMounted(() => {
   color: white;
   background: #f26645;
   transform: translateY(-1px);
+}
+
+.submit-button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.upload-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 500;
+  display: grid;
+  place-items: center;
+  background: rgba(17, 20, 23, 0.62);
+}
+
+.upload-dialog {
+  width: min(440px, calc(100vw - 32px));
+  padding: 24px;
+  color: #20201e;
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.25);
+}
+
+.upload-dialog h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.upload-template-name {
+  margin: 6px 0 18px;
+  overflow: hidden;
+  color: #777872;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upload-stage {
+  min-height: 20px;
+  margin: 0 0 15px;
+  font-weight: 700;
+}
+
+.upload-progress-heading {
+  display: flex;
+  justify-content: space-between;
+  margin: 14px 0 6px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.upload-progress-track {
+  height: 9px;
+  overflow: hidden;
+  border-radius: 20px;
+  background: #eee;
+}
+
+.upload-progress-track > div {
+  height: 100%;
+  border-radius: inherit;
+  background: #f26645;
+  transition: width 220ms ease;
+}
+
+.upload-error {
+  margin: 16px 0 0;
+  color: #c73b32;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.upload-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+.upload-dialog-actions button {
+  padding: 9px 15px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.upload-retry {
+  color: white;
+  background: #f26645;
+}
+
+.upload-dismiss {
+  color: #333;
+  background: #ededeb;
 }
 
 .edit-mask {

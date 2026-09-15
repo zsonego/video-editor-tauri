@@ -6,13 +6,13 @@ use std::{
     fs::OpenOptions,
     hash::{DefaultHasher, Hasher},
     io,
-    io::Read,
     io::Write,
+    io::{Read, Seek, SeekFrom},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::Command,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
     },
     thread::{self, JoinHandle},
@@ -85,6 +85,8 @@ unsafe extern "C" {
 }
 
 static DOWNLOAD_CANCEL_FLAGS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
+static ASSET_THUMBNAIL_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+static CUSTOM_STORAGE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 const TEMPLATE_DOWNLOAD_EVENT_NAME: &str = "template-download-progress";
 #[cfg(target_os = "windows")]
@@ -586,9 +588,7 @@ fn start_pr_bridge(
         .map_err(|error| format!("无法配置 PR 对接服务：{error}"))?;
 
     let session_id = new_pr_bridge_session_id();
-    let output_directory = aicut_root_dir()?.join("custom").join("temp");
-    fs::create_dir_all(&output_directory)
-        .map_err(|error| format!("无法创建 PR 模板临时输出目录：{error}"))?;
+    let output_directory = ensure_custom_storage_dirs()?.pr_temp;
     let info = pr_bridge_info(&session_id, path_to_xml_filepath(output_directory));
     let running = Arc::new(AtomicBool::new(true));
     let thread_running = running.clone();
@@ -781,6 +781,30 @@ struct ComposerExportProgress {
 #[serde(rename_all = "camelCase")]
 struct ComposerExportResult {
     output_path: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CustomTemplateVideoResult {
+    output_path: String,
+    cover_path: String,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CustomTemplateUploadState {
+    backend_template_id: Option<String>,
+    finalized: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CustomTemplateUploadFiles {
+    xml_size: u64,
+    cover_size: u64,
+    assets_size: u64,
+    backend_template_id: Option<String>,
+    finalized: bool,
 }
 
 #[derive(Deserialize, Serialize, Default)]
@@ -1814,6 +1838,104 @@ fn aicut_root_dir() -> Result<PathBuf, String> {
         .ok_or_else(|| "Unable to resolve local app data directory".to_string())
 }
 
+struct CustomStorageDirs {
+    project: PathBuf,
+    preview: PathBuf,
+    pr_temp: PathBuf,
+}
+
+fn migrate_directory_contents(source: &Path, destination: &Path) -> Result<(), String> {
+    if !source.is_dir() {
+        return Ok(());
+    }
+    fs::create_dir_all(destination).map_err(|error| error.to_string())?;
+    for entry in fs::read_dir(source).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let destination_entry = destination.join(entry.file_name());
+        if destination_entry.exists() {
+            continue;
+        }
+        fs::rename(entry.path(), destination_entry).map_err(|error| {
+            format!(
+                "迁移旧模板工厂目录失败（{}）：{error}",
+                entry.path().display()
+            )
+        })?;
+    }
+    if fs::read_dir(source)
+        .map_err(|error| error.to_string())?
+        .next()
+        .is_none()
+    {
+        fs::remove_dir(source).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn ensure_custom_storage_dirs_at(aicut_root: &Path) -> Result<CustomStorageDirs, String> {
+    let custom_root = aicut_root.join("custom");
+    fs::create_dir_all(&custom_root).map_err(|error| error.to_string())?;
+
+    let project_dir = custom_root.join("project");
+    let preview_dir = custom_root.join("preview");
+    let pr_temp_dir = custom_root.join("prTemp");
+    fs::create_dir_all(&project_dir).map_err(|error| error.to_string())?;
+
+    migrate_directory_contents(&custom_root.join("temp"), &pr_temp_dir)?;
+    fs::create_dir_all(&pr_temp_dir).map_err(|error| error.to_string())?;
+
+    let legacy_preview_dir = aicut_root.join("preview").join("template-factory");
+    migrate_directory_contents(&legacy_preview_dir, &preview_dir)?;
+    fs::create_dir_all(&preview_dir).map_err(|error| error.to_string())?;
+
+    for entry in fs::read_dir(&custom_root).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        if !entry
+            .file_type()
+            .map_err(|error| error.to_string())?
+            .is_dir()
+        {
+            continue;
+        }
+        let directory_name = entry.file_name().to_string_lossy().to_string();
+        if matches!(
+            directory_name.to_ascii_lowercase().as_str(),
+            "project" | "preview" | "prtemp" | "temp"
+        ) {
+            continue;
+        }
+        let legacy_template_dir = entry.path();
+        if !legacy_template_dir.join("template.xml").is_file() {
+            continue;
+        }
+        let destination = project_dir.join(entry.file_name());
+        if destination.exists() {
+            continue;
+        }
+        fs::rename(&legacy_template_dir, &destination).map_err(|error| {
+            format!(
+                "迁移旧的我的模板目录失败（{}）：{error}",
+                legacy_template_dir.display()
+            )
+        })?;
+    }
+
+    Ok(CustomStorageDirs {
+        project: project_dir,
+        preview: preview_dir,
+        pr_temp: pr_temp_dir,
+    })
+}
+
+fn ensure_custom_storage_dirs() -> Result<CustomStorageDirs, String> {
+    let _guard = CUSTOM_STORAGE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "模板工厂存储目录锁定失败".to_string())?;
+    let aicut_root = aicut_root_dir()?;
+    ensure_custom_storage_dirs_at(&aicut_root)
+}
+
 fn ensure_aicut_dirs() -> Result<(PathBuf, PathBuf), String> {
     let root = aicut_root_dir()?;
     let template_dir = root.join("template");
@@ -1914,6 +2036,25 @@ fn sanitize_name(value: &str) -> String {
         .chars()
         .map(|ch| {
             if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    if sanitized.is_empty() {
+        "template".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn sanitize_custom_template_key(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|ch| {
+            if ch.is_alphanumeric() || ch == '-' || ch == '_' {
                 ch
             } else {
                 '_'
@@ -2252,6 +2393,7 @@ struct TemplateMediaAsset {
 struct TemplateClipArea {
     id: String,
     asset_id: String,
+    property_inner: Option<String>,
 }
 
 #[derive(Clone)]
@@ -3565,10 +3707,14 @@ fn parse_template_clips(xml_content: &str) -> Vec<TemplateClips> {
                     let id = xml_attribute_value(&clip_tag, "id")?;
                     let areas = find_xml_element_blocks(&clip_inner, "area")
                         .into_iter()
-                        .filter_map(|(area_tag, _)| {
+                        .filter_map(|(area_tag, area_inner)| {
                             Some(TemplateClipArea {
                                 id: xml_attribute_value(&area_tag, "id")?,
                                 asset_id: xml_attribute_value(&area_tag, "asset-id")?,
+                                property_inner: find_xml_element_blocks(&area_inner, "property")
+                                    .into_iter()
+                                    .next()
+                                    .map(|(_, inner)| inner),
                             })
                         })
                         .collect::<Vec<_>>();
@@ -3672,11 +3818,31 @@ fn generate_project_file_xml(
             ));
 
             for area in &clip.areas {
-                output.push_str(&format!(
-                    "                <area id=\"{}\" asset-id=\"{}\" offset=\"0\" />\n",
-                    escape_xml_attribute(&area.id),
-                    escape_xml_attribute(&area.asset_id)
-                ));
+                if let Some(property_inner) = &area.property_inner {
+                    output.push_str(&format!(
+                        "                <area id=\"{}\" asset-id=\"{}\" offset=\"0\">\n",
+                        escape_xml_attribute(&area.id),
+                        escape_xml_attribute(&area.asset_id)
+                    ));
+                    output.push_str("                    <property>\n");
+                    for property_line in property_inner.lines() {
+                        let property_line = property_line.trim();
+                        if property_line.is_empty() {
+                            continue;
+                        }
+                        output.push_str("                        ");
+                        output.push_str(property_line);
+                        output.push('\n');
+                    }
+                    output.push_str("                    </property>\n");
+                    output.push_str("                </area>\n");
+                } else {
+                    output.push_str(&format!(
+                        "                <area id=\"{}\" asset-id=\"{}\" offset=\"0\" />\n",
+                        escape_xml_attribute(&area.id),
+                        escape_xml_attribute(&area.asset_id)
+                    ));
+                }
             }
 
             output.push_str("            </clip>\n\n");
@@ -4783,12 +4949,12 @@ fn save_custom_template_xml(
         return Err("模板 XML 不能为空".to_string());
     }
 
-    let sanitized_template_id = sanitize_name(template_id);
+    let sanitized_template_id = sanitize_custom_template_key(template_id);
     if sanitized_template_id.eq_ignore_ascii_case("temp") {
         return Err("templateId 不能为 temp".to_string());
     }
-    let custom_root = aicut_root_dir()?.join("custom");
-    let custom_template_dir = custom_root.join(sanitized_template_id);
+    let custom_storage = ensure_custom_storage_dirs()?;
+    let custom_template_dir = custom_storage.project.join(sanitized_template_id);
     fs::create_dir_all(&custom_template_dir).map_err(|error| error.to_string())?;
 
     let assets_dir = custom_template_dir.join("assets");
@@ -4855,7 +5021,7 @@ fn save_custom_template_xml(
     )
     .map_err(|error| format!("模板编辑状态保存失败：{error}"))?;
 
-    let temp_dir = custom_root.join("temp");
+    let temp_dir = custom_storage.pr_temp;
     if temp_dir.exists() {
         fs::remove_dir_all(&temp_dir).map_err(|error| format!("PR 临时素材清理失败：{error}"))?;
     }
@@ -4954,20 +5120,16 @@ fn custom_template_fixed_material_path(
 
 #[tauri::command]
 fn list_custom_templates() -> Result<Vec<CustomTemplateSummary>, String> {
-    let custom_root = aicut_root_dir()?.join("custom");
-    fs::create_dir_all(&custom_root).map_err(|error| error.to_string())?;
+    let project_root = ensure_custom_storage_dirs()?.project;
     let mut templates = Vec::new();
 
-    for entry in fs::read_dir(&custom_root).map_err(|error| error.to_string())? {
+    for entry in fs::read_dir(&project_root).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
         let file_type = entry.file_type().map_err(|error| error.to_string())?;
         if !file_type.is_dir() {
             continue;
         }
         let template_id = entry.file_name().to_string_lossy().to_string();
-        if template_id.eq_ignore_ascii_case("temp") {
-            continue;
-        }
         let template_dir = entry.path();
         let template_file_path = template_dir.join("template.xml");
         if !template_file_path.is_file() {
@@ -5013,12 +5175,12 @@ fn read_custom_template(template_id: String) -> Result<CustomTemplateDetail, Str
     if template_id.is_empty() {
         return Err("templateId 不能为空".to_string());
     }
-    let sanitized_template_id = sanitize_name(template_id);
+    let sanitized_template_id = sanitize_custom_template_key(template_id);
     if sanitized_template_id.eq_ignore_ascii_case("temp") {
         return Err("不能读取临时模板目录".to_string());
     }
-    let template_dir = aicut_root_dir()?
-        .join("custom")
+    let template_dir = ensure_custom_storage_dirs()?
+        .project
         .join(&sanitized_template_id);
     let template_file_path = template_dir.join("template.xml");
     if !template_file_path.is_file() {
@@ -5698,6 +5860,506 @@ async fn preview_project_video(
     Ok(ComposerExportResult {
         output_path: output_path.to_string_lossy().to_string(),
     })
+}
+
+#[tauri::command]
+async fn preview_template_factory_video(
+    app: AppHandle,
+    composer: tauri::State<'_, ComposerState>,
+    template_xml: String,
+    preview_id: String,
+) -> Result<ComposerExportResult, String> {
+    if template_xml.trim().is_empty() {
+        return Err("模板 XML 不能为空".to_string());
+    }
+
+    let preview_dir = ensure_custom_storage_dirs()?.preview;
+
+    let template_path = preview_dir.join("template.xml");
+    let project_path = preview_dir.join("projectFile.xml");
+    let output_path = preview_dir.join("template-preview.mp4");
+    let title_path = preview_dir.join("title.png");
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_millis();
+    let project_xml =
+        generate_project_file_xml(&template_xml, "template-factory-preview", timestamp)?;
+
+    if output_path.is_file() {
+        fs::remove_file(&output_path)
+            .map_err(|error| format!("覆盖旧模板预览视频失败: {error}"))?;
+    }
+    if title_path.is_file() {
+        fs::remove_file(&title_path).map_err(|error| format!("清理旧模板封面失败: {error}"))?;
+    }
+    fs::write(&template_path, template_xml.as_bytes())
+        .map_err(|error| format!("保存临时模板 XML 失败: {error}"))?;
+    fs::write(&project_path, project_xml.as_bytes())
+        .map_err(|error| format!("保存临时工程 XML 失败: {error}"))?;
+
+    let template_path_text = path_to_xml_filepath(template_path);
+    let project_path_text = path_to_xml_filepath(project_path);
+    let output_path_text = path_to_xml_filepath(output_path.clone());
+    let composer = composer.inner().clone();
+    let preview_id_for_progress = preview_id.clone();
+    let app_for_progress = app.clone();
+
+    emit_composer_progress(&app, &preview_id, 0, "正在准备模板预览...");
+    let compose_result = tauri::async_runtime::spawn_blocking(move || {
+        let composer = composer.lock().map_err(|error| error.to_string())?;
+        let _wake_guard = ExportWakeGuard::acquire().ok();
+        composer.compose_video(
+            &template_path_text,
+            &project_path_text,
+            &output_path_text,
+            r#"{"watermark":false}"#,
+            true,
+            app_for_progress,
+            preview_id_for_progress,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+
+    if let Err(error) = compose_result {
+        if output_path.is_file() {
+            let _ = fs::remove_file(&output_path);
+        }
+        return Err(error);
+    }
+    if !output_path.is_file() {
+        return Err("模板预览合成成功，但未生成视频文件".to_string());
+    }
+
+    emit_composer_progress(&app, &preview_id, 100, "模板预览生成完成");
+    Ok(ComposerExportResult {
+        output_path: path_to_xml_filepath(output_path),
+    })
+}
+
+#[tauri::command]
+async fn save_custom_template_video(
+    template_id: String,
+    preview_video_path: String,
+    template_xml: String,
+) -> Result<CustomTemplateVideoResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let template_id = template_id.trim();
+        if template_id.is_empty() {
+            return Err("templateId 不能为空".to_string());
+        }
+        if template_xml.trim().is_empty() {
+            return Err("模板 XML 不能为空".to_string());
+        }
+
+        let sanitized_template_id = sanitize_custom_template_key(template_id);
+        if sanitized_template_id.eq_ignore_ascii_case("temp") {
+            return Err("templateId 不能为 temp".to_string());
+        }
+
+        let custom_storage = ensure_custom_storage_dirs()?;
+        let preview_root = custom_storage.preview;
+        let preview_root = fs::canonicalize(&preview_root)
+            .map_err(|error| format!("模板预览目录不可用: {error}"))?;
+        let preview_video_path = fs::canonicalize(PathBuf::from(preview_video_path))
+            .map_err(|error| format!("模板预览视频不存在: {error}"))?;
+        if !preview_video_path.starts_with(&preview_root) || !preview_video_path.is_file() {
+            return Err("模板预览视频路径无效".to_string());
+        }
+
+        let preview_title_path = preview_video_path
+            .parent()
+            .ok_or_else(|| "模板预览视频缺少父目录".to_string())?
+            .join("title.png");
+        if !preview_title_path.is_file() {
+            return Err("视频生成完成，但未生成 title.png 封面".to_string());
+        }
+
+        let custom_template_dir = custom_storage.project.join(sanitized_template_id);
+        let template_file_path = custom_template_dir.join("template.xml");
+        if !template_file_path.is_file() {
+            return Err("我的模板中不存在对应的 template.xml".to_string());
+        }
+        let assets_dir = custom_template_dir.join("assets");
+        fs::create_dir_all(&assets_dir)
+            .map_err(|error| format!("创建模板素材目录失败: {error}"))?;
+
+        let output_path = assets_dir.join("template.mp4");
+        let cover_path = custom_template_dir.join("cover.png");
+        fs::copy(&preview_video_path, &output_path)
+            .map_err(|error| format!("替换模板预览视频失败: {error}"))?;
+        fs::copy(&preview_title_path, &cover_path)
+            .map_err(|error| format!("保存模板封面失败: {error}"))?;
+        fs::remove_file(&preview_title_path)
+            .map_err(|error| format!("移动模板封面失败: {error}"))?;
+        fs::write(&template_file_path, template_xml.as_bytes())
+            .map_err(|error| format!("更新模板 XML 失败: {error}"))?;
+
+        Ok(CustomTemplateVideoResult {
+            output_path: path_to_xml_filepath(output_path),
+            cover_path: path_to_xml_filepath(cover_path),
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn custom_template_upload_dir(local_template_key: &str) -> Result<PathBuf, String> {
+    let key = local_template_key.trim();
+    if key.is_empty() || sanitize_custom_template_key(key) != key {
+        return Err("本地模板目录名无效".to_string());
+    }
+    let template_dir = ensure_custom_storage_dirs()?.project.join(key);
+    if !template_dir.join("template.xml").is_file() {
+        return Err("本地模板 XML 不存在，请先生成模板".to_string());
+    }
+    Ok(template_dir)
+}
+
+fn read_custom_template_upload_state(
+    template_dir: &Path,
+) -> Result<CustomTemplateUploadState, String> {
+    let state_path = template_dir.join(".upload-state.json");
+    if !state_path.is_file() {
+        return Ok(CustomTemplateUploadState::default());
+    }
+    let content = fs::read(&state_path).map_err(|error| format!("读取上传状态失败：{error}"))?;
+    serde_json::from_slice(&content).map_err(|error| format!("上传状态文件无效：{error}"))
+}
+
+fn write_custom_template_upload_state(
+    template_dir: &Path,
+    state: &CustomTemplateUploadState,
+) -> Result<(), String> {
+    let state_path = template_dir.join(".upload-state.json");
+    let staging_path = template_dir.join(".upload-state.json.tmp");
+    let bytes = serde_json::to_vec_pretty(state).map_err(|error| error.to_string())?;
+    fs::write(&staging_path, bytes).map_err(|error| format!("保存上传状态失败：{error}"))?;
+    #[cfg(target_os = "windows")]
+    if state_path.is_file() {
+        fs::remove_file(&state_path).map_err(|error| format!("替换旧上传状态失败：{error}"))?;
+    }
+    fs::rename(&staging_path, &state_path).map_err(|error| format!("更新上传状态失败：{error}"))
+}
+
+fn add_custom_template_assets_to_zip(
+    writer: &mut zip::ZipWriter<fs::File>,
+    assets_dir: &Path,
+    current_dir: &Path,
+) -> Result<(), String> {
+    for entry in fs::read_dir(current_dir).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let file_type = entry.file_type().map_err(|error| error.to_string())?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if file_type.is_dir() {
+            add_custom_template_assets_to_zip(writer, assets_dir, &path)?;
+        } else if file_type.is_file() {
+            let relative = path
+                .strip_prefix(assets_dir)
+                .map_err(|error| error.to_string())?;
+            if relative == Path::new("cover.png") {
+                continue;
+            }
+            let file_name = relative
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if file_name == "tmptop.mov"
+                || (file_name.starts_with("top-segment-") && file_name.ends_with(".mov"))
+            {
+                continue;
+            }
+            let archive_name = relative.to_string_lossy().replace('\\', "/");
+            writer
+                .start_file(
+                    archive_name,
+                    zip::write::SimpleFileOptions::default()
+                        .compression_method(zip::CompressionMethod::Stored),
+                )
+                .map_err(|error| format!("写入素材压缩包失败：{error}"))?;
+            let mut source = fs::File::open(&path)
+                .map_err(|error| format!("读取模板素材失败（{}）：{error}", path.display()))?;
+            io::copy(&mut source, writer)
+                .map_err(|error| format!("压缩模板素材失败（{}）：{error}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn build_custom_template_upload_xml(template_xml: &str) -> Result<String, String> {
+    if find_xml_element_blocks(template_xml, "clips").is_empty() {
+        return Err("模板 XML 中缺少 clips，无法准备上传文件".to_string());
+    }
+
+    let mut output = String::with_capacity(template_xml.len());
+    let mut cursor = 0;
+    let mut search_start = 0;
+    while let Some(relative_start) = template_xml[search_start..].find("<clip") {
+        let tag_start = search_start + relative_start;
+        if !is_xml_name_boundary(template_xml[tag_start + "<clip".len()..].chars().next()) {
+            search_start = tag_start + "<clip".len();
+            continue;
+        }
+        let tag_end = template_xml[tag_start..]
+            .find('>')
+            .map(|offset| tag_start + offset + 1)
+            .ok_or_else(|| "模板 XML 中的 clip 起始标签不完整".to_string())?;
+        let tag = &template_xml[tag_start..tag_end];
+        let self_closing = tag.trim_end().ends_with("/>");
+        let close_end = if self_closing {
+            tag_end
+        } else {
+            template_xml[tag_end..]
+                .find("</clip>")
+                .map(|offset| tag_end + offset + "</clip>".len())
+                .ok_or_else(|| "模板 XML 中的 clip 结束标签不完整".to_string())?
+        };
+
+        if xml_attribute_value(tag, "material-type")
+            .as_deref()
+            .map(|value| value.eq_ignore_ascii_case("fixed"))
+            .unwrap_or(false)
+        {
+            let line_start = template_xml[..tag_start]
+                .rfind('\n')
+                .map(|position| position + 1)
+                .unwrap_or(0);
+            let remove_from_line_start = line_start >= cursor
+                && template_xml[line_start..tag_start]
+                    .chars()
+                    .all(|character| matches!(character, ' ' | '\t' | '\r'));
+            let removal_start = if remove_from_line_start {
+                line_start
+            } else {
+                tag_start
+            };
+            output.push_str(&template_xml[cursor..removal_start]);
+            cursor = close_end;
+            while matches!(
+                template_xml.as_bytes().get(cursor),
+                Some(b' ' | b'\t' | b'\r')
+            ) {
+                cursor += 1;
+            }
+            if template_xml.as_bytes().get(cursor) == Some(&b'\n') {
+                cursor += 1;
+            }
+        } else {
+            output.push_str(&template_xml[cursor..tag_end]);
+            if !self_closing {
+                let inner = &template_xml[tag_end..close_end - "</clip>".len()];
+                output.push_str(&remove_xml_child_element(inner, "top-video"));
+                output.push_str("</clip>");
+            }
+            cursor = close_end;
+        }
+        search_start = close_end;
+    }
+    output.push_str(&template_xml[cursor..]);
+    Ok(output)
+}
+
+#[tauri::command]
+async fn prepare_custom_template_upload(
+    local_template_key: String,
+) -> Result<CustomTemplateUploadFiles, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let template_dir = custom_template_upload_dir(&local_template_key)?;
+        let assets_dir = template_dir.join("assets");
+        if !assets_dir.is_dir() {
+            return Err("模板素材目录不存在，请先生成模板".to_string());
+        }
+        let cover_path = template_dir.join("cover.png");
+        let legacy_cover_path = assets_dir.join("cover.png");
+        if !cover_path.is_file() && legacy_cover_path.is_file() {
+            fs::rename(&legacy_cover_path, &cover_path)
+                .map_err(|error| format!("迁移旧模板封面失败：{error}"))?;
+        }
+        if !cover_path.is_file() {
+            return Err("模板封面 cover.png 不存在，请先生成模板".to_string());
+        }
+
+        let template_xml = fs::read_to_string(template_dir.join("template.xml"))
+            .map_err(|error| format!("读取本地模板 XML 失败：{error}"))?;
+        let upload_xml = build_custom_template_upload_xml(&template_xml)?;
+        let upload_xml_path = template_dir.join(".upload-template.xml");
+        fs::write(&upload_xml_path, upload_xml.as_bytes())
+            .map_err(|error| format!("保存上传专用模板 XML 失败：{error}"))?;
+
+        let staging_zip = template_dir.join(".assets.zip.tmp");
+        let assets_zip = template_dir.join("assets.zip");
+        let result = (|| {
+            let file = fs::File::create(&staging_zip)
+                .map_err(|error| format!("创建素材压缩包失败：{error}"))?;
+            let mut writer = zip::ZipWriter::new(file);
+            add_custom_template_assets_to_zip(&mut writer, &assets_dir, &assets_dir)?;
+            writer
+                .finish()
+                .map_err(|error| format!("完成素材压缩包失败：{error}"))?;
+            if assets_zip.is_file() {
+                fs::remove_file(&assets_zip)
+                    .map_err(|error| format!("替换旧素材压缩包失败：{error}"))?;
+            }
+            fs::rename(&staging_zip, &assets_zip)
+                .map_err(|error| format!("保存素材压缩包失败：{error}"))?;
+            Ok::<(), String>(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&staging_zip);
+        }
+        result?;
+
+        let upload_state = read_custom_template_upload_state(&template_dir)?;
+        let file_size = |path: &Path| {
+            fs::metadata(path)
+                .map(|metadata| metadata.len())
+                .map_err(|error| error.to_string())
+        };
+        Ok(CustomTemplateUploadFiles {
+            xml_size: file_size(&upload_xml_path)?,
+            cover_size: file_size(&cover_path)?,
+            assets_size: file_size(&assets_zip)?,
+            backend_template_id: upload_state.backend_template_id,
+            finalized: upload_state.finalized,
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn save_custom_template_upload_state(
+    local_template_key: String,
+    backend_template_id: String,
+    finalized: bool,
+) -> Result<(), String> {
+    if backend_template_id.trim().is_empty() {
+        return Err("后台模板 ID 不能为空".to_string());
+    }
+    let template_dir = custom_template_upload_dir(&local_template_key)?;
+    write_custom_template_upload_state(
+        &template_dir,
+        &CustomTemplateUploadState {
+            backend_template_id: Some(backend_template_id),
+            finalized,
+        },
+    )
+}
+
+#[tauri::command]
+fn read_custom_template_upload_chunk(
+    local_template_key: String,
+    file_type: String,
+    chunk_index: u64,
+    chunk_size: u64,
+) -> Result<tauri::ipc::Response, String> {
+    const MAX_CHUNK_SIZE: u64 = 20 * 1024 * 1024;
+    if chunk_size == 0 || chunk_size > MAX_CHUNK_SIZE {
+        return Err("上传分片大小无效".to_string());
+    }
+    let template_dir = custom_template_upload_dir(&local_template_key)?;
+    let file_name = match file_type.as_str() {
+        "xml" => ".upload-template.xml",
+        "cover" => "cover.png",
+        "assets" => "assets.zip",
+        _ => return Err("上传文件类型无效".to_string()),
+    };
+    let path = template_dir.join(file_name);
+    let mut file = fs::File::open(&path)
+        .map_err(|error| format!("读取上传文件失败（{file_name}）：{error}"))?;
+    let file_size = file.metadata().map_err(|error| error.to_string())?.len();
+    let start = chunk_index
+        .checked_mul(chunk_size)
+        .ok_or_else(|| "上传分片序号无效".to_string())?;
+    if start >= file_size {
+        return Err("上传分片超出文件范围".to_string());
+    }
+    let length = (file_size - start).min(chunk_size) as usize;
+    file.seek(SeekFrom::Start(start))
+        .map_err(|error| format!("定位上传分片失败：{error}"))?;
+    let mut bytes = vec![0u8; length];
+    file.read_exact(&mut bytes)
+        .map_err(|error| format!("读取上传分片失败：{error}"))?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+#[tauri::command]
+async fn generate_asset_thumbnail(
+    composer: tauri::State<'_, ComposerState>,
+    input_video_path: String,
+) -> Result<tauri::ipc::Response, String> {
+    let input_video_path = fs::canonicalize(PathBuf::from(input_video_path))
+        .map_err(|error| format!("输入视频不存在: {error}"))?;
+    if !input_video_path.is_file() {
+        return Err("输入视频路径不是文件".to_string());
+    }
+
+    let temp_dir = std::env::temp_dir().join("aicut").join("asset-thumbnails");
+    fs::create_dir_all(&temp_dir).map_err(|error| format!("创建封面临时目录失败: {error}"))?;
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos();
+    let counter = ASSET_THUMBNAIL_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let video_name = input_video_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(sanitize_preview_file_stem)
+        .unwrap_or_else(|| "video".to_string());
+    let output_image_path = temp_dir.join(format!(
+        "{}_{}_{}_{}.png",
+        std::process::id(),
+        timestamp,
+        counter,
+        video_name
+    ));
+
+    let input_video_path_text = path_to_xml_filepath(input_video_path);
+    let output_image_path_text = path_to_xml_filepath(output_image_path.clone());
+    let output_image_path_for_task = output_image_path.clone();
+    let composer = composer.inner().clone();
+
+    let thumbnail_bytes = tauri::async_runtime::spawn_blocking(move || {
+        let result = (|| {
+            let composer = composer.lock().map_err(|error| error.to_string())?;
+            composer.beauty_process_frame(
+                &input_video_path_text,
+                0,
+                &output_image_path_text,
+                "{}",
+            )?;
+            drop(composer);
+
+            if !output_image_path_for_task.is_file() {
+                return Err("封面接口执行成功，但未生成临时图片".to_string());
+            }
+            fs::read(&output_image_path_for_task)
+                .map_err(|error| format!("读取临时封面失败: {error}"))
+        })();
+
+        let cleanup_result = if output_image_path_for_task.exists() {
+            fs::remove_file(&output_image_path_for_task)
+                .map_err(|error| format!("删除临时封面失败: {error}"))
+        } else {
+            Ok(())
+        };
+
+        match (result, cleanup_result) {
+            (Ok(bytes), Ok(())) => Ok(bytes),
+            (Ok(_), Err(error)) => Err(error),
+            (Err(error), _) => Err(error),
+        }
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+
+    Ok(tauri::ipc::Response::new(thumbnail_bytes))
 }
 
 fn sanitize_preview_file_stem(value: &str) -> String {
@@ -6490,6 +7152,12 @@ pub fn run() {
             apply_project_subtitle,
             compose_project_video,
             preview_project_video,
+            preview_template_factory_video,
+            save_custom_template_video,
+            prepare_custom_template_upload,
+            save_custom_template_upload_state,
+            read_custom_template_upload_chunk,
+            generate_asset_thumbnail,
             resolve_lut_resource_path,
             preview_composer_beauty_frame,
             preview_composer_beauty_file,
@@ -6740,6 +7408,45 @@ mod tests {
         assert!(project_xml.contains(
             "<area id=\"e7r0t3y6u1i4o7p9a2s5d\" asset-id=\"i3o6p9a2s5d8f1g4j7q0w\" offset=\"0\" />"
         ));
+        assert!(!project_xml.contains("<source>"));
+    }
+
+    #[test]
+    fn copies_template_area_properties_into_project_file() {
+        let template_xml = r#"<xmeml version="5">
+    <template id="template-a" name="Template A" version="1.0" timeunit="millisecond">
+        <media-asset id="group-a">
+            <default-asset>
+                <asset id="asset-a" filepath="/videos/a.mov" />
+            </default-asset>
+        </media-asset>
+        <clips id="clips-a" target-track="clips">
+            <clip id="clip-a">
+                <area id="area-a" asset-id="asset-a">
+                    <source><duration>5000</duration></source>
+                    <property>
+                        <whiteness>0.5</whiteness>
+                        <smoothing>0.25</smoothing>
+                        <saturation>122</saturation>
+                        <lut_style>/luts/style.cube</lut_style>
+                        <lut_intensity>0.5</lut_intensity>
+                    </property>
+                </area>
+            </clip>
+        </clips>
+    </template>
+</xmeml>"#;
+
+        let project_xml =
+            generate_project_file_xml(template_xml, "project-a", 1000).expect("project xml");
+
+        assert!(project_xml.contains(r#"<area id="area-a" asset-id="asset-a" offset="0">"#));
+        assert!(project_xml.contains("<whiteness>0.5</whiteness>"));
+        assert!(project_xml.contains("<smoothing>0.25</smoothing>"));
+        assert!(project_xml.contains("<saturation>122</saturation>"));
+        assert!(project_xml.contains("<lut_style>/luts/style.cube</lut_style>"));
+        assert!(project_xml.contains("<lut_intensity>0.5</lut_intensity>"));
+        assert!(project_xml.contains("</property>\n                </area>"));
         assert!(!project_xml.contains("<source>"));
     }
 
@@ -7073,6 +7780,130 @@ mod tests {
             0
         );
         fs::remove_dir_all(image_temp_dir).expect("remove test directory");
+    }
+
+    #[test]
+    fn organizes_and_migrates_template_factory_storage() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let test_root = std::env::temp_dir().join(format!(
+            "aicut-custom-storage-test-{}-{unique}",
+            std::process::id()
+        ));
+        let legacy_template_dir = test_root.join("custom").join("template-123");
+        let legacy_pr_temp_dir = test_root.join("custom").join("temp");
+        let legacy_preview_dir = test_root.join("preview").join("template-factory");
+        fs::create_dir_all(&legacy_template_dir).expect("create legacy template directory");
+        fs::create_dir_all(&legacy_pr_temp_dir).expect("create legacy PR temp directory");
+        fs::create_dir_all(&legacy_preview_dir).expect("create legacy preview directory");
+        fs::write(legacy_template_dir.join("template.xml"), b"<template />")
+            .expect("write legacy template");
+        fs::write(legacy_pr_temp_dir.join("top.mov"), b"video").expect("write legacy PR asset");
+        fs::write(legacy_preview_dir.join("template-preview.mp4"), b"preview")
+            .expect("write legacy preview");
+
+        let dirs = ensure_custom_storage_dirs_at(&test_root).expect("organize custom storage");
+
+        assert_eq!(dirs.project, test_root.join("custom").join("project"));
+        assert_eq!(dirs.preview, test_root.join("custom").join("preview"));
+        assert_eq!(dirs.pr_temp, test_root.join("custom").join("prTemp"));
+        assert!(dirs
+            .project
+            .join("template-123")
+            .join("template.xml")
+            .is_file());
+        assert!(dirs.pr_temp.join("top.mov").is_file());
+        assert!(dirs.preview.join("template-preview.mp4").is_file());
+        assert!(!legacy_template_dir.exists());
+        assert!(!legacy_pr_temp_dir.exists());
+        assert!(!legacy_preview_dir.exists());
+
+        fs::remove_dir_all(test_root).expect("remove custom storage test directory");
+    }
+
+    #[test]
+    fn sanitizes_local_template_directory_key() {
+        assert_eq!(
+            sanitize_custom_template_key("旅行模板_1789459200000"),
+            "旅行模板_1789459200000"
+        );
+        assert_eq!(
+            sanitize_custom_template_key("旅行/模板:第一版_1789459200000"),
+            "旅行_模板_第一版_1789459200000"
+        );
+    }
+
+    #[test]
+    fn writes_upload_zip_without_cover_or_pr_top_preview_files() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let test_dir = std::env::temp_dir().join(format!(
+            "aicut-template-upload-test-{}-{unique}",
+            std::process::id()
+        ));
+        let assets_dir = test_dir.join("assets");
+        fs::create_dir_all(&assets_dir).expect("create assets directory");
+        fs::write(assets_dir.join("template.mp4"), b"video").expect("write video");
+        fs::write(assets_dir.join("top.mov"), b"overlay").expect("write overlay");
+        fs::write(assets_dir.join("cover.png"), b"old cover").expect("write old cover");
+        fs::write(assets_dir.join("tmptop.mov"), b"PR fixed layer").expect("write temporary top");
+        fs::write(assets_dir.join("top-segment-001.mov"), b"top slice").expect("write top segment");
+        fs::write(assets_dir.join("top-segment-002.MOV"), b"top slice")
+            .expect("write uppercase top segment");
+        let zip_path = test_dir.join("assets.zip");
+        let mut writer = zip::ZipWriter::new(fs::File::create(&zip_path).expect("create zip"));
+        add_custom_template_assets_to_zip(&mut writer, &assets_dir, &assets_dir)
+            .expect("add assets to zip");
+        writer.finish().expect("finish zip");
+
+        let mut archive =
+            zip::ZipArchive::new(fs::File::open(&zip_path).expect("open zip")).expect("read zip");
+        assert_eq!(archive.len(), 2);
+        assert!(archive.by_name("template.mp4").is_ok());
+        assert!(archive.by_name("top.mov").is_ok());
+        assert!(archive.by_name("assets/template.mp4").is_err());
+        assert!(archive.by_name("cover.png").is_err());
+        assert!(archive.by_name("tmptop.mov").is_err());
+        assert!(archive.by_name("top-segment-001.mov").is_err());
+        assert!(archive.by_name("top-segment-002.MOV").is_err());
+
+        fs::remove_dir_all(test_dir).expect("remove upload test directory");
+    }
+
+    #[test]
+    fn filters_fixed_clips_and_variable_top_videos_from_upload_xml() {
+        let local_xml = r#"<xmeml><template>
+        <tracks><track id="overlay"><filepath>template/assets/top.mov</filepath></track></tracks>
+        <clips id="clips" target-track="clips">
+            <clip id="fixed-1" material-type="fixed">
+                <top-video>template/assets/top-segment-001.mov</top-video>
+                <subtitle id="fixed-subtitle"><default>本地字幕</default></subtitle>
+            </clip>
+            <clip id="variable-1" material-type="variable">
+                <top-video>template/assets/top-segment-003.mov</top-video>
+                <area id="area-1" asset-id="asset-1"><property><saturation>100</saturation></property></area>
+            </clip>
+            <clip id="fixed-2" material-type="fixed"><top-video>template/assets/top-segment-002.mov</top-video></clip>
+            <clip id="variable-2" material-type="variable"><area id="area-2" asset-id="asset-2" /></clip>
+        </clips>
+    </template></xmeml>"#;
+
+        let upload_xml = build_custom_template_upload_xml(local_xml).expect("build upload XML");
+
+        assert!(!upload_xml.contains("fixed-1"));
+        assert!(!upload_xml.contains("fixed-2"));
+        assert!(!upload_xml.contains("fixed-subtitle"));
+        assert!(!upload_xml.contains("<top-video>"));
+        assert!(upload_xml.contains("variable-1"));
+        assert!(upload_xml.contains("variable-2"));
+        assert!(upload_xml.contains("<saturation>100</saturation>"));
+        assert!(upload_xml.contains("template/assets/top.mov"));
+        assert!(local_xml.contains("fixed-1"));
+        assert!(local_xml.contains("top-segment-003.mov"));
     }
 
     #[test]

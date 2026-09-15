@@ -12,7 +12,6 @@ import { useRoute, useRouter } from 'vue-router';
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { dirname, join } from '@tauri-apps/api/path';
-import { getCurrentWindow } from '@tauri-apps/api/window';
 import {
   open as openDialog,
   save as saveDialog,
@@ -43,6 +42,7 @@ import dingAudio from '../assets/ding.mp3';
 import hotImage from '../assets/hot.png';
 import logoImage from '../assets/logo.png';
 import AccountCenterMenu from '../components/AccountCenterMenu.vue';
+import WholeVideoPreviewModal from '../components/WholeVideoPreviewModal.vue';
 import AppIcon from '../components/AppIcon.vue';
 import lutManifest from '../../src-tauri/resources/luts/luts.json';
 
@@ -54,8 +54,8 @@ const VideoTransformer = defineAsyncComponent(
 const emit = defineEmits(['logout']);
 const route = useRoute();
 const router = useRouter();
-const CREATE_TEMPLATE_ENTRY_VISIBLE = false;
-const GLOBAL_TIMELINE_VISIBLE = false;
+const CREATE_TEMPLATE_ENTRY_VISIBLE = true;
+const GLOBAL_TIMELINE_VISIBLE = true;
 
 // 模板列表、收藏列表及请求状态。
 const categories = ref([]);
@@ -384,15 +384,6 @@ const projectPreviewRunning = ref(false);
 const projectPreviewProgress = ref(0);
 const projectPreviewStatus = ref('正在准备预览...');
 const projectPreviewSource = ref('');
-const projectPreviewVideoRef = ref(null);
-const projectPreviewPlayerRef = ref(null);
-const projectPreviewPaused = ref(true);
-const projectPreviewPlaybackRate = ref(1);
-const projectPreviewCurrentTime = ref(0);
-const projectPreviewDuration = ref(0);
-const projectPreviewVolume = ref(1);
-const projectPreviewMuted = ref(false);
-const projectPreviewFullscreen = ref(false);
 const defaultTemplateExportConfirmVisible = ref(false);
 const importOverwriteConfirmVisible = ref(false);
 const pendingImportSegment = ref(null);
@@ -412,7 +403,6 @@ let exportFinishedAudioBuffer = null;
 let exportFinishedAudioBufferLoading = null;
 let exportFinishedSoundKeepAlive = null;
 let projectPreviewProgressUnlisten = null;
-let projectPreviewWindowWasFullscreen = false;
 let timelineMoveHandler = null;
 let timelineUpHandler = null;
 let timelinePlayheadMoveHandler = null;
@@ -3307,11 +3297,7 @@ async function handleSidebarVideoPreview() {
     return;
   }
 
-  projectPreviewVideoRef.value?.pause?.();
   projectPreviewSource.value = '';
-  projectPreviewPaused.value = true;
-  projectPreviewCurrentTime.value = 0;
-  projectPreviewDuration.value = 0;
   projectPreviewProgress.value = 0;
   projectPreviewStatus.value = '正在准备预览...';
   projectPreviewModalVisible.value = true;
@@ -3353,8 +3339,6 @@ async function handleSidebarVideoPreview() {
     projectPreviewStatus.value = '预览生成完成';
     const source = convertFileSrc(outputPath);
     projectPreviewSource.value = `${source}${source.includes('?') ? '&' : '?'}v=${Date.now()}`;
-    await nextTick();
-    projectPreviewVideoRef.value?.load?.();
   } catch (error) {
     projectPreviewProgress.value = 0;
     projectPreviewStatus.value =
@@ -3367,119 +3351,10 @@ async function handleSidebarVideoPreview() {
   }
 }
 
-async function closeProjectPreviewModal() {
+function closeProjectPreviewModal() {
   if (projectPreviewRunning.value) return;
-  projectPreviewVideoRef.value?.pause?.();
-  if (projectPreviewFullscreen.value) {
-    await leaveProjectPreviewFullscreen();
-  }
+  projectPreviewSource.value = '';
   projectPreviewModalVisible.value = false;
-}
-
-function updateProjectPreviewControls() {
-  const video = projectPreviewVideoRef.value;
-  if (!video) return;
-
-  projectPreviewPaused.value = video.paused;
-  projectPreviewCurrentTime.value = Number.isFinite(video.currentTime)
-    ? video.currentTime
-    : 0;
-  projectPreviewDuration.value = Number.isFinite(video.duration)
-    ? video.duration
-    : 0;
-  projectPreviewPlaybackRate.value = video.playbackRate || 1;
-  projectPreviewVolume.value = video.volume;
-  projectPreviewMuted.value = video.muted || video.volume === 0;
-}
-
-function toggleProjectPreviewPlayback() {
-  const video = projectPreviewVideoRef.value;
-  if (!video) return;
-
-  if (video.paused) {
-    video.play().catch(() => {
-      projectPreviewPaused.value = true;
-    });
-  } else {
-    video.pause();
-  }
-  updateProjectPreviewControls();
-}
-
-function seekProjectPreview(event) {
-  const video = projectPreviewVideoRef.value;
-  if (!video) return;
-
-  const nextTime = Number(event.target.value);
-  if (!Number.isFinite(nextTime)) return;
-  video.currentTime = Math.max(
-    0,
-    Math.min(projectPreviewDuration.value || 0, nextTime),
-  );
-  updateProjectPreviewControls();
-}
-
-function cycleProjectPreviewPlaybackRate() {
-  const video = projectPreviewVideoRef.value;
-  if (!video) return;
-
-  const rates = [0.5, 1, 1.25, 1.5, 2];
-  const currentIndex = rates.indexOf(projectPreviewPlaybackRate.value);
-  const nextRate = rates[(currentIndex + 1) % rates.length];
-  video.playbackRate = nextRate;
-  projectPreviewPlaybackRate.value = nextRate;
-}
-
-function setProjectPreviewVolume(event) {
-  const video = projectPreviewVideoRef.value;
-  if (!video) return;
-
-  const volume = Math.max(0, Math.min(1, Number(event.target.value) || 0));
-  video.volume = volume;
-  video.muted = volume === 0;
-  updateProjectPreviewControls();
-}
-
-function toggleProjectPreviewMute() {
-  const video = projectPreviewVideoRef.value;
-  if (!video) return;
-  video.muted = !video.muted;
-  updateProjectPreviewControls();
-}
-
-async function leaveProjectPreviewFullscreen() {
-  try {
-    if (!projectPreviewWindowWasFullscreen) {
-      await getCurrentWindow().setFullscreen(false);
-    }
-  } catch (error) {
-    console.warn('[preview] failed to leave window fullscreen:', error);
-  } finally {
-    projectPreviewFullscreen.value = false;
-    projectPreviewWindowWasFullscreen = false;
-  }
-}
-
-async function toggleProjectPreviewFullscreen() {
-  if (!projectPreviewPlayerRef.value) return;
-
-  try {
-    if (projectPreviewFullscreen.value) {
-      await leaveProjectPreviewFullscreen();
-      return;
-    }
-
-    const appWindow = getCurrentWindow();
-    projectPreviewWindowWasFullscreen = await appWindow.isFullscreen();
-    if (!projectPreviewWindowWasFullscreen) {
-      await appWindow.setFullscreen(true);
-    }
-    projectPreviewFullscreen.value = true;
-  } catch (error) {
-    systemMessage.error(error?.message || '无法进入全屏播放');
-    projectPreviewFullscreen.value = false;
-    projectPreviewWindowWasFullscreen = false;
-  }
 }
 
 async function processBeautyVideoPreview(request) {
@@ -5990,9 +5865,6 @@ onMounted(() => {
 // 离开页面时释放全局监听、定时器和本地视频 URL。
 onBeforeUnmount(() => {
   void flushPendingAssetPropertyUpdates();
-  if (projectPreviewFullscreen.value) {
-    void leaveProjectPreviewFullscreen();
-  }
   invalidateBeautyPreview();
   cacheCurrentVideoTimelineState();
   document.documentElement.classList.remove('dark');
@@ -7706,175 +7578,15 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
-          <div
-            v-if="projectPreviewModalVisible"
-            class="fixed inset-0 z-[430] flex items-center justify-center"
-            :class="projectPreviewFullscreen ? 'p-0' : 'p-6'"
-          >
-            <div class="absolute inset-0 bg-black/70 backdrop-blur-xl"></div>
-            <div
-              class="relative w-full overflow-hidden bg-surface-container-highest shadow-2xl modal-pop-in"
-              :class="
-                projectPreviewFullscreen
-                  ? 'h-full max-w-none border-0 rounded-none'
-                  : 'max-w-4xl rounded-2xl border border-white/10'
-              "
-            >
-              <div
-                v-if="!projectPreviewFullscreen"
-                class="flex h-14 items-center justify-between border-b border-white/10 px-5"
-              >
-                <div class="flex min-w-0 items-center gap-2">
-                  <AppIcon name="smart_display" :size="21" class="text-electric-blue" />
-                  <h3 class="truncate text-[15px] font-black text-white">
-                    整片视频预览
-                  </h3>
-                </div>
-                <button
-                  class="flex h-8 w-8 items-center justify-center rounded-full text-white/70 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-30"
-                  type="button"
-                  :disabled="projectPreviewRunning"
-                  @click="closeProjectPreviewModal"
-                >
-                  <AppIcon name="close" :size="20" />
-                </button>
-              </div>
-
-              <div
-                v-if="!projectPreviewSource"
-                class="flex aspect-video flex-col items-center justify-center gap-6 bg-black/80 px-8 text-center"
-              >
-                <div
-                  class="circular-progress"
-                  :style="{ '--progress': `${projectPreviewProgress}%` }"
-                >
-                  <div class="absolute inset-0 flex items-center justify-center">
-                    <span class="text-2xl font-black text-electric-blue">
-                      {{ projectPreviewProgress }}%
-                    </span>
-                  </div>
-                </div>
-                <div class="w-full max-w-md space-y-3">
-                  <p class="break-words text-sm font-bold text-white">
-                    {{ projectPreviewStatus }}
-                  </p>
-                  <div class="h-1.5 w-full overflow-hidden rounded-full bg-white/10">
-                    <div
-                      class="h-full bg-electric-blue transition-all duration-300"
-                      :style="{ width: `${projectPreviewProgress}%` }"
-                    ></div>
-                  </div>
-                  <button
-                    v-if="!projectPreviewRunning"
-                    class="mt-3 rounded-lg bg-white/10 px-8 py-2 text-sm font-bold text-white transition-colors hover:bg-white/15"
-                    type="button"
-                    @click="closeProjectPreviewModal"
-                  >
-                    关闭
-                  </button>
-                </div>
-              </div>
-
-              <div
-                v-else
-                ref="projectPreviewPlayerRef"
-                class="group relative bg-black"
-                :class="projectPreviewFullscreen ? 'h-full' : 'aspect-video'"
-              >
-                <video
-                  ref="projectPreviewVideoRef"
-                  class="h-full w-full bg-black object-contain"
-                  :src="projectPreviewSource"
-                  disablepictureinpicture
-                  playsinline
-                  preload="metadata"
-                  @click="toggleProjectPreviewPlayback"
-                  @loadedmetadata="updateProjectPreviewControls"
-                  @timeupdate="updateProjectPreviewControls"
-                  @play="updateProjectPreviewControls"
-                  @pause="updateProjectPreviewControls"
-                  @ended="updateProjectPreviewControls"
-                  @ratechange="updateProjectPreviewControls"
-                  @volumechange="updateProjectPreviewControls"
-                ></video>
-                <div
-                  class="pointer-events-none absolute inset-x-0 bottom-0 translate-y-2 bg-gradient-to-t from-black/95 via-black/70 to-transparent px-5 pb-4 pt-10 opacity-0 transition-all duration-200 group-hover:pointer-events-auto group-hover:translate-y-0 group-hover:opacity-100"
-                >
-                  <input
-                    class="mb-3 h-1.5 w-full cursor-pointer accent-[#4a8eff]"
-                    type="range"
-                    min="0"
-                    :max="projectPreviewDuration || 0"
-                    step="0.01"
-                    :value="projectPreviewCurrentTime"
-                    aria-label="预览播放进度"
-                    @input="seekProjectPreview"
-                  />
-                  <div class="flex items-center gap-3 text-white">
-                    <button
-                      class="flex h-9 w-9 items-center justify-center rounded-full bg-electric-blue text-white transition-all hover:brightness-110 active:scale-95"
-                      type="button"
-                      :aria-label="projectPreviewPaused ? '播放' : '暂停'"
-                      @click="toggleProjectPreviewPlayback"
-                    >
-                      <AppIcon
-                        :name="projectPreviewPaused ? 'play_arrow' : 'pause'"
-                        :size="21"
-                        filled
-                      />
-                    </button>
-                    <span class="text-[11px] tabular-nums text-white/75">
-                      {{ formatPlayerTime(projectPreviewCurrentTime) }} /
-                      {{ formatPlayerTime(projectPreviewDuration) }}
-                    </span>
-                    <div class="flex-1"></div>
-                    <button
-                      class="h-8 min-w-14 rounded-md border border-white/15 bg-white/10 px-2 text-[11px] font-bold text-white/85 transition-colors hover:bg-white/15 hover:text-white"
-                      type="button"
-                      title="切换播放倍速"
-                      @click="cycleProjectPreviewPlaybackRate"
-                    >
-                      {{ projectPreviewPlaybackRate }}x
-                    </button>
-                    <div class="flex items-center gap-2">
-                      <button
-                        class="flex h-8 w-8 items-center justify-center rounded-md text-white/80 transition-colors hover:bg-white/10 hover:text-white"
-                        type="button"
-                        :aria-label="projectPreviewMuted ? '打开声音' : '静音'"
-                        @click="toggleProjectPreviewMute"
-                      >
-                        <AppIcon
-                          :name="projectPreviewMuted ? 'volume_off' : 'volume_up'"
-                          :size="18"
-                        />
-                      </button>
-                      <input
-                        class="h-1.5 w-20 cursor-pointer accent-[#4a8eff]"
-                        type="range"
-                        min="0"
-                        max="1"
-                        step="0.01"
-                        :value="projectPreviewMuted ? 0 : projectPreviewVolume"
-                        aria-label="预览音量"
-                        @input="setProjectPreviewVolume"
-                      />
-                    </div>
-                    <button
-                      class="flex h-8 w-8 items-center justify-center rounded-md text-white/80 transition-colors hover:bg-white/10 hover:text-white"
-                      type="button"
-                      :aria-label="projectPreviewFullscreen ? '退出全屏' : '全屏播放'"
-                      @click="toggleProjectPreviewFullscreen"
-                    >
-                      <AppIcon
-                        :name="projectPreviewFullscreen ? 'fullscreen_exit' : 'fullscreen'"
-                        :size="19"
-                      />
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
+          <WholeVideoPreviewModal
+            :visible="projectPreviewModalVisible"
+            :loading="projectPreviewRunning"
+            :progress="projectPreviewProgress"
+            :status="projectPreviewStatus"
+            :source="projectPreviewSource"
+            title="整片视频预览"
+            @close="closeProjectPreviewModal"
+          />
 
           <div
             class="fixed inset-0 z-[410] flex items-center justify-center"

@@ -1,6 +1,7 @@
 <script setup>
 import {
   computed,
+  nextTick,
   onActivated,
   onBeforeUnmount,
   onDeactivated,
@@ -47,8 +48,8 @@ import {
   X,
 } from '@lucide/vue';
 import logoImage from '../assets/logo.png';
-import { createTemplateDraft } from '../api/template';
 import AccountCenterMenu from '../components/AccountCenterMenu.vue';
+import WholeVideoPreviewModal from '../components/WholeVideoPreviewModal.vue';
 import { assetPath, buildXml, generateId, parseXml } from '../utils/xml';
 import lutManifest from '../../src-tauri/resources/luts/luts.json';
 
@@ -177,9 +178,6 @@ function lutOptionIdFromStoredValue(value) {
 }
 const VIDEO_EXTENSIONS = ['mp4', 'mov', 'm4v', 'avi', 'mkv', 'webm'];
 const AUDIO_EXTENSIONS = ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg'];
-const THUMBNAIL_MAX_WIDTH = 640;
-const THUMBNAIL_MAX_HEIGHT = 360;
-const THUMBNAIL_CAPTURE_SECONDS = 0.2;
 const THUMBNAIL_CONCURRENCY = 2;
 const DROPPED_AREA_WIDTH = 960;
 const DROPPED_AREA_HEIGHT = 540;
@@ -238,7 +236,14 @@ const selectedFilePaths = reactive({
 const selectedClipId = ref('');
 const isPrImportedTemplate = ref(false);
 const templateDraftCreating = ref(false);
-const activeDraftTemplateId = ref('');
+const templatePreviewModalOpen = ref(false);
+const templatePreviewRunning = ref(false);
+const templatePreviewProgress = ref(0);
+const templatePreviewStatus = ref('');
+const templatePreviewError = ref('');
+const templatePreviewVideoSource = ref('');
+const templateDraftGenerationModal = ref(false);
+const activeLocalTemplateKey = ref('');
 const areaDialogOpen = ref(false);
 const areaDraft = ref(null);
 const areaModalSectionsExpanded = reactive({
@@ -288,8 +293,10 @@ let prBridgePollTimer = null;
 let prBridgePolling = false;
 const handledPrBridgeEventIds = new Set();
 const clipPreviewVideoRefs = new Map();
+const fixedClipThumbnailStates = reactive(new Map());
 const playingClipPreviewId = ref('');
 const loadingClipPreviewId = ref('');
+const CLIP_PREVIEW_COVER_SECONDS = 0.5;
 
 const selectedClip = computed(
   () => model.clips.find((clip) => clip.id === selectedClipId.value) ?? null,
@@ -506,6 +513,7 @@ function replaceModel(next, { fromPr = false } = {}) {
     next.videoStyle = 'none';
   }
   disposeAssetGroups(Array.isArray(model.mediaGroups) ? model.mediaGroups : []);
+  disposeAllFixedClipThumbnails();
   const nextKeys = new Set(Object.keys(next));
   Object.assign(model, next);
   Object.keys(model).forEach((key) => {
@@ -516,7 +524,7 @@ function replaceModel(next, { fromPr = false } = {}) {
   });
   selectedClipId.value = '';
   isPrImportedTemplate.value = fromPr;
-  activeDraftTemplateId.value = '';
+  activeLocalTemplateKey.value = '';
   globalLutInheritedAreaIds.clear();
   stopClipPreview();
 }
@@ -615,19 +623,21 @@ async function pickMediaPaths({ multiple = false, audio = false } = {}) {
   }
 }
 
+function normalizeAssetThumbnailBytes(value) {
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+  if (Array.isArray(value)) return new Uint8Array(value);
+  return null;
+}
+
 function createVideoThumbnail(sourcePath) {
   return new Promise((resolve) => {
-    const video = document.createElement('video');
-    const canvas = document.createElement('canvas');
     let settled = false;
-    let timeoutId = 0;
 
     const cleanup = () => {
-      window.clearTimeout(timeoutId);
       activeThumbnailCancels.delete(cancel);
-      video.pause();
-      video.removeAttribute('src');
-      video.load();
     };
 
     const finish = (result = null) => {
@@ -643,85 +653,27 @@ function createVideoThumbnail(sourcePath) {
     const cancel = () => finish(null);
     activeThumbnailCancels.add(cancel);
 
-    const captureFrame = () => {
-      if (settled || !video.videoWidth || !video.videoHeight) {
-        finish(null);
-        return;
-      }
-
-      const scale = Math.min(
-        THUMBNAIL_MAX_WIDTH / video.videoWidth,
-        THUMBNAIL_MAX_HEIGHT / video.videoHeight,
-        1,
-      );
-      canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
-      canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
-
-      try {
-        const context = canvas.getContext('2d', { alpha: false });
-        if (!context) {
+    invoke('generate_asset_thumbnail', { inputVideoPath: sourcePath })
+      .then((response) => {
+        if (settled) return;
+        const bytes = normalizeAssetThumbnailBytes(response);
+        if (!bytes?.byteLength) {
           finish(null);
           return;
         }
-        context.drawImage(video, 0, 0, canvas.width, canvas.height);
-        canvas.toBlob(
-          (blob) => {
-            if (!blob) {
-              finish(null);
-              return;
-            }
-            finish({
-              thumbnailUrl: URL.createObjectURL(blob),
-              durationMs: Number.isFinite(video.duration)
-                ? Math.round(video.duration * 1000)
-                : 0,
-              width: video.videoWidth,
-              height: video.videoHeight,
-            });
-          },
-          'image/webp',
-          0.8,
-        );
-      } catch {
+        finish({
+          thumbnailUrl: URL.createObjectURL(
+            new Blob([bytes], { type: 'image/png' }),
+          ),
+        });
+      })
+      .catch((error) => {
+        console.error('[template] asset thumbnail generation failed:', {
+          sourcePath,
+          error,
+        });
         finish(null);
-      }
-    };
-
-    video.preload = 'auto';
-    video.muted = true;
-    video.playsInline = true;
-    video.crossOrigin = 'anonymous';
-    video.addEventListener(
-      'loadedmetadata',
-      () => {
-        const duration = Number.isFinite(video.duration) ? video.duration : 0;
-        const captureTime = duration
-          ? Math.min(THUMBNAIL_CAPTURE_SECONDS, duration / 2)
-          : 0;
-
-        if (captureTime > 0.01) {
-          video.addEventListener('seeked', captureFrame, { once: true });
-          video.currentTime = captureTime;
-          return;
-        }
-
-        if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-          captureFrame();
-        } else {
-          video.addEventListener('loadeddata', captureFrame, { once: true });
-        }
-      },
-      { once: true },
-    );
-    video.addEventListener('error', () => finish(null), { once: true });
-    timeoutId = window.setTimeout(() => finish(null), 15000);
-
-    try {
-      video.src = convertFileSrc(sourcePath);
-      video.load();
-    } catch {
-      finish(null);
-    }
+      });
   });
 }
 
@@ -768,6 +720,32 @@ function disposeAsset(asset) {
 
 function disposeAssetGroups(groups = []) {
   groups.forEach((group) => group.assets?.forEach(disposeAsset));
+}
+
+function disposeFixedClipThumbnail(clip) {
+  if (!clip?.id) return;
+  const thumbnailState = fixedClipThumbnailStates.get(clip.id);
+  if (thumbnailState) disposeAsset(thumbnailState);
+  fixedClipThumbnailStates.delete(clip.id);
+}
+
+function disposeAllFixedClipThumbnails() {
+  fixedClipThumbnailStates.forEach(disposeAsset);
+  fixedClipThumbnailStates.clear();
+}
+
+function enqueueFixedClipThumbnail(clip) {
+  disposeFixedClipThumbnail(clip);
+  if (!clip?.topVideoSourcePath) return;
+
+  const thumbnailState = reactive({
+    sourcePath: clip.topVideoSourcePath,
+    thumbnailUrl: '',
+    thumbnailStatus: 'loading',
+    disposed: false,
+  });
+  fixedClipThumbnailStates.set(clip.id, thumbnailState);
+  enqueueThumbnail(thumbnailState);
 }
 
 function addMediaPathsToGroup(paths, group) {
@@ -894,6 +872,7 @@ function removeClip(clip) {
     message: `“${clip.name}”以及其中的 Area、字幕和转场设置都会被删除。`,
     action: () => {
       if (playingClipPreviewId.value === clip.id) stopClipPreview();
+      disposeFixedClipThumbnail(clip);
       model.clips.splice(model.clips.indexOf(clip), 1);
       if (selectedClipId.value === clip.id) selectedClipId.value = '';
       showToast('片段已删除');
@@ -1582,10 +1561,12 @@ async function updateSelectedClipTopVideo() {
   if (!sourcePath) return;
   selectedClip.value.topVideo = assetPath(fileName(sourcePath));
   selectedClip.value.topVideoSourcePath = sourcePath;
+  enqueueFixedClipThumbnail(selectedClip.value);
 }
 
 function clearSelectedClipTopVideo() {
   if (!selectedClip.value) return;
+  disposeFixedClipThumbnail(selectedClip.value);
   selectedClip.value.topVideo = '';
   selectedClip.value.topVideoSourcePath = '';
 }
@@ -2211,7 +2192,7 @@ function moveSubtitleInteraction(event) {
   event.preventDefault();
 }
 
-function validateModel() {
+function validateModel({ forPreview = false } = {}) {
   if (!model.name.trim()) return '请填写模板名称。';
   if (
     !Number.isInteger(Number(model.duration)) ||
@@ -2219,10 +2200,25 @@ function validateModel() {
   ) {
     return '视频总时长需填写为正整数。';
   }
-  if (!model.demoPath) return '请先上传模板示例视频。';
-  if (!model.tracks.fixedMaterial) return '请先上传必需的固定素材视频。';
+  if (!forPreview && !model.demoPath) return '请先上传模板示例视频。';
+  if (!forPreview && !model.tracks.fixedMaterial)
+    return '请先上传必需的固定素材视频。';
 
   const assetIds = new Set(allAssets.value.map((asset) => asset.id));
+  const assetById = new Map(allAssets.value.map((asset) => [asset.id, asset]));
+  if (forPreview) {
+    const requiredTracks = [
+      ['background', '背景底层'],
+      ['overlay', '顶层视频'],
+      ['audioBackground', '底板音频'],
+      ['recording', '录音音频'],
+    ];
+    for (const [track, label] of requiredTracks) {
+      if (model.tracks[track] && !selectedFilePaths[track]) {
+        return `${label}素材文件不存在，请重新选择。`;
+      }
+    }
+  }
   for (const group of model.mediaGroups) {
     if (!group.name.trim()) return '素材目录名称不能为空。';
     if (
@@ -2235,9 +2231,17 @@ function validateModel() {
   }
 
   for (const clip of model.clips) {
+    if (forPreview && clipMaterialType(clip) === 'fixed') continue;
     if (!clip.name.trim()) return '片段名称不能为空。';
     if (clipMaterialType(clip) === 'fixed' && !clip.topVideo) {
       return `固定片段“${clip.name}”需要设置顶层视频。`;
+    }
+    if (
+      forPreview &&
+      clipMaterialType(clip) === 'fixed' &&
+      !clip.topVideoSourcePath
+    ) {
+      return `固定片段“${clip.name}”的素材文件不存在，请重新选择。`;
     }
     if (clipMaterialType(clip) === 'variable' && !clip.areas.length) {
       return `片段“${clip.name}”至少需要添加一个 Area 才能导出。`;
@@ -2257,6 +2261,9 @@ function validateModel() {
     for (const area of clip.areas) {
       if (!assetIds.has(area.assetId))
         return `片段“${clip.name}”中有 Area 未选择素材。`;
+      if (forPreview && !assetById.get(area.assetId)?.sourcePath) {
+        return `片段“${clip.name}”中有素材文件不存在，请重新选择。`;
+      }
       if (Number(area.speed) < 0 || Number(area.speed) > 1) {
         return `片段“${clip.name}”的播放速度需在 0–1 之间。`;
       }
@@ -2298,15 +2305,33 @@ function validateModel() {
   return '';
 }
 
-async function generateTemplateXml() {
+function resolveTemplatePreviewResourcePath(value, context = {}) {
+  if (context.type === 'demo') return selectedFilePaths.demo || value;
+  if (context.type === 'track') {
+    return selectedFilePaths[context.key] || value;
+  }
+  if (context.type === 'asset') return context.asset?.sourcePath || value;
+  if (context.type === 'topVideo') {
+    return context.clip?.topVideoSourcePath || value;
+  }
+  return value;
+}
+
+async function generateTemplateXml({
+  forPreview = false,
+  demoPathOverride = '',
+} = {}) {
   applyGlobalLutToVariableAreas();
-  const error = validateModel();
+  const error = validateModel({ forPreview });
   if (error) {
     showToast(error, 'error');
     return null;
   }
+  const outputClips = forPreview
+    ? model.clips.filter((clip) => clipMaterialType(clip) !== 'fixed')
+    : model.clips;
   const selectedLutIds = new Set(
-    model.clips.flatMap((clip) =>
+    outputClips.flatMap((clip) =>
       (clip.areas || [])
         .map((area) => area.beauty?.lutStyle)
         .filter((lutStyle) => lutStyle && lutStyle !== 'none'),
@@ -2328,8 +2353,19 @@ async function generateTemplateXml() {
     showToast(resolveError?.message || 'LUT 文件路径解析失败。', 'error');
     return null;
   }
-  const xml = buildXml(model, {
+  const outputModel =
+    forPreview || demoPathOverride
+      ? {
+          ...model,
+          clips: outputClips,
+          ...(demoPathOverride ? { demoPath: demoPathOverride } : {}),
+        }
+      : model;
+  const xml = buildXml(outputModel, {
     resolveLutStyle: (lutStyle) => lutAbsolutePaths.get(lutStyle) || lutStyle,
+    resolveResourcePath: forPreview
+      ? resolveTemplatePreviewResourcePath
+      : undefined,
   });
   const filename = (model.name || 'template').replace(/[\\/:*?"<>|]/g, '_');
   return { xml, filename };
@@ -2352,21 +2388,87 @@ async function exportXml() {
   showToast('XML 已生成并开始下载');
 }
 
-function getStoredRenterId() {
-  try {
-    const userInfo = JSON.parse(localStorage.getItem('userInfo') || 'null') || {};
-    const profile =
-      userInfo.user || userInfo.profile || userInfo.sysUser || userInfo;
-    return (
-      userInfo.renterId ||
-      userInfo.tenantId ||
-      profile.renterId ||
-      profile.tenantId ||
-      '-1'
+function releaseTemplatePreviewVideo() {
+  templatePreviewVideoSource.value = '';
+}
+
+function closeTemplatePreview() {
+  if (templatePreviewRunning.value || templateDraftCreating.value) {
+    showToast(
+      templateDraftGenerationModal.value
+        ? '模板正在生成，请稍候'
+        : '模板预览正在生成，请稍候',
+      'warning',
     );
-  } catch {
-    return '-1';
+    return;
   }
+  releaseTemplatePreviewVideo();
+  templateDraftGenerationModal.value = false;
+  templatePreviewModalOpen.value = false;
+}
+
+async function previewTemplateVideo() {
+  if (templatePreviewRunning.value || templateDraftCreating.value) return;
+
+  templateDraftGenerationModal.value = false;
+  templatePreviewRunning.value = true;
+  templatePreviewProgress.value = 0;
+  templatePreviewStatus.value = '正在准备模板预览...';
+  templatePreviewError.value = '';
+  releaseTemplatePreviewVideo();
+
+  let unlistenProgress = null;
+  try {
+    const generated = await generateTemplateXml({ forPreview: true });
+    if (!generated) return;
+
+    templatePreviewModalOpen.value = true;
+    const previewId = `template-factory-preview-${Date.now()}-${Math.random()
+      .toString(36)
+      .slice(2, 8)}`;
+    unlistenProgress = await listen(
+      'composer-export-progress',
+      (event) => {
+        const payload = event.payload || {};
+        if (payload.exportId !== previewId) return;
+        templatePreviewProgress.value = Math.max(
+          0,
+          Math.min(100, Number(payload.progress) || 0),
+        );
+        templatePreviewStatus.value =
+          payload.status || templatePreviewStatus.value;
+      },
+    );
+
+    const result = await invoke('preview_template_factory_video', {
+      templateXml: generated.xml,
+      previewId,
+    });
+    if (!result?.outputPath) {
+      throw new Error('预览视频生成成功，但没有返回文件路径');
+    }
+
+    const videoUrl = convertFileSrc(result.outputPath);
+    templatePreviewVideoSource.value = `${videoUrl}${
+      videoUrl.includes('?') ? '&' : '?'
+    }v=${Date.now()}`;
+    templatePreviewProgress.value = 100;
+    templatePreviewStatus.value = '模板预览生成完成';
+    templatePreviewRunning.value = false;
+  } catch (error) {
+    const message = error?.message || String(error || '模板预览生成失败');
+    templatePreviewError.value = message;
+    templatePreviewStatus.value = '模板预览生成失败';
+    templatePreviewModalOpen.value = true;
+    showToast(message, 'error');
+  } finally {
+    unlistenProgress?.();
+    templatePreviewRunning.value = false;
+  }
+}
+
+function createLocalTemplateKey() {
+  return `template_${Date.now()}`;
 }
 
 function getCurrentTemplateResourcePaths() {
@@ -2418,31 +2520,24 @@ function rebaseCurrentTemplateResourcePaths(assetsDirectory) {
   });
 }
 
-async function createDraftTemplate() {
+async function generateAndSaveTemplate() {
   if (templateDraftCreating.value) return;
 
   templateDraftCreating.value = true;
+  let unlistenProgress = null;
   try {
     const generated = await generateTemplateXml();
     if (!generated) return;
 
-    let templateId = activeDraftTemplateId.value;
-    const isNewDraft = !templateId;
-    if (isNewDraft) {
-      const response = await createTemplateDraft(getStoredRenterId());
-      if (response?.code !== undefined && Number(response.code) !== 0) {
-        throw new Error(response?.msg || '创建模板草稿失败');
-      }
-
-      templateId = response?.data?.templateId;
-      if (templateId === undefined || templateId === null || templateId === '') {
-        throw new Error('创建模板草稿成功，但接口未返回 templateId');
-      }
-      activeDraftTemplateId.value = String(templateId);
+    let localTemplateKey = activeLocalTemplateKey.value;
+    const isNewTemplate = !localTemplateKey;
+    if (isNewTemplate) {
+      localTemplateKey = createLocalTemplateKey();
+      activeLocalTemplateKey.value = localTemplateKey;
     }
 
     const savedTemplate = await invoke('save_custom_template_xml', {
-      templateId: String(templateId),
+      templateId: localTemplateKey,
       templateXml: generated.xml,
       resourcePaths: getCurrentTemplateResourcePaths(),
       fixedMaterialPath: selectedFilePaths.fixedMaterial || '',
@@ -2452,14 +2547,74 @@ async function createDraftTemplate() {
       throw new Error('模板已保存，但未返回素材目录');
     }
     rebaseCurrentTemplateResourcePaths(savedTemplate.assetsDir);
-    showToast(
-      isNewDraft
-        ? `模板草稿 ${templateId} 已创建并保存`
-        : `模板草稿 ${templateId} 已更新`,
+
+    const previewGenerated = await generateTemplateXml({ forPreview: true });
+    if (!previewGenerated) return;
+    const persistedTemplate = await generateTemplateXml({
+      demoPathOverride: assetPath('template.mp4'),
+    });
+    if (!persistedTemplate) return;
+
+    const generationId = `template-factory-save-${Date.now()}-${Math.random()
+      .toString(36)
+      .slice(2, 8)}`;
+    templateDraftGenerationModal.value = true;
+    templatePreviewModalOpen.value = true;
+    templatePreviewProgress.value = 0;
+    templatePreviewStatus.value = '正在准备生成模板视频...';
+    templatePreviewError.value = '';
+    releaseTemplatePreviewVideo();
+
+    unlistenProgress = await listen(
+      'composer-export-progress',
+      (event) => {
+        const payload = event.payload || {};
+        if (payload.exportId !== generationId) return;
+        templatePreviewProgress.value = Math.max(
+          0,
+          Math.min(100, Number(payload.progress) || 0),
+        );
+        templatePreviewStatus.value = String(
+          payload.status || templatePreviewStatus.value,
+        ).replaceAll('模板预览', '模板视频');
+      },
     );
+
+    const previewResult = await invoke('preview_template_factory_video', {
+      templateXml: previewGenerated.xml,
+      previewId: generationId,
+    });
+    if (!previewResult?.outputPath) {
+      throw new Error('模板视频生成成功，但没有返回文件路径');
+    }
+
+    templatePreviewProgress.value = 100;
+    templatePreviewStatus.value = '正在保存模板视频和封面...';
+    const generatedAssets = await invoke('save_custom_template_video', {
+      templateId: localTemplateKey,
+      previewVideoPath: previewResult.outputPath,
+      templateXml: persistedTemplate.xml,
+    });
+    if (!generatedAssets?.outputPath) {
+      throw new Error('模板视频已生成，但保存到模板素材目录失败');
+    }
+
+    model.demoPath = assetPath('template.mp4');
+    selectedFilePaths.demo = generatedAssets.outputPath;
+    templatePreviewStatus.value = '模板生成完成';
+    templatePreviewModalOpen.value = false;
+    templateDraftGenerationModal.value = false;
+    showToast(isNewTemplate ? '模板、视频和封面已生成' : '模板、视频和封面已更新');
   } catch (error) {
-    showToast(error?.message || '模板草稿创建失败。', 'error');
+    const message = error?.message || '模板生成失败。';
+    if (templateDraftGenerationModal.value) {
+      templatePreviewStatus.value = '模板生成失败';
+      templatePreviewError.value = message;
+      templatePreviewModalOpen.value = true;
+    }
+    showToast(message, 'error');
   } finally {
+    unlistenProgress?.();
     templateDraftCreating.value = false;
   }
 }
@@ -2554,7 +2709,7 @@ function applyTemplateForEditing(
   );
 
   replaceModel(nextModel, { fromPr });
-  if (templateId) activeDraftTemplateId.value = String(templateId);
+  if (templateId) activeLocalTemplateKey.value = String(templateId);
   Object.assign(selectedFilePaths, resolvedSelections);
   const videoAssets = model.mediaGroups.flatMap((group) =>
     group.assets.filter(
@@ -2562,7 +2717,13 @@ function applyTemplateForEditing(
     ),
   );
   videoAssets.forEach(enqueueThumbnail);
-  selectedClipId.value = model.clips[0]?.id || '';
+  model.clips
+    .filter(
+      (clip) =>
+        clipMaterialType(clip) === 'fixed' && clip.topVideoSourcePath,
+    )
+    .forEach(enqueueFixedClipThumbnail);
+  selectedClipId.value = '';
 }
 
 function applyPrTemplateExport(payload) {
@@ -2746,6 +2907,13 @@ function clipPreviewAsset(clip) {
   return null;
 }
 
+function clipPreviewThumbnailUrl(clip) {
+  if (clipMaterialType(clip) === 'fixed') {
+    return fixedClipThumbnailStates.get(clip?.id)?.thumbnailUrl || '';
+  }
+  return clipPreviewAsset(clip)?.thumbnailUrl || '';
+}
+
 function clipPreviewSource(clip) {
   const sourcePath = clipPreviewAsset(clip)?.sourcePath;
   if (!sourcePath) return '';
@@ -2768,19 +2936,29 @@ function setClipPreviewVideoRef(clipId, element) {
   }
 }
 
+function showClipPreviewCoverFrame(video) {
+  if (!video || !Number.isFinite(video.duration) || video.duration <= 0) return;
+  const coverTime = Math.min(CLIP_PREVIEW_COVER_SECONDS, video.duration / 2);
+  if (coverTime > 0.01) video.currentTime = coverTime;
+}
+
+function handleClipPreviewLoadedMetadata(clipId, event) {
+  if (playingClipPreviewId.value === clipId) return;
+  showClipPreviewCoverFrame(event.currentTarget);
+}
+
 function stopClipPreview({ reset = true } = {}) {
   const clipId = playingClipPreviewId.value;
   const video = clipPreviewVideoRefs.get(clipId);
   if (video) {
     video.pause();
-    if (reset) video.currentTime = 0;
+    if (reset) showClipPreviewCoverFrame(video);
   }
   playingClipPreviewId.value = '';
   loadingClipPreviewId.value = '';
 }
 
 async function toggleClipPreview(clip) {
-  selectedClipId.value = clip.id;
   const video = clipPreviewVideoRefs.get(clip.id);
   if (!video || !clipPreviewSource(clip)) {
     showToast('当前可变片段没有可预览的素材视频', 'warning');
@@ -2796,9 +2974,14 @@ async function toggleClipPreview(clip) {
 
   if (playingClipPreviewId.value && playingClipPreviewId.value !== clip.id) {
     stopClipPreview();
-    video.currentTime = 0;
   }
 
+  if (
+    video.ended ||
+    video.currentTime <= CLIP_PREVIEW_COVER_SECONDS + 0.05
+  ) {
+    video.currentTime = 0;
+  }
   playingClipPreviewId.value = clip.id;
   loadingClipPreviewId.value = clip.id;
   try {
@@ -2833,7 +3016,7 @@ function handleClipPreviewTimeUpdate(clip, event) {
 
 function handleClipPreviewEnded(clipId) {
   const video = clipPreviewVideoRefs.get(clipId);
-  if (video) video.currentTime = 0;
+  if (video) showClipPreviewCoverFrame(video);
   if (playingClipPreviewId.value === clipId) {
     playingClipPreviewId.value = '';
     loadingClipPreviewId.value = '';
@@ -2857,6 +3040,11 @@ function setClipMaterialType(clip, materialType) {
     stopClipPreview();
   }
   clip.materialType = materialType === 'fixed' ? 'fixed' : 'variable';
+  if (clip.materialType === 'fixed') {
+    enqueueFixedClipThumbnail(clip);
+  } else {
+    disposeFixedClipThumbnail(clip);
+  }
   applyGlobalLutToVariableAreas();
 }
 
@@ -2964,7 +3152,9 @@ onBeforeUnmount(() => {
   stopSubtitleInteraction();
   stopClipPreview();
   clipPreviewVideoRefs.clear();
+  releaseTemplatePreviewVideo();
   disposeAssetGroups(model.mediaGroups);
+  disposeAllFixedClipThumbnails();
   if (toast.timer) window.clearTimeout(toast.timer);
 });
 </script>
@@ -3065,17 +3255,23 @@ onBeforeUnmount(() => {
         <button
           class="button button-primary preview-button"
           type="button"
-          title="预览功能开发中"
-          disabled
+          :title="templatePreviewRunning ? '正在生成预览' : '预览模板视频'"
+          :disabled="templatePreviewRunning || templateDraftCreating"
+          @click="previewTemplateVideo"
         >
-          <Play :size="16" />
-          预览
+          <LoaderCircle
+            v-if="templatePreviewRunning"
+            :size="16"
+            class="draft-create-spinner"
+          />
+          <Play v-else :size="16" />
+          {{ templatePreviewRunning ? '生成中...' : '预览' }}
         </button>
         <button
           class="button button-primary"
           type="button"
-          :disabled="templateDraftCreating"
-          @click="createDraftTemplate"
+          :disabled="templateDraftCreating || templatePreviewRunning"
+          @click="generateAndSaveTemplate"
         >
           <LoaderCircle
             v-if="templateDraftCreating"
@@ -3083,7 +3279,7 @@ onBeforeUnmount(() => {
             class="draft-create-spinner"
           />
           <Download v-else :size="16" />
-          {{ templateDraftCreating ? '创建中...' : '生成模板' }}
+          {{ templateDraftCreating ? '生成中...' : '生成模板' }}
         </button>
       </div>
     </header>
@@ -3573,16 +3769,37 @@ onBeforeUnmount(() => {
                 :ref="(element) => setClipPreviewVideoRef(clip.id, element)"
                 class="clip-preview-video"
                 :src="clipPreviewSource(clip)"
-                :poster="clipPreviewAsset(clip)?.thumbnailUrl || undefined"
-                preload="metadata"
+                :poster="clipPreviewThumbnailUrl(clip) || undefined"
+                preload="auto"
                 playsinline
-                @click.stop="toggleClipPreview(clip)"
+                @loadedmetadata="handleClipPreviewLoadedMetadata(clip.id, $event)"
                 @playing="handleClipPreviewPlaying(clip.id)"
                 @waiting="handleClipPreviewWaiting(clip.id)"
                 @timeupdate="handleClipPreviewTimeUpdate(clip, $event)"
                 @ended="handleClipPreviewEnded(clip.id)"
                 @error="handleClipPreviewError(clip.id)"
               ></video>
+              <img
+                v-if="
+                  clipPreviewSource(clip) &&
+                  clipPreviewThumbnailUrl(clip) &&
+                  playingClipPreviewId !== clip.id
+                "
+                class="clip-preview-poster"
+                :src="clipPreviewThumbnailUrl(clip)"
+                alt=""
+                draggable="false"
+              />
+              <img
+                v-else-if="
+                  clipMaterialType(clip) === 'fixed' &&
+                  clipPreviewThumbnailUrl(clip)
+                "
+                class="clip-preview-poster clip-preview-poster-static"
+                :src="clipPreviewThumbnailUrl(clip)"
+                alt=""
+                draggable="false"
+              />
               <div class="preview-number">
                 {{ String(index + 1).padStart(2, '0') }}
               </div>
@@ -3618,6 +3835,11 @@ onBeforeUnmount(() => {
                 />
                 <Play v-else :size="22" fill="currentColor" />
               </button>
+              <div
+                v-else-if="
+                  clipMaterialType(clip) === 'fixed' && clip.topVideo
+                "
+              ></div>
               <div
                 v-else-if="clip.topVideo || clip.areas.length"
                 class="preview-content preview-content-static"
@@ -4097,6 +4319,54 @@ onBeforeUnmount(() => {
         </div>
       </aside>
     </Transition>
+
+    <WholeVideoPreviewModal
+      :visible="templatePreviewModalOpen && !templateDraftGenerationModal"
+      :loading="templatePreviewRunning"
+      :progress="templatePreviewProgress"
+      :status="templatePreviewStatus"
+      :error="templatePreviewError"
+      :source="templatePreviewVideoSource"
+      autoplay
+      title="模板视频预览"
+      @close="closeTemplatePreview"
+    />
+
+    <Teleport to="body">
+      <Transition name="modal">
+        <div
+          v-if="templatePreviewModalOpen && templateDraftGenerationModal"
+          class="template-generation-backdrop"
+        >
+          <section
+            class="template-generation-progress-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="生成模板进度"
+          >
+            <div class="template-generation-progress-heading">
+              <strong>正在生成模板</strong>
+              <span>{{ Math.round(templatePreviewProgress) }}%</span>
+            </div>
+            <div class="template-generation-progress-track">
+              <span
+                :style="{ width: `${Math.max(0, Math.min(100, templatePreviewProgress))}%` }"
+              ></span>
+            </div>
+            <p>{{ templatePreviewStatus }}</p>
+            <small v-if="templatePreviewError">{{ templatePreviewError }}</small>
+            <button
+              v-if="!templateDraftCreating"
+              class="button button-secondary"
+              type="button"
+              @click="closeTemplatePreview"
+            >
+              关闭
+            </button>
+          </section>
+        </div>
+      </Transition>
+    </Teleport>
 
     <Teleport to="body">
       <Transition name="modal">
@@ -5200,10 +5470,6 @@ onBeforeUnmount(() => {
             </div>
 
             <section class="canvas-preview-section subtitle-preview-section">
-              <div class="canvas-preview-copy">
-                <strong>目标画布预览</strong>
-                <span>实时展示字幕文字、字体、字号、颜色和位置</span>
-              </div>
               <div class="screen-preview subtitle-screen-preview">
                 <div class="screen-safe"></div>
                 <div
@@ -6116,6 +6382,81 @@ label:focus-within {
   animation: thumbnail-spin 0.8s linear infinite;
 }
 
+.template-generation-backdrop {
+  position: fixed;
+  z-index: 430;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(28, 28, 26, 0.46);
+  backdrop-filter: blur(3px);
+}
+
+.template-generation-progress-modal {
+  width: min(420px, 100%);
+  padding: 20px 22px;
+  color: #20201e;
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  border-radius: 13px;
+  background: #fff;
+  box-shadow: 0 18px 54px rgba(18, 18, 16, 0.24);
+  transition: 180ms ease;
+}
+
+.template-generation-progress-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 13px;
+}
+
+.template-generation-progress-heading strong {
+  font-size: 14px;
+}
+
+.template-generation-progress-heading span {
+  color: #dc4d2c;
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.template-generation-progress-track {
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #ecece7;
+}
+
+.template-generation-progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #f47a59, #dc4d2c);
+  transition: width 180ms ease;
+}
+
+.template-generation-progress-modal p {
+  margin: 11px 0 0;
+  color: #777872;
+  font-size: 11px;
+}
+
+.template-generation-progress-modal small {
+  display: block;
+  margin-top: 7px;
+  color: #d64a43;
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.template-generation-progress-modal > button {
+  display: block;
+  margin: 15px 0 0 auto;
+}
+
 @keyframes thumbnail-spin {
   to {
     transform: rotate(360deg);
@@ -6360,9 +6701,20 @@ label:focus-within {
   object-fit: cover;
 }
 
+.clip-preview-poster {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  width: 100%;
+  height: 100%;
+  cursor: pointer;
+  object-fit: cover;
+  user-select: none;
+}
+
 .preview-number {
   position: absolute;
-  z-index: 1;
+  z-index: 3;
   top: 10px;
   left: 11px;
   color: #71726d;
@@ -6373,7 +6725,7 @@ label:focus-within {
 
 .preview-content {
   position: relative;
-  z-index: 2;
+  z-index: 3;
   width: 48px;
   height: 48px;
   display: grid;
@@ -6430,7 +6782,7 @@ label:focus-within {
 
 .clip-duration {
   position: absolute;
-  z-index: 1;
+  z-index: 3;
   right: 8px;
   bottom: 8px;
   padding: 3px 6px;
@@ -7422,8 +7774,13 @@ button.sequence-track-clip.active {
   border-radius: 0;
 }
 
-.subtitle-modal {
+.area-modal.subtitle-modal {
   width: min(900px, 100%);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.subtitle-modal-body {
+  min-height: 0;
 }
 
 .subtitle-settings-grid {
@@ -7443,7 +7800,9 @@ button.sequence-track-clip.active {
 .subtitle-preview-text {
   position: absolute;
   z-index: 2;
-  max-width: calc(100% - 16px);
+  width: max-content;
+  max-width: 100%;
+  box-sizing: border-box;
   padding: 3px 6px;
   line-height: 1.25;
   font-weight: 600;
@@ -8827,8 +9186,10 @@ button.sequence-track-clip.active {
 
 .modal-enter-from .area-modal,
 .modal-enter-from .confirm-modal,
+.modal-enter-from .template-generation-progress-modal,
 .modal-leave-to .area-modal,
-.modal-leave-to .confirm-modal {
+.modal-leave-to .confirm-modal,
+.modal-leave-to .template-generation-progress-modal {
   transform: translateY(10px) scale(0.985);
 }
 

@@ -79,6 +79,8 @@ export async function request(path, options = {}) {
     headers = {},
     signal,
     responseType = 'json',
+    timeout,
+    onUploadProgress,
   } = options;
   const normalizedMethod = method.toUpperCase();
 
@@ -91,6 +93,8 @@ export async function request(path, options = {}) {
       headers: withAuthHeader(headers),
       signal,
       responseType,
+      timeout,
+      onUploadProgress,
     });
 
     if (handleTokenInvalid(path, response.data, response.status)) {
