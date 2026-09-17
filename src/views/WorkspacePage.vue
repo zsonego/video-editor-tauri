@@ -376,6 +376,9 @@ const exportState = ref('confirm');
 const exportProgress = ref(0);
 const exportStatus = ref('正在渲染视频文件...');
 const exportRunning = ref(false);
+const adaptiveDurationConfirmVisible = ref(false);
+const adaptiveDurationConfirmCount = ref(0);
+const pendingAdaptiveDurationAction = ref('');
 const exportSelectedDir = ref('');
 const exportSelectedPath = ref('');
 const exportOutputPath = ref('');
@@ -422,11 +425,16 @@ let pendingProjectUpdate = null;
 let assetPropertyPersistTimer = null;
 let assetPropertyPersistPromise = null;
 const pendingAssetPropertyUpdates = new Map();
+const assetVideoPreprocessQueue = [];
+const assetVideoPropertyDrafts = new Map();
+const assetVideoPropertyRevisions = new Map();
+let activeAssetVideoPreprocessTask = null;
+let assetVideoPreprocessWorkerPromise = null;
+let assetVideoPreprocessEpoch = 0;
+let assetVideoProgressHideTimer = null;
 let pendingMainVideoSeekTime = null;
 let beautyPreviewTimer = null;
 let pendingBeautyPreview = null;
-let pendingBeautyVideoPreview = null;
-let beautyVideoPreviewRunning = false;
 let beautyPreviewGeneration = 0;
 const canceledTemplateDownloadIds = new Set();
 const VIDEO_FRAME_REVEAL_TIME = 0.001;
@@ -505,6 +513,11 @@ const beautyVideoPreviewActive = ref(false);
 const beautyVideoPreviewOutputPath = ref('');
 const generatedVideoApplying = ref(false);
 const materialResetting = ref(false);
+const assetVideoPreprocessRunning = ref(false);
+const assetVideoPreprocessQueueLength = ref(0);
+const assetVideoPreprocessVisible = ref(false);
+const assetVideoPreprocessCompleted = ref(0);
+const assetVideoPreprocessTotal = ref(0);
 const importedVideoObjectUrls = new Set();
 
 // 时间线选区使用秒作为统一单位。
@@ -610,13 +623,58 @@ const accountTenantName = computed(() => {
   const profile = storedAccountProfile.value;
   return profile.renterName || profile.tenantName || '--';
 });
+const isEditingWorkspace = computed(
+  () => currentViewState.value === 'import' && mainMode.value === 'player',
+);
 const canExport = computed(
   () =>
-    currentViewState.value === 'import' &&
-    mainMode.value === 'player' &&
+    isEditingWorkspace.value &&
     Boolean(activeProjectDir.value) &&
     Boolean(activeTemplateLocalInfo.value?.templateFilePath),
 );
+const assetVideoPreprocessBusy = computed(
+  () =>
+    assetVideoPreprocessRunning.value ||
+    assetVideoPreprocessQueueLength.value > 0,
+);
+const assetVideoPreprocessProgress = computed(() => {
+  const total = Math.max(1, assetVideoPreprocessTotal.value);
+  const activeProgress = assetVideoPreprocessRunning.value ? 0.15 : 0;
+  return Math.min(
+    100,
+    ((assetVideoPreprocessCompleted.value + activeProgress) / total) * 100,
+  );
+});
+const adaptiveDurationConfirmMessage = computed(() =>
+  pendingAdaptiveDurationAction.value === 'preview'
+    ? '有片段时长不够，已自动慢放补足，建议先更换素材。仍然要预览吗？'
+    : '有片段时长不够，已自动慢放补足。建议先预览，效果不满意可更换素材。仍要导出吗？',
+);
+const assetVideoPreprocessDebugTasks = computed(() => {
+  void assetVideoPreprocessRunning.value;
+  void assetVideoPreprocessQueueLength.value;
+  const tasks = [];
+  if (activeAssetVideoPreprocessTask) {
+    tasks.push({
+      key: `active-${activeAssetVideoPreprocessTask.assetId}-${activeAssetVideoPreprocessTask.revision}`,
+      status: '处理中',
+      videoName: activeAssetVideoPreprocessTask.videoName,
+      modeLabel:
+        activeAssetVideoPreprocessTask.mode === 'manual'
+          ? '单素材预览'
+          : '后台应用',
+    });
+  }
+  assetVideoPreprocessQueue.forEach((task, index) => {
+    tasks.push({
+      key: `queued-${task.mode}-${task.assetId}-${task.revision}-${index}`,
+      status: `等待 ${index + 1}`,
+      videoName: task.videoName,
+      modeLabel: task.mode === 'manual' ? '单素材预览' : '后台应用',
+    });
+  });
+  return tasks;
+});
 const sidebarTitle = computed(() => {
   if (currentViewState.value === 'finished') return '已导入视频';
   if (currentViewState.value === 'segments') return activeTemplateName.value;
@@ -972,6 +1030,7 @@ function statusMeta(status) {
 
 async function goHome() {
   await flushPendingAssetPropertyUpdates();
+  enqueueCurrentDirtyAssetVideo();
   flushPendingProjectTemplateUpdate();
   invalidateBeautyPreview();
   resetDraftBatchDelete();
@@ -1631,6 +1690,7 @@ async function createBackendProjectIfNeeded() {
 }
 
 async function startEditing() {
+  cancelAllAssetVideoPreprocessTasks();
   editingFromDraftLibrary.value = false;
   const backendProjectCreated = await createBackendProjectIfNeeded();
   if (!backendProjectCreated) {
@@ -1693,6 +1753,7 @@ async function startEditing() {
 async function handleSidebarBack() {
   await flushPendingAssetPropertyUpdates();
   if (currentViewState.value === 'import') {
+    cancelAllAssetVideoPreprocessTasks();
     flushPendingProjectTemplateUpdate();
     activeProjectDir.value = '';
     activeBackendProjectId.value = '';
@@ -1785,20 +1846,14 @@ function getVideoRequiredDurationSeconds(video) {
     : 0;
 }
 
-function isVideoDurationTooShort(video) {
-  const requiredDuration = getVideoRequiredDurationSeconds(video);
-  if (!requiredDuration) return false;
-
-  const videoDuration = Number(video?.durationSeconds) || 0;
-  return videoDuration + 0.05 < requiredDuration;
-}
-
 function collectInvalidDurationVideoKeys() {
   const invalidKeys = new Set();
+  const adaptedAssetIds = getAutoAdaptedAssetIds();
 
   for (const segment of importSegments.value) {
     segment.videos.forEach((video, videoIndex) => {
-      if (isVideoDurationTooShort(video)) {
+      const assetId = String(video?.assetId || '');
+      if (adaptedAssetIds.has(assetId)) {
         invalidKeys.add(getVideoItemKey(segment, video, videoIndex));
       }
     });
@@ -1810,49 +1865,6 @@ function collectInvalidDurationVideoKeys() {
 function refreshInvalidDurationVideoState() {
   invalidDurationVideoKeys.value = collectInvalidDurationVideoKeys();
   return invalidDurationVideoKeys.value.size === 0;
-}
-
-function scrollToFirstInvalidDurationVideo() {
-  const [firstInvalidKey] = invalidDurationVideoKeys.value;
-  if (!firstInvalidKey) return;
-
-  nextTick(() => {
-    const target = importVideoItemRefs.get(firstInvalidKey);
-    if (!target) return;
-
-    const scrollContainer = importVideoListScrollRef.value;
-    if (scrollContainer?.contains(target)) {
-      const containerRect = scrollContainer.getBoundingClientRect();
-      const targetRect = target.getBoundingClientRect();
-      const nextScrollTop =
-        scrollContainer.scrollTop +
-        targetRect.top -
-        containerRect.top -
-        (scrollContainer.clientHeight - targetRect.height) / 2;
-
-      scrollContainer.scrollTo({
-        top: Math.max(0, nextScrollTop),
-        behavior: 'smooth',
-      });
-      return;
-    }
-
-    target.scrollIntoView({
-      behavior: 'smooth',
-      block: 'center',
-      inline: 'nearest',
-    });
-  });
-}
-
-function validateExportVideoDurations() {
-  const valid = refreshInvalidDurationVideoState();
-  if (!valid) {
-    systemMessage.error('选择的素材时长太短，请重新选择');
-    scrollToFirstInvalidDurationVideo();
-  }
-
-  return valid;
 }
 
 function isVideoDurationInvalid(segment, video, videoIndex) {
@@ -2202,6 +2214,63 @@ function findTemplateAreaDurationSeconds(assetId) {
   return findLongestTemplateAreaMatch(assetId)?.durationSeconds || null;
 }
 
+function getAutoAdaptedAssetIds() {
+  const assetIds = new Set();
+  const xmlContent = getActiveTemplateXmlContent();
+  if (!xmlContent) return assetIds;
+  const xml = new DOMParser().parseFromString(xmlContent, 'text/xml');
+  if (xml.querySelector('parsererror')) return assetIds;
+  Array.from(xml.querySelectorAll('area')).forEach((area) => {
+    const transform = getDirectChildElements(area, 'transform')[0];
+    const speed = transform && getDirectChildElements(transform, 'speed')[0];
+    const assetId = area.getAttribute('asset-id') || '';
+    if (assetId && speed?.getAttribute('data-auto-slowdown') === 'true') {
+      assetIds.add(assetId);
+    }
+  });
+  return assetIds;
+}
+
+function getAutoAdaptedVideoCount() {
+  const adaptedAssetIds = getAutoAdaptedAssetIds();
+  const visibleAdaptedAssetIds = new Set();
+  importSegments.value.forEach((segment) => {
+    segment.videos.forEach((video) => {
+      const assetId = String(video?.assetId || '');
+      if (assetId && adaptedAssetIds.has(assetId)) {
+        visibleAdaptedAssetIds.add(assetId);
+      }
+    });
+  });
+  return visibleAdaptedAssetIds.size;
+}
+
+function requestAdaptiveDurationConfirmation(action) {
+  const count = getAutoAdaptedVideoCount();
+  if (count <= 0) return false;
+
+  adaptiveDurationConfirmCount.value = count;
+  pendingAdaptiveDurationAction.value = action;
+  adaptiveDurationConfirmVisible.value = true;
+  return true;
+}
+
+function cancelAdaptiveDurationConfirmation() {
+  adaptiveDurationConfirmVisible.value = false;
+  adaptiveDurationConfirmCount.value = 0;
+  pendingAdaptiveDurationAction.value = '';
+}
+
+async function confirmAdaptiveDurationAction() {
+  const action = pendingAdaptiveDurationAction.value;
+  cancelAdaptiveDurationConfirmation();
+  if (action === 'preview') {
+    await startSidebarVideoPreview();
+  } else if (action === 'export') {
+    await continueExportConfirmation();
+  }
+}
+
 function getTimelineSelectionDuration(videoInfo, videoDuration) {
   const templateDuration = findTemplateAreaDurationSeconds(videoInfo.assetId);
 
@@ -2451,10 +2520,16 @@ async function generateAndApplyImportedVideo(
         1000,
     ),
   );
-  const durationSeconds = getTimelineSelectionDuration(
+  const requestedDurationSeconds = getTimelineSelectionDuration(
     importedVideo,
     Number(importedVideo.durationSeconds) || 0,
   );
+  const sourceDurationSeconds = Number(importedVideo.durationSeconds) || 0;
+  const availableDurationSeconds = sourceDurationSeconds - startTimeMs / 1000;
+  const durationSeconds =
+    sourceDurationSeconds > 0
+      ? Math.min(requestedDurationSeconds, Math.max(0, availableDurationSeconds))
+      : requestedDurationSeconds;
   const durationMs = Math.max(0, Math.round(durationSeconds * 1000));
 
   onProgress?.(0.5, '正在生成预览视频...');
@@ -2542,6 +2617,19 @@ async function createImportedVideoFromPath(
   return importedVideo;
 }
 
+async function adaptImportedVideoSpeed(importedVideo) {
+  const assetId = String(importedVideo?.assetId || '').trim();
+  const durationSeconds = Number(importedVideo?.durationSeconds) || 0;
+  if (!activeProjectDir.value || !assetId || durationSeconds <= 0) return;
+
+  const result = await invoke('adapt_project_asset_speed', {
+    projectDir: activeProjectDir.value,
+    assetId,
+    videoDurationMs: Math.floor(durationSeconds * 1000),
+  });
+  applyActiveProjectTemplateXml(result.projectXml);
+}
+
 function revokeImportedVideo(video) {
   if (
     video?.isObjectUrl &&
@@ -2584,6 +2672,32 @@ function buildFilledImportPaths(filePaths, count) {
     { length: count },
     (_, index) => filePaths[index % filePaths.length],
   );
+}
+
+function getImportErrorMessage(error, fallback) {
+  if (typeof error === 'string' && error.trim()) return error;
+  if (typeof error?.message === 'string' && error.message.trim()) {
+    return error.message;
+  }
+  return fallback;
+}
+
+async function sortVideoPathsByDuration(filePaths) {
+  const filesWithDuration = await Promise.all(
+    filePaths.map(async (filePath, index) => ({
+      filePath,
+      index,
+      durationSeconds: (
+        await getVideoMetadata(convertFileSrc(filePath))
+      ).durationSeconds,
+    })),
+  );
+  return filesWithDuration
+    .sort(
+      (first, second) =>
+        second.durationSeconds - first.durationSeconds || first.index - second.index,
+    )
+    .map(({ filePath }) => filePath);
 }
 
 function isSegmentGroupFullyImported(group) {
@@ -2682,6 +2796,17 @@ async function importPathsIntoSlots(slots, filePaths) {
   if (assignments.length === 0) return false;
 
   await flushPendingAssetPropertyUpdates();
+  const affectedAssetIds = [
+    ...new Set(
+      assignments
+        .map(({ segment, slotIndex }) =>
+          String(segment.defaultAssets?.[slotIndex]?.id || '').trim(),
+        )
+        .filter(Boolean),
+    ),
+  ];
+  affectedAssetIds.forEach(cancelAssetVideoPreprocessTasks);
+  await waitForActiveAssetVideoPreprocessTasks(affectedAssetIds);
   beginImportProcessing(assignments.length);
 
   const assignmentsBySegment = new Map();
@@ -2733,6 +2858,7 @@ async function importPathsIntoSlots(slots, filePaths) {
               ),
           },
         );
+        await adaptImportedVideoSpeed(importedVideo);
         if (previousVideo) replacedVideos.push(previousVideo);
         videos[slotIndex] = importedVideo;
         importedVideos.push(importedVideo);
@@ -2742,7 +2868,8 @@ async function importPathsIntoSlots(slots, filePaths) {
       }
     } catch (error) {
       failImportProcessing();
-      systemMessage.error(error?.message || '素材导入失败');
+      console.error('[import] 素材导入失败', error);
+      systemMessage.error(getImportErrorMessage(error, '素材导入失败'));
       return false;
     }
 
@@ -2774,10 +2901,23 @@ async function importPathsIntoSlots(slots, filePaths) {
 }
 
 async function executeOneClickImport(target, mode, filePaths, repeat = false) {
-  const slots = getOneClickImportSlots(target, mode);
+  const slots = getOneClickImportSlots(target, mode)
+    .map((slot, index) => ({
+      ...slot,
+      originalIndex: index,
+      requiredDurationSeconds: getVideoRequiredDurationSeconds({
+        assetId: slot.segment.defaultAssets?.[slot.slotIndex]?.id || '',
+      }),
+    }))
+    .sort(
+      (first, second) =>
+        second.requiredDurationSeconds - first.requiredDurationSeconds ||
+        first.originalIndex - second.originalIndex,
+    );
+  const sortedFilePaths = await sortVideoPathsByDuration(filePaths);
   const pathsToImport = repeat
-    ? buildFilledImportPaths(filePaths, slots.length)
-    : filePaths.slice(0, slots.length);
+    ? buildFilledImportPaths(sortedFilePaths, slots.length)
+    : sortedFilePaths.slice(0, slots.length);
   const imported = await importPathsIntoSlots(slots, pathsToImport);
   const normalizedTarget = normalizeOneClickImportTarget(target);
 
@@ -2877,6 +3017,8 @@ async function openReplaceFilePicker(segment, videoIndex) {
   let replacementVideo;
 
   try {
+    cancelAssetVideoPreprocessTasks(assetId);
+    await waitForActiveAssetVideoPreprocessTasks([assetId]);
     await flushPendingAssetPropertyUpdates();
     const previousVideo = videos[videoIndex];
     const transformValues = getCurrentAssetTransformValues(
@@ -2900,9 +3042,11 @@ async function openReplaceFilePicker(segment, videoIndex) {
           ),
       },
     );
+    await adaptImportedVideoSpeed(replacementVideo);
   } catch (error) {
     failImportProcessing();
-    systemMessage.error(error?.message || '素材替换失败');
+    console.error('[import] 素材替换失败', error);
+    systemMessage.error(getImportErrorMessage(error, '素材替换失败'));
     return;
   }
 
@@ -2927,14 +3071,15 @@ async function openReplaceFilePicker(segment, videoIndex) {
 
 // 选择素材后恢复其时间线状态，播放指针始终从 0 秒开始。
 function selectVideoForTimeline(video, styleName = '') {
-  invalidateBeautyPreview();
-  cacheCurrentVideoTimelineState();
-
   const videoInfo =
     typeof video === 'string'
       ? { name: video, duration: selectedVideoDuration.value }
       : video;
   const nextVideoKey = videoInfo.id || videoInfo.name;
+  enqueueCurrentDirtyAssetVideo(nextVideoKey);
+  invalidateBeautyPreview();
+  cacheCurrentVideoTimelineState();
+
   const cachedState = getVideoTimelineState(nextVideoKey);
 
   selectedVideoName.value = videoInfo.name;
@@ -3037,6 +3182,7 @@ function handleTimelineVideoTransformChange(values) {
   beautyVideoPreviewOutputPath.value = '';
   const { changeType = 'transform', ...transformValues } = values || {};
   videoTransformStateCache[key] = transformValues;
+  recordCurrentAssetVideoPropertyDraft(transformValues);
   scheduleProjectAssetPropertyUpdate(
     selectedVideoAssetId.value,
     transformValues,
@@ -3126,6 +3272,366 @@ function buildProjectAssetProperties(values = {}) {
   };
 }
 
+function cloneAssetTransformValues(values = {}) {
+  const normalized = normalizeVideoTransformValues(values);
+  return {
+    ...normalized,
+    beauty: { ...(normalized.beauty || {}) },
+  };
+}
+
+function getCurrentAssetVideoTask(values, mode = 'auto') {
+  const projectDir = activeProjectDir.value;
+  const assetId = String(selectedVideoAssetId.value || '').trim();
+  const videoPath = String(selectedVideoPath.value || '').trim();
+  const videoKey = String(selectedVideoKey.value || '').trim();
+  if (!projectDir || !assetId || !videoPath || !videoKey) return null;
+
+  const startTimeSeconds = Math.max(0, Number(timeline.startTime) || 0);
+  const requestedDurationSeconds = Math.max(
+    0,
+    Number(timeline.selectedDuration) || 0,
+  );
+  const sourceDurationSeconds = Math.max(
+    0,
+    Number(timeline.totalDuration) || 0,
+  );
+  const availableDurationSeconds = Math.max(
+    0,
+    sourceDurationSeconds - startTimeSeconds,
+  );
+  const durationSeconds = sourceDurationSeconds
+    ? Math.min(requestedDurationSeconds, availableDurationSeconds)
+    : requestedDurationSeconds;
+
+  return {
+    epoch: assetVideoPreprocessEpoch,
+    mode,
+    projectDir,
+    assetId,
+    videoKey,
+    videoPath,
+    videoName: selectedVideoName.value || '当前素材',
+    startTimeMs: Math.round(startTimeSeconds * 1000),
+    durationMs: Math.round(durationSeconds * 1000),
+    values: cloneAssetTransformValues(values),
+    revision: assetVideoPropertyRevisions.get(assetId) || 0,
+    canceled: false,
+    suppressApply: false,
+  };
+}
+
+function syncAssetVideoPreprocessQueueLength() {
+  assetVideoPreprocessQueueLength.value = assetVideoPreprocessQueue.length;
+}
+
+function beginAssetVideoPreprocessProgress() {
+  if (assetVideoProgressHideTimer) {
+    window.clearTimeout(assetVideoProgressHideTimer);
+    assetVideoProgressHideTimer = null;
+  }
+  if (!assetVideoPreprocessVisible.value) {
+    assetVideoPreprocessCompleted.value = 0;
+    assetVideoPreprocessTotal.value = 0;
+    assetVideoPreprocessVisible.value = true;
+  }
+}
+
+function registerAssetVideoPreprocessTask() {
+  beginAssetVideoPreprocessProgress();
+  assetVideoPreprocessTotal.value += 1;
+}
+
+function removeQueuedAssetVideoTasks(predicate) {
+  let removed = 0;
+  for (let index = assetVideoPreprocessQueue.length - 1; index >= 0; index -= 1) {
+    if (!predicate(assetVideoPreprocessQueue[index])) continue;
+    assetVideoPreprocessQueue.splice(index, 1);
+    removed += 1;
+  }
+  if (removed) {
+    assetVideoPreprocessTotal.value = Math.max(
+      assetVideoPreprocessCompleted.value +
+        (assetVideoPreprocessRunning.value ? 1 : 0) +
+        assetVideoPreprocessQueue.length,
+      assetVideoPreprocessTotal.value - removed,
+    );
+  }
+  syncAssetVideoPreprocessQueueLength();
+}
+
+function updateQueuedAssetVideoTasks(task) {
+  let updated = false;
+  assetVideoPreprocessQueue.forEach((queuedTask) => {
+    if (queuedTask.assetId !== task.assetId || queuedTask.mode !== 'auto') {
+      return;
+    }
+    Object.assign(queuedTask, task, { mode: 'auto' });
+    updated = true;
+  });
+  return updated;
+}
+
+function enqueueAutomaticAssetVideoTask(task) {
+  const queuedTask = assetVideoPreprocessQueue.find(
+    (item) => item.assetId === task.assetId && item.mode === 'auto',
+  );
+  if (queuedTask) {
+    Object.assign(queuedTask, task, { mode: 'auto' });
+  } else {
+    assetVideoPreprocessQueue.push({ ...task, mode: 'auto' });
+    registerAssetVideoPreprocessTask();
+  }
+  syncAssetVideoPreprocessQueueLength();
+  void runAssetVideoPreprocessQueue();
+}
+
+function enqueueManualAssetVideoPreview(task) {
+  if (activeAssetVideoPreprocessTask?.assetId === task.assetId) {
+    activeAssetVideoPreprocessTask.suppressApply = true;
+  }
+  removeQueuedAssetVideoTasks((item) => item.assetId === task.assetId);
+  assetVideoPreprocessQueue.unshift({ ...task, mode: 'manual' });
+  registerAssetVideoPreprocessTask();
+  syncAssetVideoPreprocessQueueLength();
+  beautyVideoPreviewLoading.value = true;
+  void runAssetVideoPreprocessQueue();
+}
+
+function recordCurrentAssetVideoPropertyDraft(values) {
+  const assetId = String(selectedVideoAssetId.value || '').trim();
+  if (!assetId) return;
+  const revision = (assetVideoPropertyRevisions.get(assetId) || 0) + 1;
+  assetVideoPropertyRevisions.set(assetId, revision);
+  const task = getCurrentAssetVideoTask(values, 'auto');
+  if (!task) return;
+  task.revision = revision;
+  assetVideoPropertyDrafts.set(assetId, task);
+
+  const updatedQueuedTask = updateQueuedAssetVideoTasks(task);
+  if (activeAssetVideoPreprocessTask?.assetId === assetId) {
+    enqueueAutomaticAssetVideoTask(task);
+  } else if (updatedQueuedTask) {
+    syncAssetVideoPreprocessQueueLength();
+  }
+}
+
+function enqueueCurrentDirtyAssetVideo(nextVideoKey = '') {
+  const currentVideoKey = String(selectedVideoKey.value || '');
+  if (!currentVideoKey || currentVideoKey === String(nextVideoKey || '')) return;
+  const assetId = String(selectedVideoAssetId.value || '').trim();
+  const draft = assetVideoPropertyDrafts.get(assetId);
+  if (!draft) return;
+  const refreshedTask = getCurrentAssetVideoTask(draft.values, 'auto');
+  if (!refreshedTask) return;
+  refreshedTask.revision = draft.revision;
+  assetVideoPropertyDrafts.set(assetId, refreshedTask);
+  enqueueAutomaticAssetVideoTask(refreshedTask);
+}
+
+function cancelAssetVideoPreprocessTasks(assetId) {
+  const normalizedAssetId = String(assetId || '').trim();
+  if (!normalizedAssetId) return;
+  assetVideoPropertyRevisions.set(
+    normalizedAssetId,
+    (assetVideoPropertyRevisions.get(normalizedAssetId) || 0) + 1,
+  );
+  assetVideoPropertyDrafts.delete(normalizedAssetId);
+  removeQueuedAssetVideoTasks((task) => task.assetId === normalizedAssetId);
+  if (activeAssetVideoPreprocessTask?.assetId === normalizedAssetId) {
+    activeAssetVideoPreprocessTask.canceled = true;
+    activeAssetVideoPreprocessTask.suppressApply = true;
+  }
+  if (selectedVideoAssetId.value === normalizedAssetId) {
+    beautyVideoPreviewLoading.value = false;
+  }
+}
+
+async function waitForActiveAssetVideoPreprocessTasks(assetIds) {
+  const targets = new Set(
+    (assetIds || [])
+      .map((assetId) => String(assetId || '').trim())
+      .filter(Boolean),
+  );
+  while (
+    activeAssetVideoPreprocessTask &&
+    targets.has(activeAssetVideoPreprocessTask.assetId)
+  ) {
+    await new Promise((resolve) => window.setTimeout(resolve, 50));
+  }
+}
+
+function getAssetVideoPreprocessProjectDirs() {
+  return new Set(
+    [
+      activeAssetVideoPreprocessTask?.projectDir,
+      ...assetVideoPreprocessQueue.map((task) => task.projectDir),
+      ...Array.from(assetVideoPropertyDrafts.values()).map(
+        (task) => task.projectDir,
+      ),
+    ].filter(Boolean),
+  );
+}
+
+async function waitForAssetVideoPreprocessQueueToSettle() {
+  while (assetVideoPreprocessWorkerPromise) {
+    await assetVideoPreprocessWorkerPromise;
+  }
+}
+
+function cancelAllAssetVideoPreprocessTasks() {
+  assetVideoPreprocessEpoch += 1;
+  assetVideoPreprocessQueue.splice(0);
+  assetVideoPropertyDrafts.clear();
+  assetVideoPropertyRevisions.clear();
+  if (activeAssetVideoPreprocessTask) {
+    activeAssetVideoPreprocessTask.canceled = true;
+    activeAssetVideoPreprocessTask.suppressApply = true;
+  }
+  syncAssetVideoPreprocessQueueLength();
+  beautyVideoPreviewLoading.value = false;
+  if (assetVideoProgressHideTimer) {
+    window.clearTimeout(assetVideoProgressHideTimer);
+    assetVideoProgressHideTimer = null;
+  }
+  assetVideoPreprocessVisible.value = false;
+  assetVideoPreprocessCompleted.value = 0;
+  assetVideoPreprocessTotal.value = 0;
+}
+
+function finishAssetVideoPreprocessProgressIfIdle() {
+  if (
+    assetVideoPreprocessRunning.value ||
+    assetVideoPreprocessQueue.length > 0
+  ) {
+    return;
+  }
+  assetVideoPreprocessCompleted.value = assetVideoPreprocessTotal.value;
+  if (assetVideoProgressHideTimer) {
+    window.clearTimeout(assetVideoProgressHideTimer);
+  }
+  assetVideoProgressHideTimer = window.setTimeout(() => {
+    assetVideoPreprocessVisible.value = false;
+    assetVideoPreprocessCompleted.value = 0;
+    assetVideoPreprocessTotal.value = 0;
+    assetVideoProgressHideTimer = null;
+  }, 450);
+}
+
+async function processAssetVideoPreprocessTask(task) {
+  const result = await invoke('preview_composer_beauty_file', {
+    inputVideoPath: task.videoPath,
+    startTimeMs: task.startTimeMs,
+    durationMs: task.durationMs,
+    params: buildBeautyFrameParams(task.values),
+  });
+  const latestRevision = assetVideoPropertyRevisions.get(task.assetId) || 0;
+  const taskIsCurrent =
+    !task.canceled &&
+    task.epoch === assetVideoPreprocessEpoch &&
+    latestRevision === task.revision;
+  if (!taskIsCurrent) return;
+
+  if (task.mode === 'manual') {
+    const preserved = await invoke('preserve_project_asset_preview_video', {
+      projectDir: task.projectDir,
+      assetId: task.assetId,
+      previewVideoPath: result.outputVideoPath,
+    });
+    if (
+      task.videoKey === selectedVideoKey.value &&
+      task.assetId === selectedVideoAssetId.value
+    ) {
+      const displayed = await videoTransformerRef.value?.showBeautyVideoPreview?.(
+        convertFileSrc(preserved.previewVideoPath),
+      );
+      beautyVideoPreviewActive.value = displayed === true;
+      beautyVideoPreviewOutputPath.value =
+        displayed === true ? preserved.previewVideoPath : '';
+    }
+    return;
+  }
+
+  if (task.suppressApply) return;
+  const applied = await invoke('apply_project_asset_generated_video', {
+    projectDir: task.projectDir,
+    assetId: task.assetId,
+    previewVideoPath: result.outputVideoPath,
+    properties: buildProjectAssetProperties(task.values),
+  });
+  if (
+    task.projectDir === activeProjectDir.value &&
+    task.epoch === assetVideoPreprocessEpoch
+  ) {
+    applyActiveProjectTemplateXml(applied.projectXml);
+    if (
+      task.videoKey === selectedVideoKey.value &&
+      task.assetId === selectedVideoAssetId.value
+    ) {
+      beautyVideoPreviewOutputPath.value = applied.generatePath;
+      const displayed = await videoTransformerRef.value?.showBeautyVideoPreview?.(
+        convertFileSrc(applied.generatePath),
+      );
+      beautyVideoPreviewActive.value = displayed === true;
+    }
+  }
+  if ((assetVideoPropertyRevisions.get(task.assetId) || 0) === task.revision) {
+    assetVideoPropertyDrafts.delete(task.assetId);
+  }
+}
+
+async function runAssetVideoPreprocessQueue() {
+  if (assetVideoPreprocessWorkerPromise) return assetVideoPreprocessWorkerPromise;
+  const worker = (async () => {
+    while (assetVideoPreprocessQueue.length > 0) {
+      if (beautyFramePreviewLoading.value) {
+        await new Promise((resolve) => window.setTimeout(resolve, 50));
+        continue;
+      }
+      const task = assetVideoPreprocessQueue.shift();
+      syncAssetVideoPreprocessQueueLength();
+      activeAssetVideoPreprocessTask = task;
+      assetVideoPreprocessRunning.value = true;
+      try {
+        await processAssetVideoPreprocessTask(task);
+      } catch (error) {
+        console.error('[asset-preprocess] task failed', task, error);
+        if (!task.canceled && task.epoch === assetVideoPreprocessEpoch) {
+          systemMessage.error(
+            `${task.videoName}后台处理失败：${getImportErrorMessage(error, '视频预处理失败')}`,
+          );
+        }
+      } finally {
+        if (
+          task.mode === 'manual' &&
+          task.videoKey === selectedVideoKey.value
+        ) {
+          beautyVideoPreviewLoading.value = false;
+        }
+        activeAssetVideoPreprocessTask = null;
+        assetVideoPreprocessRunning.value = false;
+        if (task.epoch === assetVideoPreprocessEpoch) {
+          assetVideoPreprocessCompleted.value += 1;
+        }
+      }
+
+      if (pendingBeautyPreview && !beautyPreviewTimer) {
+        await processPendingBeautyPreview();
+      }
+    }
+  })();
+  assetVideoPreprocessWorkerPromise = worker;
+  return worker.finally(() => {
+    if (assetVideoPreprocessWorkerPromise === worker) {
+      assetVideoPreprocessWorkerPromise = null;
+    }
+    finishAssetVideoPreprocessProgressIfIdle();
+    if (assetVideoPreprocessQueue.length > 0) {
+      void runAssetVideoPreprocessQueue();
+    }
+  });
+}
+
 function scheduleProjectAssetPropertyUpdate(assetId, values) {
   const normalizedAssetId = String(assetId || '').trim();
   const projectDir = activeProjectDir.value;
@@ -3190,10 +3696,7 @@ function invalidateBeautyPreview() {
   beautyVideoPreviewActive.value = false;
   beautyVideoPreviewOutputPath.value = '';
   pendingBeautyPreview = null;
-  if (pendingBeautyVideoPreview && !beautyVideoPreviewRunning) {
-    pendingBeautyVideoPreview = null;
-    beautyVideoPreviewLoading.value = false;
-  }
+  beautyVideoPreviewLoading.value = false;
   if (beautyPreviewTimer) {
     window.clearTimeout(beautyPreviewTimer);
     beautyPreviewTimer = null;
@@ -3202,11 +3705,6 @@ function invalidateBeautyPreview() {
 
 function scheduleBeautyPreview(values, delay = BEAUTY_PREVIEW_DEBOUNCE_MS) {
   if (!selectedVideoPath.value) return;
-
-  if (pendingBeautyVideoPreview && !beautyVideoPreviewRunning) {
-    pendingBeautyVideoPreview = null;
-    beautyVideoPreviewLoading.value = false;
-  }
   videoTransformerRef.value?.pause?.();
   beautyPreviewGeneration += 1;
   pendingBeautyPreview = {
@@ -3231,12 +3729,7 @@ function scheduleBeautyPreview(values, delay = BEAUTY_PREVIEW_DEBOUNCE_MS) {
 }
 
 async function handleBeautyPreviewRequest(values) {
-  if (
-    beautyFramePreviewLoading.value ||
-    beautyVideoPreviewLoading.value
-  ) {
-    return;
-  }
+  if (beautyVideoPreviewLoading.value) return;
   if (!selectedVideoPath.value) {
     systemMessage.error('当前视频没有可用的本地文件路径');
     return;
@@ -3252,44 +3745,34 @@ async function handleBeautyPreviewRequest(values) {
   }
 
   invalidateBeautyPreview();
-  const requestGeneration = beautyPreviewGeneration;
-  const requestVideoKey = selectedVideoKey.value;
-  const requestVideoPath = selectedVideoPath.value;
-  const startTimeMs = Math.max(
-    0,
-    Math.round((Number(timeline.startTime) || 0) * 1000),
-  );
-  const durationMs = Math.max(
-    0,
-    Math.round((Number(timeline.selectedDuration) || 0) * 1000),
-  );
-
-  const request = {
-    generation: requestGeneration,
-    videoKey: requestVideoKey,
-    videoPath: requestVideoPath,
-    startTimeMs,
-    durationMs,
-    values: normalizedValues,
-  };
-
-  beautyVideoPreviewLoading.value = true;
   videoTransformerRef.value?.clearBeautyPreview?.();
-  if (beautyFramePreviewLoading.value) {
-    pendingBeautyVideoPreview = request;
+  const task = getCurrentAssetVideoTask(normalizedValues, 'manual');
+  if (!task) {
+    systemMessage.error('当前素材缺少工程关联信息');
     return;
   }
-  await processBeautyVideoPreview(request);
+  enqueueManualAssetVideoPreview(task);
 }
 
 async function handleSidebarVideoPreview() {
-  if (projectPreviewRunning.value || exportRunning.value) return;
+  if (
+    projectPreviewRunning.value ||
+    exportRunning.value ||
+    assetVideoPreprocessBusy.value
+  ) {
+    return;
+  }
   if (!canExport.value) {
     systemMessage.error('请先开始编辑');
     return;
   }
-  if (!validateExportVideoDurations()) return;
+  refreshInvalidDurationVideoState();
+  if (requestAdaptiveDurationConfirmation('preview')) return;
 
+  await startSidebarVideoPreview();
+}
+
+async function startSidebarVideoPreview() {
   const templatePath = activeTemplateLocalInfo.value?.templateFilePath;
   const projectDir = activeProjectDir.value;
   if (!templatePath || !projectDir) {
@@ -3357,44 +3840,6 @@ function closeProjectPreviewModal() {
   projectPreviewModalVisible.value = false;
 }
 
-async function processBeautyVideoPreview(request) {
-  beautyVideoPreviewRunning = true;
-  try {
-    const result = await invoke('preview_composer_beauty_file', {
-      inputVideoPath: request.videoPath,
-      startTimeMs: request.startTimeMs,
-      durationMs: request.durationMs,
-      params: buildBeautyFrameParams(request.values),
-    });
-    if (
-      request.generation !== beautyPreviewGeneration ||
-      request.videoKey !== selectedVideoKey.value ||
-      request.videoPath !== selectedVideoPath.value
-    ) {
-      return;
-    }
-
-    const displayed = await videoTransformerRef.value?.showBeautyVideoPreview?.(
-      convertFileSrc(result.outputVideoPath),
-    );
-    beautyVideoPreviewActive.value = displayed === true;
-    beautyVideoPreviewOutputPath.value =
-      displayed === true ? result.outputVideoPath : '';
-  } catch (error) {
-    if (request.generation === beautyPreviewGeneration) {
-      systemMessage.error(
-        error?.message || String(error || '美颜视频预览生成失败'),
-      );
-    }
-  } finally {
-    beautyVideoPreviewRunning = false;
-    beautyVideoPreviewLoading.value = false;
-    if (pendingBeautyPreview && !beautyPreviewTimer) {
-      void processPendingBeautyPreview();
-    }
-  }
-}
-
 async function handleRestoreAssetProperties() {
   if (selectedVideoPropertiesLocked.value) return;
   if (!selectedVideoAssetId.value || !activeTemplateId.value) {
@@ -3441,6 +3886,7 @@ async function handleApplyGeneratedVideo(values) {
 
   generatedVideoApplying.value = true;
   try {
+    cancelAssetVideoPreprocessTasks(assetId);
     await flushPendingAssetPropertyUpdates();
     const result = await invoke('apply_project_asset_generated_video', {
       projectDir,
@@ -3476,6 +3922,8 @@ async function handleMaterialResetRequest() {
 
   materialResetting.value = true;
   try {
+    cancelAssetVideoPreprocessTasks(assetId);
+    await waitForActiveAssetVideoPreprocessTasks([assetId]);
     await flushPendingAssetPropertyUpdates();
     const projectXml = await invoke('reset_project_asset_generated_video', {
       projectDir,
@@ -3500,6 +3948,7 @@ async function processPendingBeautyPreview() {
   if (
     beautyFramePreviewLoading.value ||
     beautyVideoPreviewLoading.value ||
+    assetVideoPreprocessRunning.value ||
     !pendingBeautyPreview
   ) {
     return;
@@ -3533,14 +3982,11 @@ async function processPendingBeautyPreview() {
     }
   } finally {
     beautyFramePreviewLoading.value = false;
-    if (pendingBeautyVideoPreview) {
-      const videoRequest = pendingBeautyVideoPreview;
-      pendingBeautyVideoPreview = null;
-      void processBeautyVideoPreview(videoRequest);
-      return;
-    }
     if (pendingBeautyPreview && !beautyPreviewTimer) {
       void processPendingBeautyPreview();
+    }
+    if (assetVideoPreprocessQueue.length > 0) {
+      void runAssetVideoPreprocessQueue();
     }
   }
 }
@@ -4026,6 +4472,7 @@ function startTimelineDrag(event) {
 function showDraftLibrary() {
   if (draftLibraryVisible.value) return;
 
+  enqueueCurrentDirtyAssetVideo();
   resetDraftTitleEdit();
   finishedLibraryVisible.value = false;
   draftLibraryVisible.value = true;
@@ -4221,10 +4668,26 @@ async function openDraftProject(projectId) {
       throw new Error('工程详情缺少工程 ID 或模板 ID');
     }
 
-    const workspace = await invoke('read_project_workspace', {
+    let workspace = await invoke('read_project_workspace', {
       projectId: String(detailProjectId),
       templateId: String(templateId),
     });
+    const pendingProjectDirs = getAssetVideoPreprocessProjectDirs();
+    const openingProjectDir = String(workspace.projectDir || '');
+    const reopeningProcessingProject =
+      pendingProjectDirs.size > 0 &&
+      Array.from(pendingProjectDirs).every(
+        (projectDir) => projectDir === openingProjectDir,
+      );
+    if (reopeningProcessingProject) {
+      await waitForAssetVideoPreprocessQueueToSettle();
+      workspace = await invoke('read_project_workspace', {
+        projectId: String(detailProjectId),
+        templateId: String(templateId),
+      });
+    }
+    cancelAllAssetVideoPreprocessTasks();
+
     const templateXml = workspace.templateXml || '';
     const projectFileXml = workspace.projectFileXml || '';
     if (!templateXml || !projectFileXml) {
@@ -4257,6 +4720,7 @@ async function openDraftProject(projectId) {
     await initializeDefaultTemplateAssets();
     restoreProjectVideoOffsets(projectFileXml);
     await initializeProjectAssetProperties();
+    refreshInvalidDurationVideoState();
 
     draftLibraryVisible.value = false;
     resetDraftBatchDelete();
@@ -4646,7 +5110,7 @@ async function uploadGeneratedProjectCover() {
 async function showExportConfirmation() {
   console.log('[export] export button clicked');
   void unlockExportFinishedSound();
-  if (exportRunning.value) return;
+  if (exportRunning.value || assetVideoPreprocessBusy.value) return;
   if (!canExport.value) {
     console.warn(
       '[export] export disabled because editing project is not ready',
@@ -4664,10 +5128,13 @@ async function showExportConfirmation() {
     systemMessage.error('模板文件不存在');
     return;
   }
-  if (!validateExportVideoDurations()) {
-    return;
-  }
+  refreshInvalidDurationVideoState();
+  if (requestAdaptiveDurationConfirmation('export')) return;
 
+  await continueExportConfirmation();
+}
+
+async function continueExportConfirmation() {
   if (hasDefaultTemplateVideos()) {
     defaultTemplateExportConfirmVisible.value = true;
     return;
@@ -4810,10 +5277,7 @@ async function startExportProgress() {
   console.log('[export] confirm export clicked');
   void unlockExportFinishedSound({ keepAlive: true });
   if (exportRunning.value) return;
-  if (!validateExportVideoDurations()) {
-    exportModalVisible.value = false;
-    return;
-  }
+  refreshInvalidDurationVideoState();
   if (!exportSelectedPath.value) {
     systemMessage.error('请先选择导出文件');
     return;
@@ -5865,6 +6329,7 @@ onMounted(() => {
 // 离开页面时释放全局监听、定时器和本地视频 URL。
 onBeforeUnmount(() => {
   void flushPendingAssetPropertyUpdates();
+  cancelAllAssetVideoPreprocessTasks();
   invalidateBeautyPreview();
   cacheCurrentVideoTimelineState();
   document.documentElement.classList.remove('dark');
@@ -5936,6 +6401,39 @@ onBeforeUnmount(() => {
     class="workspace-page bg-background text-on-surface font-body-md text-body-md selection:bg-primary/30"
     @click="handleWorkspaceClick"
   >
+    <Transition name="asset-preprocess-progress">
+      <div
+        v-if="assetVideoPreprocessVisible"
+        class="asset-preprocess-progress-shell"
+        aria-label="素材后台处理进度"
+      >
+        <div class="asset-preprocess-progress-track">
+          <div
+            class="asset-preprocess-progress-bar"
+            :style="{ width: `${assetVideoPreprocessProgress}%` }"
+          ></div>
+        </div>
+        <div
+          v-if="assetVideoPreprocessDebugTasks.length"
+          v-show="false"
+          class="asset-preprocess-debug-list"
+        >
+          <div
+            v-for="task in assetVideoPreprocessDebugTasks"
+            :key="task.key"
+            class="asset-preprocess-debug-item"
+          >
+            <span
+              class="asset-preprocess-debug-dot"
+              :class="{ 'is-active': task.status === '处理中' }"
+            ></span>
+            <span class="asset-preprocess-debug-status">{{ task.status }}</span>
+            <span class="asset-preprocess-debug-name">{{ task.videoName }}</span>
+            <span class="asset-preprocess-debug-mode">{{ task.modeLabel }}</span>
+          </div>
+        </div>
+      </div>
+    </Transition>
     <header
       class="fixed top-0 left-0 right-0 z-[300] flex flex-col bg-surface-container/80 backdrop-blur-2xl border-b border-primary/20"
     >
@@ -5990,13 +6488,22 @@ onBeforeUnmount(() => {
           <span class="text-[13px] font-bold whitespace-nowrap">工程库</span>
         </button>
         <button
+          v-if="isEditingWorkspace"
           class="h-9 w-24 flex items-center justify-center gap-1.5 bg-surface-container-low/50 text-on-surface-variant hover:text-electric-blue rounded-lg font-bold shadow-sm hover:bg-surface-container-high active:scale-95 transition-all shrink-0 border border-outline-variant/20"
           :class="{
             'opacity-45 cursor-not-allowed hover:text-on-surface-variant hover:bg-surface-container-low/50 active:scale-100':
-              !canExport || exportRunning || projectPreviewRunning,
+              !canExport ||
+              exportRunning ||
+              projectPreviewRunning ||
+              assetVideoPreprocessBusy,
           }"
           type="button"
-          :disabled="!canExport || exportRunning || projectPreviewRunning"
+          :disabled="
+            !canExport ||
+            exportRunning ||
+            projectPreviewRunning ||
+            assetVideoPreprocessBusy
+          "
           @click="handleSidebarVideoPreview"
         >
           <span class="text-[13px] uppercase tracking-wide whitespace-nowrap">
@@ -6004,13 +6511,22 @@ onBeforeUnmount(() => {
           </span>
         </button>
         <button
+          v-if="isEditingWorkspace"
           class="h-9 w-24 flex items-center justify-center gap-1.5 bg-surface-container-low/50 text-on-surface-variant hover:text-electric-blue rounded-lg font-bold shadow-sm hover:bg-surface-container-high active:scale-95 transition-all shrink-0 border border-outline-variant/20"
           :class="{
             'opacity-45 cursor-not-allowed hover:text-on-surface-variant hover:bg-surface-container-low/50 active:scale-100':
-              !canExport || exportRunning || projectPreviewRunning,
+              !canExport ||
+              exportRunning ||
+              projectPreviewRunning ||
+              assetVideoPreprocessBusy,
           }"
           type="button"
-          :disabled="!canExport || exportRunning || projectPreviewRunning"
+          :disabled="
+            !canExport ||
+            exportRunning ||
+            projectPreviewRunning ||
+            assetVideoPreprocessBusy
+          "
           @click="showExportConfirmation"
         >
           <span class="text-[13px] uppercase tracking-wide whitespace-nowrap"
@@ -7584,6 +8100,7 @@ onBeforeUnmount(() => {
             :progress="projectPreviewProgress"
             :status="projectPreviewStatus"
             :source="projectPreviewSource"
+            autoplay
             title="整片视频预览"
             @close="closeProjectPreviewModal"
           />
@@ -7748,6 +8265,43 @@ onBeforeUnmount(() => {
                     </button>
                   </template>
                 </div>
+              </div>
+            </div>
+          </div>
+          <div
+            v-if="adaptiveDurationConfirmVisible"
+            class="fixed inset-0 z-[430] flex items-center justify-center bg-black/60"
+          >
+            <div
+              class="w-full max-w-sm rounded-2xl border border-white/10 bg-surface-container-highest p-7 shadow-2xl"
+              role="alertdialog"
+              aria-modal="true"
+              aria-labelledby="adaptive-duration-notice-title"
+            >
+              <h3
+                id="adaptive-duration-notice-title"
+                class="mb-3 text-lg font-bold text-white"
+              >
+                检测到 {{ adaptiveDurationConfirmCount }} 条素材时长不足
+              </h3>
+              <p class="text-sm leading-6 text-on-surface-variant">
+                {{ adaptiveDurationConfirmMessage }}
+              </p>
+              <div class="mt-6 grid grid-cols-2 gap-3">
+                <button
+                  class="rounded-xl bg-white/5 py-2.5 text-sm font-bold text-on-surface-variant hover:bg-white/10 hover:text-white"
+                  type="button"
+                  @click="cancelAdaptiveDurationConfirmation"
+                >
+                  取消
+                </button>
+                <button
+                  class="rounded-xl bg-electric-blue py-2.5 text-sm font-bold text-white hover:brightness-110"
+                  type="button"
+                  @click="confirmAdaptiveDurationAction"
+                >
+                  确认
+                </button>
               </div>
             </div>
           </div>
@@ -9099,6 +9653,106 @@ aside.hidden-sidebar {
 
 .active-glow {
   box-shadow: 0 0 15px rgba(74, 142, 255, 0.4);
+}
+
+.asset-preprocess-progress-shell {
+  position: fixed;
+  top: 60px;
+  left: 50%;
+  z-index: 520;
+  width: min(360px, 42vw);
+  transform: translateX(-50%);
+  will-change: transform, opacity;
+  pointer-events: none;
+}
+
+.asset-preprocess-progress-track {
+  width: 100%;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(74, 142, 255, 0.18);
+  box-shadow: 0 3px 14px rgba(74, 142, 255, 0.2);
+}
+
+.asset-preprocess-progress-bar {
+  height: 100%;
+  border-radius: inherit;
+  background: #4a8eff;
+  box-shadow: 0 0 10px rgba(74, 142, 255, 0.9);
+  transition: width 0.3s ease;
+}
+
+.asset-preprocess-debug-list {
+  display: flex;
+  max-height: 184px;
+  margin-top: 8px;
+  padding: 6px;
+  flex-direction: column;
+  gap: 4px;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 8px;
+  background: rgba(10, 18, 34, 0.94);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
+  backdrop-filter: blur(10px);
+}
+
+.asset-preprocess-debug-item {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 8px 52px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 5px;
+  color: rgba(226, 232, 240, 0.88);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.asset-preprocess-debug-item:first-child {
+  background: rgba(74, 142, 255, 0.12);
+}
+
+.asset-preprocess-debug-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.72);
+}
+
+.asset-preprocess-debug-dot.is-active {
+  background: #4a8eff;
+  box-shadow: 0 0 7px rgba(74, 142, 255, 0.9);
+}
+
+.asset-preprocess-debug-status,
+.asset-preprocess-debug-mode {
+  white-space: nowrap;
+}
+
+.asset-preprocess-debug-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.asset-preprocess-debug-mode {
+  color: rgba(148, 163, 184, 0.82);
+}
+
+.asset-preprocess-progress-enter-active,
+.asset-preprocess-progress-leave-active {
+  transition:
+    transform 0.55s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.45s ease;
+}
+
+.asset-preprocess-progress-enter-from,
+.asset-preprocess-progress-leave-to {
+  transform: translate(-50%, -120px);
+  opacity: 0;
 }
 
 .segment-card:hover {

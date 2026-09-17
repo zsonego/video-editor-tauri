@@ -245,7 +245,7 @@ export function buildXml(model, options = {}) {
   return lines.join('\n');
 }
 
-export function parseXml(xmlText) {
+export function parseXml(xmlText, { preserveIds = false } = {}) {
   const documentNode = new DOMParser().parseFromString(
     xmlText,
     'application/xml',
@@ -257,6 +257,8 @@ export function parseXml(xmlText) {
 
   const template = documentNode.querySelector('template');
   if (!template) throw new Error('未找到 template 节点。');
+  const parsedId = (value) =>
+    preserveIds && value ? value : generateId();
 
   const video = directChild(template, 'video');
   const tracksNode = directChild(template, 'tracks');
@@ -279,7 +281,7 @@ export function parseXml(xmlText) {
       const assetsNode = directChild(groupNode, 'default-asset');
       const assets = directChildren(assetsNode, 'asset').map((assetNode) => {
         const oldId = assetNode.getAttribute('id') || generateId();
-        const newId = generateId();
+        const newId = parsedId(oldId);
         assetIdMap.set(oldId, newId);
         const filepath = assetNode.getAttribute('filepath') || '';
         return {
@@ -297,7 +299,7 @@ export function parseXml(xmlText) {
         };
       });
       return {
-        id: generateId(),
+        id: parsedId(groupNode.getAttribute('id')),
         name: groupName,
         mediaType,
         minDuration: n(childText(constraints, 'minDuration'), 3000),
@@ -372,7 +374,7 @@ export function parseXml(xmlText) {
         const skinToneValue = n(skinToneText);
         const hasProperty = Boolean(property);
         return {
-          id: generateId(),
+          id: parsedId(areaNode.getAttribute('id')),
           assetId: assetIdMap.get(oldAssetId) || '',
           index: Math.max(
             0,
@@ -438,7 +440,7 @@ export function parseXml(xmlText) {
         const position = directChild(subtitleNode, 'position');
         const isAbsolute = subtitleNode.hasAttribute('absoluteStartTime');
         return {
-          id: generateId(),
+          id: parsedId(subtitleNode.getAttribute('id')),
           timeMode: isAbsolute ? 'absolute' : 'relative',
           time: n(
             subtitleNode.getAttribute(
@@ -461,7 +463,7 @@ export function parseXml(xmlText) {
 
     const filter = directChild(clipNode, 'filter');
     return {
-      id: generateId(),
+      id: parsedId(clipNode.getAttribute('id')),
       name: clipNode.getAttribute('name') || `片段 ${clipIndex + 1}`,
       materialType:
         clipNode.getAttribute('material-type') === 'fixed'
@@ -482,8 +484,8 @@ export function parseXml(xmlText) {
   }).sort((left, right) => left.starttime - right.starttime);
 
   return {
-    id: generateId(),
-    clipsId: generateId(),
+    id: parsedId(template.getAttribute('id')),
+    clipsId: parsedId(clipsNode?.getAttribute('id')),
     name: template.getAttribute('name') || '未命名模板',
     duration: n(childText(video, 'duration')),
     resolution: childText(video, 'resolution', '1920*1080') || '1920*1080',

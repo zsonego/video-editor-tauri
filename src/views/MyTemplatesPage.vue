@@ -6,6 +6,7 @@ import logoImage from '../assets/logo.png';
 import AccountCenterMenu from '../components/AccountCenterMenu.vue';
 import AppIcon from '../components/AppIcon.vue';
 import { submitLocalTemplate } from '../api/templateUpload';
+import { queryMyTemplates } from '../api/template';
 import { systemMessage } from '../utils/message';
 
 const router = useRouter();
@@ -34,6 +35,30 @@ const accountTenantName = computed(
 const accountDisplayName = computed(
   () => storedAccountProfile.value.phone || '--',
 );
+const TEMPLATE_STATUS_LABELS = Object.freeze({
+  0: '已发布',
+  1: '待发布',
+  2: '编辑中',
+});
+
+function templateStatusLabel(status) {
+  return TEMPLATE_STATUS_LABELS[Number(status)] || '编辑中';
+}
+
+function getTemplateQueryIdentity() {
+  const stored = JSON.parse(localStorage.getItem('userInfo') || 'null') || {};
+  const profile = stored.user || stored.profile || stored.sysUser || stored;
+  const renterId = stored.renterId ?? stored.tenantId ??
+    profile.renterId ?? profile.tenantId;
+  const createBy = profile.userName ?? stored.userName;
+  if (renterId === undefined || renterId === null || String(renterId) === '') {
+    throw new Error('登录信息中缺少 renterId，无法同步模板状态');
+  }
+  if (createBy === undefined || createBy === null || String(createBy) === '') {
+    throw new Error('登录信息中缺少 userName，无法同步模板状态');
+  }
+  return { renterId: String(renterId), createBy: String(createBy) };
+}
 
 function goHome() {
   router.push({ name: 'home' });
@@ -81,6 +106,38 @@ async function loadTemplates() {
   try {
     const result = await invoke('list_custom_templates');
     templates.value = Array.isArray(result) ? result : [];
+    try {
+      const response = await queryMyTemplates(getTemplateQueryIdentity());
+      if (!response || Number(response.code) !== 0 || !Array.isArray(response.rows)) {
+        throw new Error(response?.msg || '查询模板状态失败');
+      }
+      const remoteTemplateById = new Map(
+        response.rows
+          .filter((row) => row?.templateId !== undefined && row?.templateId !== null)
+          .map((row) => [String(row.templateId), row]),
+      );
+      await Promise.all(
+        templates.value.map(async (template) => {
+          const remoteTemplate = remoteTemplateById.get(
+            String(template.backendTemplateId || ''),
+          );
+          if (Number(template.status) === 2) return;
+          const remoteStatus = Number(remoteTemplate?.status);
+          if (!remoteTemplate || ![0, 1, 2].includes(remoteStatus) ||
+            remoteStatus === Number(template.status)) {
+            return;
+          }
+          await invoke('update_custom_template_status', {
+            templateId: template.templateId,
+            status: remoteStatus,
+          });
+          template.status = remoteStatus;
+        }),
+      );
+    } catch (error) {
+      console.warn('[my-templates] 模板状态同步失败', error);
+      systemMessage.error(error?.message || '模板状态同步失败，已显示本地状态');
+    }
   } catch (error) {
     templates.value = [];
     systemMessage.error(error?.message || String(error) || '我的模板加载失败');
@@ -103,7 +160,12 @@ async function editTemplate(template) {
 }
 
 async function submitTemplate(template) {
-  if (!template?.templateId || submittingTemplateKey.value) return;
+  if (
+    !template?.templateId ||
+    !template.submissionReady ||
+    Number(template.status) !== 2 ||
+    submittingTemplateKey.value
+  ) return;
   uploadTemplate.value = template;
   submittingTemplateKey.value = String(template.templateId);
   uploadDialogOpen.value = true;
@@ -116,6 +178,8 @@ async function submitTemplate(template) {
       uploadStage.value = update.stage || uploadStage.value;
       uploadProgress.value = Math.max(0, Math.min(100, Number(update.progress) || 0));
     });
+    template.status = 1;
+    template.submissionReady = false;
     uploadComplete.value = true;
     systemMessage.success('模板上传成功');
   } catch (error) {
@@ -244,6 +308,7 @@ onMounted(() => {
               <div class="template-title-row">
                 <strong :title="template.name">{{ template.name }}</strong>
                 <button
+                  v-if="Number(template.status) === 2 && template.submissionReady"
                   class="submit-button"
                   type="button"
                   title="提交模板"
@@ -260,6 +325,12 @@ onMounted(() => {
                 </button>
               </div>
               <div class="template-meta">
+                <span
+                  class="template-status"
+                  :class="`is-status-${Number(template.status)}`"
+                >
+                  {{ templateStatusLabel(template.status) }}
+                </span>
                 <span><AppIcon name="aspect_ratio" :size="14" />{{ template.resolution || '--' }}</span>
                 <span><AppIcon name="schedule" :size="14" />{{ template.updatedAt || '--' }}</span>
               </div>
@@ -596,8 +667,9 @@ onMounted(() => {
 
 .template-meta {
   display: flex;
-  justify-content: space-between;
-  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px 12px;
   margin-top: 13px;
   padding-top: 11px;
   color: #777872;
@@ -610,6 +682,25 @@ onMounted(() => {
   align-items: center;
   gap: 4px;
   min-width: 0;
+}
+
+.template-meta .template-status {
+  padding: 2px 7px;
+  border-radius: 5px;
+  color: #a34e28;
+  background: #fff0e6;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.template-meta .template-status.is-status-0 {
+  color: #287a51;
+  background: #e3f5e9;
+}
+
+.template-meta .template-status.is-status-1 {
+  color: #7d6517;
+  background: #fff4cb;
 }
 
 .library-state {

@@ -15,6 +15,10 @@ export function getTemplates(data = {}) {
   return request("/api/template/list", { data });
 }
 
+export function queryMyTemplates(data = {}) {
+  return request("/api/template/query", { data });
+}
+
 export function getTemplateDetail(data = {}) {
   return request("/api/template/detail", { data });
 }

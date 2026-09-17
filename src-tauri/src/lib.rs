@@ -668,6 +668,9 @@ struct SavedCustomTemplate {
 #[serde(rename_all = "camelCase")]
 struct CustomTemplateSummary {
     template_id: String,
+    backend_template_id: Option<String>,
+    status: u8,
+    submission_ready: bool,
     name: String,
     duration_ms: u64,
     resolution: String,
@@ -679,6 +682,7 @@ struct CustomTemplateSummary {
 #[serde(rename_all = "camelCase")]
 struct CustomTemplateDetail {
     template_id: String,
+    status: u8,
     template_file_path: String,
     project_root: String,
     xml_content: String,
@@ -691,6 +695,8 @@ struct CustomTemplateDetail {
 struct CustomTemplateEditorState {
     fixed_material_file: String,
     is_pr_imported: bool,
+    status: Option<u8>,
+    submission_ready: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -703,9 +709,22 @@ struct ProjectAssetImport {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct AdaptedProjectAssetSpeed {
+    project_xml: String,
+    adapted: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ProjectGeneratedAsset {
     generate_path: String,
     project_xml: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreservedProjectAssetPreview {
+    preview_video_path: String,
 }
 
 #[derive(Serialize)]
@@ -1605,9 +1624,9 @@ impl ComposerRuntime {
 
             let last_error = self.beauty_last_error_text();
             if last_error.is_empty() {
-                Err(composer_error_message(result))
+                Err(format!("美颜图片处理失败（错误码 {result}）"))
             } else {
-                Err(format!("{}: {last_error}", composer_error_message(result)))
+                Err(format!("美颜图片处理失败（错误码 {result}）: {last_error}"))
             }
         }
 
@@ -1662,9 +1681,9 @@ impl ComposerRuntime {
 
             let last_error = self.beauty_last_error_text();
             if last_error.is_empty() {
-                Err(composer_error_message(result))
+                Err(format!("美颜视频处理失败（错误码 {result}）"))
             } else {
-                Err(format!("{}: {last_error}", composer_error_message(result)))
+                Err(format!("美颜视频处理失败（错误码 {result}）: {last_error}"))
             }
         }
 
@@ -3143,6 +3162,185 @@ fn update_template_asset_properties(
         Err("template.xml 中未找到使用当前 assetId 的 area".to_string())
     } else {
         Ok(output)
+    }
+}
+
+fn first_xml_element_range(content: &str, name: &str) -> Option<(usize, usize, usize, usize)> {
+    let opening = format!("<{name}");
+    let closing = format!("</{name}>");
+    let mut search_start = 0;
+    while let Some(relative_start) = content[search_start..].find(&opening) {
+        let start = search_start + relative_start;
+        if !is_xml_name_boundary(content[start + opening.len()..].chars().next()) {
+            search_start = start + opening.len();
+            continue;
+        }
+        let open_end = start + content[start..].find('>')? + 1;
+        if content[start..open_end].trim_end().ends_with("/>") {
+            search_start = open_end;
+            continue;
+        }
+        let close_start = open_end + content[open_end..].find(&closing)?;
+        return Some((start, open_end, close_start, close_start + closing.len()));
+    }
+    None
+}
+
+fn adapt_area_transform_speed(area_inner: &str, video_duration_ms: u64) -> (String, bool) {
+    let required_ms = first_xml_element_range(area_inner, "source")
+        .and_then(|(_, source_open_end, source_close_start, _)| {
+            collect_xml_child_element_values(
+                &area_inner[source_open_end..source_close_start],
+                "duration",
+            )
+            .into_iter()
+            .next()
+        })
+        .and_then(|duration| duration.parse::<u64>().ok())
+        .unwrap_or(0);
+    if required_ms == 0 || video_duration_ms == 0 {
+        return (area_inner.to_string(), false);
+    }
+
+    let needs_slowdown = video_duration_ms < required_ms;
+    let speed_thousandths = ((video_duration_ms as u128 * 1000) / required_ms as u128).max(1);
+    let speed_text = format!(
+        "{}.{:03}",
+        speed_thousandths / 1000,
+        speed_thousandths % 1000
+    );
+
+    if let Some((transform_start, transform_open_end, transform_close_start, _)) =
+        first_xml_element_range(area_inner, "transform")
+    {
+        let transform_inner = &area_inner[transform_open_end..transform_close_start];
+        if let Some((speed_start, speed_open_end, speed_close_start, speed_end)) =
+            first_xml_element_range(transform_inner, "speed")
+        {
+            let speed_tag = &transform_inner[speed_start..speed_open_end];
+            let current_speed = transform_inner[speed_open_end..speed_close_start].trim();
+            let was_adapted =
+                xml_attribute_value(speed_tag, "data-auto-slowdown").as_deref() == Some("true");
+            if !needs_slowdown && !was_adapted {
+                return (area_inner.to_string(), false);
+            }
+
+            let original_speed = if was_adapted {
+                xml_attribute_value(speed_tag, "data-original-speed")
+                    .unwrap_or_else(|| current_speed.to_string())
+            } else {
+                current_speed.to_string()
+            };
+            let original_speed = if original_speed.trim().is_empty() {
+                "1".to_string()
+            } else {
+                original_speed
+            };
+            let (updated_tag, updated_value) = if needs_slowdown {
+                let tag = replace_or_insert_xml_attribute(speed_tag, "data-auto-slowdown", "true");
+                (
+                    replace_or_insert_xml_attribute(&tag, "data-original-speed", &original_speed),
+                    speed_text.as_str(),
+                )
+            } else {
+                let tag = remove_xml_attribute(speed_tag, "data-auto-slowdown");
+                (
+                    remove_xml_attribute(&tag, "data-original-speed"),
+                    original_speed.as_str(),
+                )
+            };
+            let mut updated = area_inner.to_string();
+            updated.replace_range(
+                transform_open_end + speed_start..transform_open_end + speed_end,
+                &format!("{updated_tag}{updated_value}</speed>"),
+            );
+            return (updated, needs_slowdown);
+        }
+
+        if needs_slowdown {
+            let mut updated = area_inner.to_string();
+            let transform_indent = area_inner[..transform_start]
+                .rsplit_once('\n')
+                .map(|(_, indent)| indent)
+                .filter(|indent| indent.chars().all(char::is_whitespace))
+                .unwrap_or("");
+            let speed_indent = format!("{transform_indent}    ");
+            let insertion = format!(
+                "\n{speed_indent}<speed data-auto-slowdown=\"true\" data-original-speed=\"1\">{speed_text}</speed>"
+            );
+            let insertion_at = transform_open_end + transform_inner.trim_end().len();
+            updated.insert_str(insertion_at, &insertion);
+            return (updated, true);
+        }
+        return (area_inner.to_string(), false);
+    }
+
+    if !needs_slowdown {
+        return (area_inner.to_string(), false);
+    }
+    let insertion_at = first_xml_element_range(area_inner, "destination")
+        .or_else(|| first_xml_element_range(area_inner, "property"))
+        .map(|(start, _, _, _)| start)
+        .unwrap_or(area_inner.len());
+    let mut updated = area_inner.to_string();
+    updated.insert_str(
+        insertion_at,
+        &format!(
+            "<transform><speed data-auto-slowdown=\"true\" data-original-speed=\"1\">{speed_text}</speed></transform>\n"
+        ),
+    );
+    (updated, true)
+}
+
+fn adapt_template_asset_speeds(
+    template_xml: &str,
+    asset_id: &str,
+    video_duration_ms: u64,
+) -> Result<(String, bool), String> {
+    let mut output = String::new();
+    let mut search_start = 0;
+    let mut matched = false;
+    let mut adapted = false;
+
+    while let Some(relative_start) = template_xml[search_start..].find("<area") {
+        let area_start = search_start + relative_start;
+        if !is_xml_name_boundary(template_xml[area_start + "<area".len()..].chars().next()) {
+            output.push_str(&template_xml[search_start..area_start + "<area".len()]);
+            search_start = area_start + "<area".len();
+            continue;
+        }
+        let Some(relative_tag_end) = template_xml[area_start..].find('>') else {
+            break;
+        };
+        let tag_end = area_start + relative_tag_end + 1;
+        let area_tag = &template_xml[area_start..tag_end];
+        if xml_attribute_value(area_tag, "asset-id").as_deref() != Some(asset_id)
+            || area_tag.trim_end().ends_with("/>")
+        {
+            output.push_str(&template_xml[search_start..tag_end]);
+            search_start = tag_end;
+            continue;
+        }
+        let Some(relative_close_start) = template_xml[tag_end..].find("</area>") else {
+            return Err("template.xml 中的 area 节点未正确闭合".to_string());
+        };
+        let close_start = tag_end + relative_close_start;
+        let close_end = close_start + "</area>".len();
+        let (updated_inner, area_adapted) =
+            adapt_area_transform_speed(&template_xml[tag_end..close_start], video_duration_ms);
+        output.push_str(&template_xml[search_start..tag_end]);
+        output.push_str(&updated_inner);
+        output.push_str("</area>");
+        search_start = close_end;
+        matched = true;
+        adapted |= area_adapted;
+    }
+
+    output.push_str(&template_xml[search_start..]);
+    if matched {
+        Ok((output, adapted))
+    } else {
+        Err("template.xml 中未找到使用当前 assetId 的 area".to_string())
     }
 }
 
@@ -5009,17 +5207,27 @@ fn save_custom_template_xml(
     fs::write(&template_file_path, template_xml.as_bytes())
         .map_err(|error| format!("模板 XML 保存失败：{error}"))?;
 
+    let previous_editor_state = custom_template_editor_state(&custom_template_dir);
     let editor_state = CustomTemplateEditorState {
         fixed_material_file,
         is_pr_imported,
+        status: Some(previous_editor_state.status.unwrap_or_else(|| {
+            if read_custom_template_upload_state(&custom_template_dir)
+                .map(|state| state.finalized)
+                .unwrap_or(false)
+            {
+                1
+            } else {
+                2
+            }
+        })),
+        submission_ready: Some(previous_editor_state.submission_ready.unwrap_or_else(|| {
+            !read_custom_template_upload_state(&custom_template_dir)
+                .map(|state| state.finalized)
+                .unwrap_or(false)
+        })),
     };
-    let editor_state_content = serde_json::to_vec_pretty(&editor_state)
-        .map_err(|error| format!("模板编辑状态序列化失败：{error}"))?;
-    fs::write(
-        custom_template_dir.join(".editor-state.json"),
-        editor_state_content,
-    )
-    .map_err(|error| format!("模板编辑状态保存失败：{error}"))?;
+    write_custom_template_editor_state(&custom_template_dir, &editor_state)?;
 
     let temp_dir = custom_storage.pr_temp;
     if temp_dir.exists() {
@@ -5039,6 +5247,59 @@ fn custom_template_editor_state(template_dir: &Path) -> CustomTemplateEditorStat
         .ok()
         .and_then(|content| serde_json::from_slice(&content).ok())
         .unwrap_or_default()
+}
+
+fn write_custom_template_editor_state(
+    template_dir: &Path,
+    state: &CustomTemplateEditorState,
+) -> Result<(), String> {
+    let content = serde_json::to_vec_pretty(state)
+        .map_err(|error| format!("模板编辑状态序列化失败：{error}"))?;
+    fs::write(template_dir.join(".editor-state.json"), content)
+        .map_err(|error| format!("模板编辑状态保存失败：{error}"))
+}
+
+fn custom_template_status(template_dir: &Path, editor_state: &CustomTemplateEditorState) -> u8 {
+    if let Some(status @ 0..=2) = editor_state.status {
+        return status;
+    }
+    if read_custom_template_upload_state(template_dir)
+        .map(|state| state.finalized)
+        .unwrap_or(false)
+    {
+        1
+    } else {
+        2
+    }
+}
+
+fn custom_template_submission_ready(
+    template_dir: &Path,
+    editor_state: &CustomTemplateEditorState,
+) -> bool {
+    editor_state.submission_ready.unwrap_or_else(|| {
+        !read_custom_template_upload_state(template_dir)
+            .map(|state| state.finalized)
+            .unwrap_or(false)
+    })
+}
+
+#[tauri::command]
+fn update_custom_template_status(
+    template_id: String,
+    status: u8,
+    submission_ready: Option<bool>,
+) -> Result<(), String> {
+    if status > 2 {
+        return Err("模板状态无效".to_string());
+    }
+    let template_dir = custom_template_upload_dir(&template_id)?;
+    let mut state = custom_template_editor_state(&template_dir);
+    state.status = Some(status);
+    if let Some(submission_ready) = submission_ready {
+        state.submission_ready = Some(submission_ready);
+    }
+    write_custom_template_editor_state(&template_dir, &state)
 }
 
 fn custom_template_video_details(xml_content: &str) -> (u64, String, String) {
@@ -5154,10 +5415,15 @@ fn list_custom_templates() -> Result<Vec<CustomTemplateSummary>, String> {
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
             .map(|duration| duration.as_millis())
             .unwrap_or(0);
+        let editor_state = custom_template_editor_state(&template_dir);
+        let upload_state = read_custom_template_upload_state(&template_dir).unwrap_or_default();
 
         templates.push(CustomTemplateSummary {
             name: custom_template_name(&xml_content, &template_id),
             template_id,
+            backend_template_id: upload_state.backend_template_id,
+            status: custom_template_status(&template_dir, &editor_state),
+            submission_ready: custom_template_submission_ready(&template_dir, &editor_state),
             duration_ms,
             resolution,
             preview_path,
@@ -5199,6 +5465,7 @@ fn read_custom_template(template_id: String) -> Result<CustomTemplateDetail, Str
 
     Ok(CustomTemplateDetail {
         template_id: template_id.to_string(),
+        status: custom_template_status(&template_dir, &editor_state),
         template_file_path: path_to_xml_filepath(template_file_path),
         project_root: path_to_xml_filepath(template_dir),
         xml_content,
@@ -5411,6 +5678,35 @@ fn save_project_asset(
 }
 
 #[tauri::command]
+fn adapt_project_asset_speed(
+    project_dir: String,
+    asset_id: String,
+    video_duration_ms: u64,
+) -> Result<AdaptedProjectAssetSpeed, String> {
+    if asset_id.trim().is_empty() {
+        return Err("assetId 不能为空".to_string());
+    }
+    let (_, project_root) = ensure_aicut_dirs()?;
+    let project_root = fs::canonicalize(project_root).map_err(|error| error.to_string())?;
+    let project_dir =
+        fs::canonicalize(PathBuf::from(project_dir)).map_err(|error| error.to_string())?;
+    if !project_dir.starts_with(&project_root) {
+        return Err("项目目录无效".to_string());
+    }
+    let template_path = project_dir.join("template.xml");
+    let template_xml = fs::read_to_string(&template_path).map_err(|error| error.to_string())?;
+    let (updated_xml, adapted) =
+        adapt_template_asset_speeds(&template_xml, asset_id.trim(), video_duration_ms)?;
+    if updated_xml != template_xml {
+        fs::write(&template_path, updated_xml.as_bytes()).map_err(|error| error.to_string())?;
+    }
+    Ok(AdaptedProjectAssetSpeed {
+        project_xml: updated_xml,
+        adapted,
+    })
+}
+
+#[tauri::command]
 fn update_project_asset_offset(
     project_dir: String,
     asset_id: String,
@@ -5552,6 +5848,73 @@ fn apply_project_asset_generated_video(
     Ok(ProjectGeneratedAsset {
         generate_path,
         project_xml: updated_template_xml,
+    })
+}
+
+#[tauri::command]
+fn preserve_project_asset_preview_video(
+    project_dir: String,
+    asset_id: String,
+    preview_video_path: String,
+) -> Result<PreservedProjectAssetPreview, String> {
+    let asset_id = asset_id.trim();
+    if asset_id.is_empty() {
+        return Err("assetId 不能为空".to_string());
+    }
+    let (_, project_root) = ensure_aicut_dirs()?;
+    let project_root = fs::canonicalize(project_root).map_err(|error| error.to_string())?;
+    let project_dir =
+        fs::canonicalize(PathBuf::from(project_dir)).map_err(|error| error.to_string())?;
+    if !project_dir.starts_with(&project_root) {
+        return Err("项目目录无效".to_string());
+    }
+
+    let source_path = fs::canonicalize(PathBuf::from(preview_video_path))
+        .map_err(|error| format!("预览视频不存在: {error}"))?;
+    if !source_path.is_file() {
+        return Err("预览视频路径不是文件".to_string());
+    }
+
+    let preview_dir = project_dir.join("preview-assets");
+    fs::create_dir_all(&preview_dir).map_err(|error| error.to_string())?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_millis();
+    let extension = source_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("mp4");
+    let target_path = preview_dir.join(format!(
+        "{}_{}.{}",
+        sanitize_name(asset_id),
+        timestamp,
+        extension
+    ));
+    fs::copy(&source_path, &target_path)
+        .map_err(|error| format!("保存素材预览视频失败: {error}"))?;
+
+    if let Ok(entries) = fs::read_dir(&preview_dir) {
+        let prefix = format!("{}_", sanitize_name(asset_id));
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path == target_path || !path.is_file() {
+                continue;
+            }
+            let matches_asset = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .map(|name| name.starts_with(&prefix))
+                .unwrap_or(false);
+            if matches_asset {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+
+    Ok(PreservedProjectAssetPreview {
+        preview_video_path: target_path.to_string_lossy().to_string(),
     })
 }
 
@@ -6248,7 +6611,14 @@ fn save_custom_template_upload_state(
             backend_template_id: Some(backend_template_id),
             finalized,
         },
-    )
+    )?;
+    if finalized {
+        let mut editor_state = custom_template_editor_state(&template_dir);
+        editor_state.status = Some(1);
+        editor_state.submission_ready = Some(false);
+        write_custom_template_editor_state(&template_dir, &editor_state)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -7138,6 +7508,7 @@ pub fn run() {
             save_custom_template_xml,
             list_custom_templates,
             read_custom_template,
+            update_custom_template_status,
             prepare_template_assets,
             cancel_template_download,
             ensure_default_output_dir,
@@ -7145,9 +7516,11 @@ pub fn run() {
             create_project_workspace,
             read_project_workspace,
             save_project_asset,
+            adapt_project_asset_speed,
             update_project_asset_offset,
             update_project_asset_properties,
             apply_project_asset_generated_video,
+            preserve_project_asset_preview_video,
             reset_project_asset_generated_video,
             apply_project_subtitle,
             compose_project_video,
@@ -7174,6 +7547,53 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adapts_each_area_speed_and_restores_original_after_longer_replacement() {
+        let xml = r#"<template><clips><clip>
+            <area id="a1" asset-id="asset-1"><source><duration>9000</duration></source><transform><speed>1</speed></transform></area>
+            <area id="a2" asset-id="asset-1"><source><duration>7000</duration></source><transform><speed>0.8</speed></transform></area>
+            <area id="a3" asset-id="asset-2"><source><duration>9000</duration></source><transform><speed>1</speed></transform></area>
+        </clip></clips></template>"#;
+        let (adapted_xml, adapted) =
+            adapt_template_asset_speeds(xml, "asset-1", 8000).expect("adapt speeds");
+        assert!(adapted);
+        assert!(adapted_xml
+            .contains(r#"<speed data-auto-slowdown="true" data-original-speed="1">0.888</speed>"#));
+        assert!(adapted_xml.contains(
+            r#"id="a2" asset-id="asset-1"><source><duration>7000</duration></source><transform><speed>0.8</speed>"#
+        ));
+        assert!(adapted_xml.contains(
+            r#"id="a3" asset-id="asset-2"><source><duration>9000</duration></source><transform><speed>1</speed>"#
+        ));
+
+        let (restored_xml, still_adapted) =
+            adapt_template_asset_speeds(&adapted_xml, "asset-1", 10000).expect("restore speeds");
+        assert!(!still_adapted);
+        assert_eq!(restored_xml, xml);
+    }
+
+    #[test]
+    fn adapts_multiple_short_areas_with_different_required_durations() {
+        let xml = r#"<template><area id="a1" asset-id="asset-1"><source><duration>9000</duration></source><transform><speed>1</speed></transform></area><area id="a2" asset-id="asset-1"><source><duration>10000</duration></source><transform><speed>1</speed></transform></area></template>"#;
+        let (updated, adapted) =
+            adapt_template_asset_speeds(xml, "asset-1", 8000).expect("adapt speeds");
+        assert!(adapted);
+        assert!(updated.contains(">0.888</speed>"));
+        assert!(updated.contains(">0.800</speed>"));
+    }
+
+    #[test]
+    fn creates_speed_when_transform_is_missing() {
+        let xml = r#"<template><area id="a1" asset-id="asset-1"><source><duration>9000</duration></source><destination><width>1920</width></destination></area></template>"#;
+        let (updated, adapted) =
+            adapt_template_asset_speeds(xml, "asset-1", 8000).expect("adapt speed");
+        assert!(adapted);
+        assert!(updated.contains(
+            r#"<transform><speed data-auto-slowdown="true" data-original-speed="1">0.888</speed></transform>"#
+        ));
+        assert!(updated.find("<transform>") < updated.find("<destination>"));
+    }
 
     #[test]
     fn serializes_beauty_transform_coordinate_contract() {
@@ -7833,6 +8253,31 @@ mod tests {
             sanitize_custom_template_key("旅行/模板:第一版_1789459200000"),
             "旅行_模板_第一版_1789459200000"
         );
+    }
+
+    #[test]
+    fn keeps_local_custom_template_status_and_submit_eligibility() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let template_dir = std::env::temp_dir().join(format!(
+            "aicut-custom-status-test-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&template_dir).expect("create template directory");
+
+        let state = CustomTemplateEditorState {
+            status: Some(2),
+            submission_ready: Some(false),
+            ..Default::default()
+        };
+        write_custom_template_editor_state(&template_dir, &state).expect("save editor state");
+        let loaded = custom_template_editor_state(&template_dir);
+        assert_eq!(custom_template_status(&template_dir, &loaded), 2);
+        assert!(!custom_template_submission_ready(&template_dir, &loaded));
+
+        fs::remove_dir_all(template_dir).expect("remove test directory");
     }
 
     #[test]

@@ -38,7 +38,7 @@ const props = defineProps({
   },
 });
 
-const emit = defineEmits(['close']);
+const emit = defineEmits(['close', 'playback-change']);
 
 const videoRef = ref(null);
 const playerRef = ref(null);
@@ -50,6 +50,7 @@ const volume = ref(1);
 const muted = ref(false);
 const fullscreen = ref(false);
 let windowWasFullscreen = false;
+let playbackAnimationFrame = 0;
 
 const normalizedProgress = computed(() =>
   Math.round(Math.max(0, Math.min(100, Number(props.progress) || 0))),
@@ -74,7 +75,25 @@ function resetControls() {
   duration.value = 0;
 }
 
+function stopPlaybackTicker() {
+  if (playbackAnimationFrame) {
+    cancelAnimationFrame(playbackAnimationFrame);
+    playbackAnimationFrame = 0;
+  }
+}
+
+function playbackTick() {
+  playbackAnimationFrame = 0;
+  updateControls();
+}
+
+function startPlaybackTicker() {
+  if (playbackAnimationFrame) return;
+  playbackAnimationFrame = requestAnimationFrame(playbackTick);
+}
+
 function releaseVideo() {
+  stopPlaybackTicker();
   const video = videoRef.value;
   if (video) {
     video.pause();
@@ -95,6 +114,14 @@ function updateControls() {
   playbackRate.value = video.playbackRate || 1;
   volume.value = video.volume;
   muted.value = video.muted || video.volume === 0;
+  emit('playback-change', {
+    currentTime: currentTime.value,
+    duration: duration.value,
+    paused: paused.value,
+    ended: video.ended,
+  });
+  if (video.paused || video.ended) stopPlaybackTicker();
+  else startPlaybackTicker();
 }
 
 function togglePlayback() {
@@ -212,6 +239,7 @@ watch(
 );
 
 onBeforeUnmount(() => {
+  stopPlaybackTicker();
   if (fullscreen.value) void leaveFullscreen();
   releaseVideo();
 });

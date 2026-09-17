@@ -182,7 +182,7 @@ const THUMBNAIL_CONCURRENCY = 2;
 const DROPPED_AREA_WIDTH = 960;
 const DROPPED_AREA_HEIGHT = 540;
 const SEQUENCE_TIMELINE_BASE_PIXELS_PER_SECOND = 16;
-const SEQUENCE_TRACK_LABEL_WIDTH = 112;
+const SEQUENCE_TRACK_LABEL_WIDTH = 136;
 const SEQUENCE_TRACK_CLIP_MIN_WIDTH = 28;
 const SEQUENCE_TRACKS_HORIZONTAL_PADDING = 24;
 const SEQUENCE_TIMELINE_MIN_LANE_WIDTH = 484;
@@ -244,6 +244,7 @@ const templatePreviewError = ref('');
 const templatePreviewVideoSource = ref('');
 const templateDraftGenerationModal = ref(false);
 const activeLocalTemplateKey = ref('');
+const activeLocalTemplateStatus = ref(2);
 const areaDialogOpen = ref(false);
 const areaDraft = ref(null);
 const areaModalSectionsExpanded = reactive({
@@ -296,6 +297,18 @@ const clipPreviewVideoRefs = new Map();
 const fixedClipThumbnailStates = reactive(new Map());
 const playingClipPreviewId = ref('');
 const loadingClipPreviewId = ref('');
+const playingSequenceAudioTrack = ref('');
+const loadingSequenceAudioTrack = ref('');
+const sequencePlayheadTime = ref(0);
+const sequencePlayheadDragging = ref(false);
+const sequenceTimelineRulerRef = ref(null);
+const sequenceTracksScrollerRef = ref(null);
+const sequenceTracksScrollLeft = ref(0);
+let sequenceAudioPreviewPlayer = null;
+let sequenceAudioAnimationFrame = 0;
+let sequencePlayheadMoveHandler = null;
+let sequencePlayheadUpHandler = null;
+let sequenceAudioResumeAfterDrag = false;
 const CLIP_PREVIEW_COVER_SECONDS = 0.5;
 
 const selectedClip = computed(
@@ -424,6 +437,34 @@ const sequenceTracksStyle = computed(() => ({
     sequenceTimelineLaneWidth.value
   }px`,
 }));
+const sequencePlayheadStyle = computed(() => {
+  const duration = Math.max(1, sequenceTimelineDuration.value);
+  const time = clampNumber(sequencePlayheadTime.value, 0, duration);
+  const left =
+    SEQUENCE_TRACKS_HORIZONTAL_PADDING / 2 +
+    SEQUENCE_TRACK_LABEL_WIDTH +
+    (time / duration) * sequenceTimelineLaneWidth.value;
+  const visibleLaneLeft =
+    SEQUENCE_TRACK_LABEL_WIDTH + 8;
+  const hiddenBehindLabel =
+    !sequencePlayheadDragging.value &&
+    left - sequenceTracksScrollLeft.value < visibleLaneLeft;
+  return {
+    left: `${left}px`,
+    opacity: hiddenBehindLabel ? 0 : 1,
+    pointerEvents: hiddenBehindLabel ? 'none' : 'auto',
+  };
+});
+const sequencePlayheadClipId = computed(() => {
+  const time = sequencePlayheadTime.value;
+  return (
+    model.clips.find((clip) => {
+      const start = Math.max(0, Number(clip.starttime) || 0);
+      const end = start + Math.max(0, Number(clip.duration) || 0);
+      return time >= start && time < end;
+    })?.id || ''
+  );
+});
 const sequenceTimelineRulerScale = computed(() => {
   const duration = sequenceTimelineDuration.value;
   const targetStep =
@@ -509,6 +550,9 @@ function replaceModel(next, { fromPr = false } = {}) {
   if (!next || !Array.isArray(next.clips) || !Array.isArray(next.mediaGroups)) {
     throw new Error('模板数据缺少片段或素材目录。');
   }
+  finishSequencePlayheadDrag(null, { resume: false });
+  stopSequenceAudioPreview({ syncPlayhead: false });
+  sequencePlayheadTime.value = 0;
   if (next.videoStyle !== 'none' && !LUT_OPTION_IDS.has(next.videoStyle)) {
     next.videoStyle = 'none';
   }
@@ -525,6 +569,7 @@ function replaceModel(next, { fromPr = false } = {}) {
   selectedClipId.value = '';
   isPrImportedTemplate.value = fromPr;
   activeLocalTemplateKey.value = '';
+  activeLocalTemplateStatus.value = 2;
   globalLutInheritedAreaIds.clear();
   stopClipPreview();
 }
@@ -1534,11 +1579,347 @@ function removeSubtitle(subtitle) {
   );
 }
 
+function sequenceAudioTrackSourcePath(track) {
+  return String(selectedFilePaths[track] || '').trim();
+}
+
+function stopSequenceAudioAnimation() {
+  if (sequenceAudioAnimationFrame) {
+    window.cancelAnimationFrame(sequenceAudioAnimationFrame);
+    sequenceAudioAnimationFrame = 0;
+  }
+}
+
+function sequencePlayheadPixelLeft() {
+  const duration = Math.max(1, sequenceTimelineDuration.value);
+  const time = clampNumber(sequencePlayheadTime.value, 0, duration);
+  return (
+    SEQUENCE_TRACKS_HORIZONTAL_PADDING / 2 +
+    SEQUENCE_TRACK_LABEL_WIDTH +
+    (time / duration) * sequenceTimelineLaneWidth.value
+  );
+}
+
+function keepSequencePlayheadVisible() {
+  const scroller = sequenceTracksScrollerRef.value;
+  if (!scroller || sequencePlayheadDragging.value) return;
+  const playheadLeft = sequencePlayheadPixelLeft();
+  const visibleLeft =
+    scroller.scrollLeft +
+    SEQUENCE_TRACK_LABEL_WIDTH +
+    SEQUENCE_TRACKS_HORIZONTAL_PADDING / 2;
+  const visibleRight = scroller.scrollLeft + scroller.clientWidth - 28;
+  if (playheadLeft < visibleLeft) {
+    const nextScrollLeft = Math.max(
+      0,
+      playheadLeft -
+        SEQUENCE_TRACK_LABEL_WIDTH -
+        SEQUENCE_TRACKS_HORIZONTAL_PADDING / 2,
+    );
+    scroller.scrollLeft = nextScrollLeft;
+    sequenceTracksScrollLeft.value = nextScrollLeft;
+  } else if (playheadLeft > visibleRight) {
+    const nextScrollLeft = Math.min(
+      scroller.scrollWidth - scroller.clientWidth,
+      playheadLeft - scroller.clientWidth + 56,
+    );
+    scroller.scrollLeft = nextScrollLeft;
+    sequenceTracksScrollLeft.value = nextScrollLeft;
+  }
+}
+
+function syncSequencePlayheadFromPlayer(player) {
+  if (!player || !Number.isFinite(player.currentTime)) return;
+  sequencePlayheadTime.value = clampNumber(
+    player.currentTime * 1000,
+    0,
+    sequenceTimelineDuration.value,
+  );
+}
+
+function updateSequenceAudioPlayhead() {
+  const player = sequenceAudioPreviewPlayer;
+  if (!player || player.paused || sequencePlayheadDragging.value) {
+    sequenceAudioAnimationFrame = 0;
+    return;
+  }
+  syncSequencePlayheadFromPlayer(player);
+  keepSequencePlayheadVisible();
+  if (sequencePlayheadTime.value >= sequenceTimelineDuration.value) {
+    stopSequenceAudioPreview();
+    return;
+  }
+  sequenceAudioAnimationFrame = window.requestAnimationFrame(
+    updateSequenceAudioPlayhead,
+  );
+}
+
+function startSequenceAudioAnimation() {
+  stopSequenceAudioAnimation();
+  sequenceAudioAnimationFrame = window.requestAnimationFrame(
+    updateSequenceAudioPlayhead,
+  );
+}
+
+function seekSequenceAudioToPlayhead(player, { resetAtEnd = false } = {}) {
+  if (!player) return;
+  let targetSeconds = Math.max(0, sequencePlayheadTime.value / 1000);
+  const duration = Number(player.duration);
+  if (Number.isFinite(duration) && duration > 0) {
+    if (resetAtEnd && targetSeconds >= duration - 0.02) {
+      targetSeconds = 0;
+      sequencePlayheadTime.value = 0;
+    } else {
+      targetSeconds = Math.min(targetSeconds, duration);
+    }
+  }
+  try {
+    player.currentTime = targetSeconds;
+  } catch {
+    // 元数据尚未就绪时，由 loadedmetadata 后的播放流程再次定位。
+  }
+}
+
+function waitForSequenceAudioMetadata(player) {
+  if (player.readyState >= 1) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    player.addEventListener('loadedmetadata', resolve, { once: true });
+    player.addEventListener(
+      'error',
+      () => reject(new Error('音频轨道加载失败')),
+      { once: true },
+    );
+    player.load();
+  });
+}
+
+function stopSequenceAudioPreview({ syncPlayhead = true } = {}) {
+  const player = sequenceAudioPreviewPlayer;
+  sequenceAudioPreviewPlayer = null;
+  stopSequenceAudioAnimation();
+  if (player) {
+    if (syncPlayhead) syncSequencePlayheadFromPlayer(player);
+    player.pause();
+    player.onplaying = null;
+    player.onwaiting = null;
+    player.onended = null;
+    player.onerror = null;
+    player.removeAttribute('src');
+    player.load();
+  }
+  playingSequenceAudioTrack.value = '';
+  loadingSequenceAudioTrack.value = '';
+}
+
+async function resumeSequenceAudioPreview(player) {
+  if (!player || sequenceAudioPreviewPlayer !== player) return;
+  seekSequenceAudioToPlayhead(player, { resetAtEnd: true });
+  loadingSequenceAudioTrack.value = playingSequenceAudioTrack.value;
+  try {
+    await player.play();
+  } catch (error) {
+    if (sequenceAudioPreviewPlayer !== player) return;
+    stopSequenceAudioPreview();
+    showToast(error?.message || '音频轨道播放失败', 'error');
+  }
+}
+
+async function toggleSequenceAudioPreview(track) {
+  const sourcePath = sequenceAudioTrackSourcePath(track);
+  if (!sourcePath) {
+    showToast('当前音频轨道没有可播放的文件', 'warning');
+    return;
+  }
+
+  const isCurrentTrack =
+    playingSequenceAudioTrack.value === track ||
+    loadingSequenceAudioTrack.value === track;
+  if (isCurrentTrack) {
+    stopSequenceAudioPreview();
+    return;
+  }
+
+  stopSequenceAudioPreview();
+  let source = '';
+  try {
+    source = convertFileSrc(sourcePath);
+  } catch {
+    showToast('当前音频文件路径无效', 'error');
+    return;
+  }
+
+  const player = new Audio(source);
+  sequenceAudioPreviewPlayer = player;
+  loadingSequenceAudioTrack.value = track;
+  player.preload = 'auto';
+  player.onplaying = () => {
+    if (sequenceAudioPreviewPlayer !== player) return;
+    playingSequenceAudioTrack.value = track;
+    loadingSequenceAudioTrack.value = '';
+    startSequenceAudioAnimation();
+  };
+  player.onwaiting = () => {
+    if (sequenceAudioPreviewPlayer === player) {
+      loadingSequenceAudioTrack.value = track;
+    }
+  };
+  player.onended = () => {
+    if (sequenceAudioPreviewPlayer === player) stopSequenceAudioPreview();
+  };
+  player.onerror = () => {
+    if (sequenceAudioPreviewPlayer !== player) return;
+    stopSequenceAudioPreview();
+    showToast('音频轨道播放失败', 'error');
+  };
+
+  try {
+    await waitForSequenceAudioMetadata(player);
+    if (sequenceAudioPreviewPlayer !== player) return;
+    seekSequenceAudioToPlayhead(player, { resetAtEnd: true });
+    await player.play();
+  } catch (error) {
+    if (sequenceAudioPreviewPlayer !== player) return;
+    stopSequenceAudioPreview();
+    showToast(error?.message || '音频轨道播放失败', 'error');
+  }
+}
+
+function sequenceTimeFromClientX(clientX) {
+  const ruler = sequenceTimelineRulerRef.value;
+  if (!ruler) return sequencePlayheadTime.value;
+  const bounds = ruler.getBoundingClientRect();
+  if (!bounds.width) return sequencePlayheadTime.value;
+  const scrollerBounds = sequenceTracksScrollerRef.value?.getBoundingClientRect();
+  const visibleLeft = scrollerBounds
+    ? Math.max(
+        bounds.left,
+        scrollerBounds.left + SEQUENCE_TRACK_LABEL_WIDTH + 8,
+      )
+    : bounds.left;
+  const visibleRight = scrollerBounds
+    ? Math.min(bounds.right, scrollerBounds.right - 8)
+    : bounds.right;
+  const constrainedClientX = clampNumber(
+    clientX,
+    visibleLeft,
+    Math.max(visibleLeft, visibleRight),
+  );
+  const ratio = clampNumber(
+    (constrainedClientX - bounds.left) / bounds.width,
+    0,
+    1,
+  );
+  return ratio * sequenceTimelineDuration.value;
+}
+
+function handleSequenceTracksScroll(event) {
+  sequenceTracksScrollLeft.value = Math.max(
+    0,
+    Number(event.currentTarget?.scrollLeft) || 0,
+  );
+}
+
+function seekActiveSequenceAudioToPlayhead() {
+  const player = sequenceAudioPreviewPlayer;
+  if (!player?.readyState) return;
+  seekSequenceAudioToPlayhead(player);
+}
+
+function handleSequenceTimelineRulerClick(event) {
+  if (sequencePlayheadDragging.value) return;
+  sequencePlayheadTime.value = sequenceTimeFromClientX(event.clientX);
+  seekActiveSequenceAudioToPlayhead();
+}
+
+function selectSequenceTrackClip(clip) {
+  if (!clip) return;
+  selectedClipId.value = clip.id;
+  sequencePlayheadTime.value = clampNumber(
+    Number(clip.starttime) || 0,
+    0,
+    sequenceTimelineDuration.value,
+  );
+  seekActiveSequenceAudioToPlayhead();
+  keepSequencePlayheadVisible();
+}
+
+function handleTemplatePreviewPlaybackChange(state = {}) {
+  const currentTime = Math.max(0, Number(state.currentTime) || 0) * 1000;
+  sequencePlayheadTime.value = clampNumber(
+    currentTime,
+    0,
+    sequenceTimelineDuration.value,
+  );
+  keepSequencePlayheadVisible();
+}
+
+function updateSequencePlayheadFromPointer(event) {
+  sequencePlayheadTime.value = sequenceTimeFromClientX(event.clientX);
+  const player = sequenceAudioPreviewPlayer;
+  if (player?.readyState >= 1) {
+    seekSequenceAudioToPlayhead(player);
+  }
+}
+
+function removeSequencePlayheadDragListeners() {
+  if (sequencePlayheadMoveHandler) {
+    window.removeEventListener('pointermove', sequencePlayheadMoveHandler);
+    sequencePlayheadMoveHandler = null;
+  }
+  if (sequencePlayheadUpHandler) {
+    window.removeEventListener('pointerup', sequencePlayheadUpHandler);
+    window.removeEventListener('pointercancel', sequencePlayheadUpHandler);
+    sequencePlayheadUpHandler = null;
+  }
+}
+
+function finishSequencePlayheadDrag(event, { resume = true } = {}) {
+  if (!sequencePlayheadDragging.value) return;
+  if (event?.clientX !== undefined) updateSequencePlayheadFromPointer(event);
+  removeSequencePlayheadDragListeners();
+  sequencePlayheadDragging.value = false;
+
+  const shouldResume = resume && sequenceAudioResumeAfterDrag;
+  sequenceAudioResumeAfterDrag = false;
+  const player = sequenceAudioPreviewPlayer;
+  if (shouldResume && player) {
+    void resumeSequenceAudioPreview(player);
+  }
+}
+
+function startSequencePlayheadDrag(event) {
+  if (!sequenceTimelineRulerRef.value) return;
+  const player = sequenceAudioPreviewPlayer;
+  sequenceAudioResumeAfterDrag = Boolean(player && !player.paused);
+  if (sequenceAudioResumeAfterDrag) player.pause();
+  stopSequenceAudioAnimation();
+  sequencePlayheadDragging.value = true;
+  updateSequencePlayheadFromPointer(event);
+
+  sequencePlayheadMoveHandler = (moveEvent) => {
+    updateSequencePlayheadFromPointer(moveEvent);
+    moveEvent.preventDefault();
+  };
+  sequencePlayheadUpHandler = (upEvent) => {
+    finishSequencePlayheadDrag(upEvent);
+  };
+  window.addEventListener('pointermove', sequencePlayheadMoveHandler);
+  window.addEventListener('pointerup', sequencePlayheadUpHandler);
+  window.addEventListener('pointercancel', sequencePlayheadUpHandler);
+  event.preventDefault();
+}
+
 async function updateTrackFile(track) {
   const [sourcePath] = await pickMediaPaths({
     audio: track === 'audioBackground' || track === 'recording',
   });
   if (!sourcePath) return;
+  if (
+    track === 'audioBackground' ||
+    track === 'recording'
+  ) {
+    stopSequenceAudioPreview();
+  }
   selectedFilePaths[track] = sourcePath;
   model.tracks[track] = assetPath(fileName(sourcePath));
 }
@@ -1551,6 +1932,12 @@ async function updateDemoFile() {
 }
 
 function clearTrackFile(track) {
+  if (
+    track === 'audioBackground' ||
+    track === 'recording'
+  ) {
+    stopSequenceAudioPreview();
+  }
   selectedFilePaths[track] = '';
   model.tracks[track] = '';
 }
@@ -2410,6 +2797,9 @@ function closeTemplatePreview() {
 async function previewTemplateVideo() {
   if (templatePreviewRunning.value || templateDraftCreating.value) return;
 
+  finishSequencePlayheadDrag(null, { resume: false });
+  stopSequenceAudioPreview({ syncPlayhead: false });
+  sequencePlayheadTime.value = 0;
   templateDraftGenerationModal.value = false;
   templatePreviewRunning.value = true;
   templatePreviewProgress.value = 0;
@@ -2520,40 +2910,50 @@ function rebaseCurrentTemplateResourcePaths(assetsDirectory) {
   });
 }
 
-async function generateAndSaveTemplate() {
+function comparableTemplateXml(xml) {
+  return String(xml || '').replace(/\r\n?/g, '\n').trim();
+}
+
+async function generateAndSaveTemplate({ publishedConfirmed = false } = {}) {
   if (templateDraftCreating.value) return;
 
   templateDraftCreating.value = true;
   let unlistenProgress = null;
   try {
-    const generated = await generateTemplateXml();
-    if (!generated) return;
-
-    let localTemplateKey = activeLocalTemplateKey.value;
-    const isNewTemplate = !localTemplateKey;
-    if (isNewTemplate) {
-      localTemplateKey = createLocalTemplateKey();
-      activeLocalTemplateKey.value = localTemplateKey;
-    }
-
-    const savedTemplate = await invoke('save_custom_template_xml', {
-      templateId: localTemplateKey,
-      templateXml: generated.xml,
-      resourcePaths: getCurrentTemplateResourcePaths(),
-      fixedMaterialPath: selectedFilePaths.fixedMaterial || '',
-      isPrImported: isPrImportedTemplate.value,
-    });
-    if (!savedTemplate?.assetsDir) {
-      throw new Error('模板已保存，但未返回素材目录');
-    }
-    rebaseCurrentTemplateResourcePaths(savedTemplate.assetsDir);
-
-    const previewGenerated = await generateTemplateXml({ forPreview: true });
-    if (!previewGenerated) return;
     const persistedTemplate = await generateTemplateXml({
       demoPathOverride: assetPath('template.mp4'),
     });
     if (!persistedTemplate) return;
+
+    let localTemplateKey = activeLocalTemplateKey.value;
+    const isNewTemplate = !localTemplateKey;
+    if (!isNewTemplate) {
+      const previousTemplate = await invoke('read_custom_template', {
+        templateId: localTemplateKey,
+      });
+      if (
+        comparableTemplateXml(previousTemplate.xmlContent) ===
+        comparableTemplateXml(persistedTemplate.xml)
+      ) {
+        showToast('当前模板没有检测到修改', 'warning');
+        return;
+      }
+      activeLocalTemplateStatus.value = Number(previousTemplate.status);
+      if (activeLocalTemplateStatus.value === 0 && !publishedConfirmed) {
+        askConfirm({
+          title: '已发布模板修改确认',
+          message:
+            '当前模板状态为已发布，生成后需重新审核才能使用，是否确认生成新模板？',
+          confirmText: '确认生成',
+          action: () => void generateAndSaveTemplate({ publishedConfirmed: true }),
+        });
+        return;
+      }
+    }
+
+    const previewGenerated = await generateTemplateXml({ forPreview: true });
+    if (!previewGenerated) return;
+    if (isNewTemplate) localTemplateKey = createLocalTemplateKey();
 
     const generationId = `template-factory-save-${Date.now()}-${Math.random()
       .toString(36)
@@ -2590,6 +2990,18 @@ async function generateAndSaveTemplate() {
 
     templatePreviewProgress.value = 100;
     templatePreviewStatus.value = '正在保存模板视频和封面...';
+    const savedTemplate = await invoke('save_custom_template_xml', {
+      templateId: localTemplateKey,
+      templateXml: persistedTemplate.xml,
+      resourcePaths: getCurrentTemplateResourcePaths(),
+      fixedMaterialPath: selectedFilePaths.fixedMaterial || '',
+      isPrImported: isPrImportedTemplate.value,
+    });
+    if (!savedTemplate?.assetsDir) {
+      throw new Error('模板素材保存失败，未返回素材目录');
+    }
+    rebaseCurrentTemplateResourcePaths(savedTemplate.assetsDir);
+
     const generatedAssets = await invoke('save_custom_template_video', {
       templateId: localTemplateKey,
       previewVideoPath: previewResult.outputPath,
@@ -2598,9 +3010,16 @@ async function generateAndSaveTemplate() {
     if (!generatedAssets?.outputPath) {
       throw new Error('模板视频已生成，但保存到模板素材目录失败');
     }
+    await invoke('update_custom_template_status', {
+      templateId: localTemplateKey,
+      status: 2,
+      submissionReady: true,
+    });
 
     model.demoPath = assetPath('template.mp4');
     selectedFilePaths.demo = generatedAssets.outputPath;
+    activeLocalTemplateKey.value = localTemplateKey;
+    activeLocalTemplateStatus.value = 2;
     templatePreviewStatus.value = '模板生成完成';
     templatePreviewModalOpen.value = false;
     templateDraftGenerationModal.value = false;
@@ -2655,7 +3074,9 @@ function applyTemplateForEditing(
     throw new Error('模板内容或模板目录不完整。');
   }
 
-  const nextModel = parseXml(payload.xmlContent);
+  const nextModel = parseXml(payload.xmlContent, {
+    preserveIds: Boolean(templateId),
+  });
   const resolvedFixedMaterialPath = fixedMaterialPath ||
     (fromPr
       ? resolvePrBridgeResourcePath(
@@ -2752,6 +3173,9 @@ async function loadCustomTemplateForEditing(templateId) {
         fixedMaterialPath: detail?.fixedMaterialPath || '',
       },
     );
+    activeLocalTemplateStatus.value = [0, 1, 2].includes(Number(detail?.status))
+      ? Number(detail.status)
+      : 2;
     showToast(`已打开我的模板“${model.name}”`);
   } catch (error) {
     console.error('读取我的模板失败', error);
@@ -2846,6 +3270,8 @@ function activateCreateTemplatePage() {
 }
 
 function deactivateCreateTemplatePage() {
+  finishSequencePlayheadDrag(null, { resume: false });
+  stopSequenceAudioPreview();
   if (!prBridgePageActive && !prBridgeSessionId) return;
   prBridgePageActive = false;
   if (prBridgePollTimer) {
@@ -3088,6 +3514,14 @@ function sequenceClipStyle(clip) {
 function sequenceTrackFileLabel(path) {
   return path ? fileName(path) : '待上传';
 }
+
+watch(sequenceTimelineDuration, (duration) => {
+  sequencePlayheadTime.value = clampNumber(
+    sequencePlayheadTime.value,
+    0,
+    duration,
+  );
+});
 
 watch(
   () => [
@@ -3930,11 +4364,20 @@ onBeforeUnmount(() => {
               >{{ index + 1 }}</span
             >
           </div>
-          <div class="sequence-tracks-scroller">
+          <div
+            ref="sequenceTracksScrollerRef"
+            class="sequence-tracks-scroller"
+            @scroll="handleSequenceTracksScroll"
+          >
             <div class="sequence-tracks" :style="sequenceTracksStyle">
               <div class="sequence-timeline-ruler-row">
                 <span aria-hidden="true"></span>
-                <div class="timeline-ruler sequence-timeline-ruler" aria-label="时间刻度">
+                <div
+                  ref="sequenceTimelineRulerRef"
+                  class="timeline-ruler sequence-timeline-ruler"
+                  aria-label="时间刻度"
+                  @click="handleSequenceTimelineRulerClick"
+                >
                   <span
                     v-for="tick in sequenceTimelineMinorTicks"
                     :key="`sequence-minor-${tick.value}`"
@@ -3961,6 +4404,21 @@ onBeforeUnmount(() => {
                   </span>
                 </div>
               </div>
+              <button
+                class="sequence-timeline-playhead"
+                :class="{
+                  'is-dragging': sequencePlayheadDragging,
+                  'is-playing': Boolean(playingSequenceAudioTrack),
+                }"
+                :style="sequencePlayheadStyle"
+                type="button"
+                :title="`当前时间 ${formatSeconds(sequencePlayheadTime)}`"
+                aria-label="拖动音频播放位置"
+                @pointerdown="startSequencePlayheadDrag"
+              >
+                <span class="sequence-timeline-playhead-handle"></span>
+                <span class="sequence-timeline-playhead-line"></span>
+              </button>
               <div class="sequence-track-row">
                 <div class="sequence-track-label">
                   <span>01</span><strong>固定转场层</strong>
@@ -3986,7 +4444,9 @@ onBeforeUnmount(() => {
                     <button
                       class="sequence-track-clip"
                       :class="{
-                        active: selectedClipId === clip.id,
+                        active:
+                          selectedClipId === clip.id ||
+                          sequencePlayheadClipId === clip.id,
                         'is-fixed-material':
                           clipMaterialType(clip) === 'fixed',
                         'is-variable-material':
@@ -3995,7 +4455,7 @@ onBeforeUnmount(() => {
                       :style="sequenceClipStyle(clip)"
                       type="button"
                       :title="sequenceClipTitle(clip)"
-                      @click="selectedClipId = clip.id"
+                      @click="selectSequenceTrackClip(clip)"
                     >
                       <span class="sequence-track-clip-copy">
                         {{ index + 1 }} ·
@@ -4026,6 +4486,38 @@ onBeforeUnmount(() => {
               <div class="sequence-track-row">
                 <div class="sequence-track-label">
                   <span>03</span><strong>底板音频层</strong>
+                  <button
+                    class="sequence-audio-play-button"
+                    :class="{
+                      'is-playing':
+                        playingSequenceAudioTrack === 'audioBackground',
+                    }"
+                    type="button"
+                    :disabled="!sequenceAudioTrackSourcePath('audioBackground')"
+                    :title="
+                      playingSequenceAudioTrack === 'audioBackground' ||
+                      loadingSequenceAudioTrack === 'audioBackground'
+                        ? '停止底板音频预览'
+                        : '播放底板音频'
+                    "
+                    @click="toggleSequenceAudioPreview('audioBackground')"
+                  >
+                    <LoaderCircle
+                      v-if="loadingSequenceAudioTrack === 'audioBackground'"
+                      :size="12"
+                      class="sequence-audio-loading-icon"
+                    />
+                    <span
+                      v-else-if="
+                        playingSequenceAudioTrack === 'audioBackground'
+                      "
+                      class="sequence-audio-equalizer"
+                      aria-hidden="true"
+                    >
+                      <i></i><i></i><i></i>
+                    </span>
+                    <Play v-else :size="12" fill="currentColor" />
+                  </button>
                 </div>
                 <div class="sequence-track-lane">
                   <div
@@ -4039,6 +4531,35 @@ onBeforeUnmount(() => {
               <div class="sequence-track-row">
                 <div class="sequence-track-label">
                   <span>04</span><strong>录音层</strong>
+                  <button
+                    class="sequence-audio-play-button"
+                    :class="{
+                      'is-playing': playingSequenceAudioTrack === 'recording',
+                    }"
+                    type="button"
+                    :disabled="!sequenceAudioTrackSourcePath('recording')"
+                    :title="
+                      playingSequenceAudioTrack === 'recording' ||
+                      loadingSequenceAudioTrack === 'recording'
+                        ? '停止录音预览'
+                        : '播放录音'
+                    "
+                    @click="toggleSequenceAudioPreview('recording')"
+                  >
+                    <LoaderCircle
+                      v-if="loadingSequenceAudioTrack === 'recording'"
+                      :size="12"
+                      class="sequence-audio-loading-icon"
+                    />
+                    <span
+                      v-else-if="playingSequenceAudioTrack === 'recording'"
+                      class="sequence-audio-equalizer"
+                      aria-hidden="true"
+                    >
+                      <i></i><i></i><i></i>
+                    </span>
+                    <Play v-else :size="12" fill="currentColor" />
+                  </button>
                 </div>
                 <div class="sequence-track-lane">
                   <div
@@ -4329,6 +4850,7 @@ onBeforeUnmount(() => {
       :source="templatePreviewVideoSource"
       autoplay
       title="模板视频预览"
+      @playback-change="handleTemplatePreviewPlaybackChange"
       @close="closeTemplatePreview"
     />
 
@@ -7022,17 +7544,76 @@ label:focus-within {
 }
 
 .sequence-tracks {
+  position: relative;
   min-width: 100%;
   display: grid;
   gap: 5px;
   padding: 12px;
 }
 
+.sequence-timeline-playhead {
+  position: absolute;
+  z-index: 8;
+  top: 7px;
+  bottom: 12px;
+  width: 16px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: ew-resize;
+  touch-action: none;
+  transform: translateX(-50%);
+}
+
+.sequence-timeline-playhead-line {
+  position: absolute;
+  top: 10px;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  border-radius: 999px;
+  background: #f26645;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.7);
+  transform: translateX(-50%);
+}
+
+.sequence-timeline-playhead-handle {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  left: 50%;
+  width: 12px;
+  height: 12px;
+  border: 2px solid white;
+  border-radius: 50%;
+  background: #f26645;
+  box-shadow: 0 1px 5px rgba(90, 43, 31, 0.35);
+  transform: translateX(-50%);
+  transition: transform 140ms ease, box-shadow 140ms ease;
+}
+
+.sequence-timeline-playhead:hover .sequence-timeline-playhead-handle,
+.sequence-timeline-playhead.is-dragging .sequence-timeline-playhead-handle {
+  box-shadow: 0 0 0 4px rgba(242, 102, 69, 0.2);
+  transform: translateX(-50%) scale(1.12);
+}
+
+.sequence-timeline-playhead.is-playing:not(.is-dragging)
+  .sequence-timeline-playhead-handle {
+  animation: sequence-playhead-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes sequence-playhead-pulse {
+  50% {
+    box-shadow: 0 0 0 5px rgba(242, 102, 69, 0.14);
+  }
+}
+
 .sequence-timeline-ruler-row {
   height: 26px;
   min-width: 0;
   display: grid;
-  grid-template-columns: 112px minmax(0, 1fr);
+  grid-template-columns: 136px minmax(0, 1fr);
 }
 
 .sequence-timeline-ruler-row > span {
@@ -7095,7 +7676,7 @@ label:focus-within {
   height: 34px;
   min-width: 0;
   display: grid;
-  grid-template-columns: 112px minmax(0, 1fr);
+  grid-template-columns: 136px minmax(0, 1fr);
   overflow: visible;
   border: 1px solid var(--line);
   border-radius: 5px;
@@ -7118,7 +7699,7 @@ label:focus-within {
   white-space: nowrap;
 }
 
-.sequence-track-label span {
+.sequence-track-label > span {
   width: 20px;
   height: 20px;
   display: grid;
@@ -7132,9 +7713,90 @@ label:focus-within {
 }
 
 .sequence-track-label strong {
+  min-width: 0;
+  flex: 1;
   overflow: hidden;
   font-size: 9px;
   text-overflow: ellipsis;
+}
+
+.sequence-audio-play-button {
+  width: 20px;
+  height: 20px;
+  display: grid;
+  flex: 0 0 20px;
+  place-items: center;
+  padding: 0;
+  color: #3f7f61;
+  border: 1px solid #a9cfbc;
+  border-radius: 50%;
+  background: #e6f3ec;
+  cursor: pointer;
+  transition:
+    color 160ms ease,
+    border-color 160ms ease,
+    background 160ms ease,
+    transform 160ms ease;
+}
+
+.sequence-audio-play-button:hover:not(:disabled) {
+  color: white;
+  border-color: #3f7f61;
+  background: #4e9b75;
+  transform: scale(1.08);
+}
+
+.sequence-audio-play-button.is-playing {
+  color: white;
+  border-color: #3f7f61;
+  background: #4e9b75;
+  box-shadow: 0 0 0 3px rgba(78, 155, 117, 0.16);
+}
+
+.sequence-audio-play-button:disabled {
+  color: #a4a59f;
+  border-color: #d7d8d2;
+  background: #f1f1ed;
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.sequence-audio-loading-icon {
+  animation: preview-spin 0.85s linear infinite;
+}
+
+.sequence-audio-equalizer {
+  width: 11px;
+  height: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1.5px;
+}
+
+.sequence-audio-equalizer i {
+  width: 2px;
+  height: 4px;
+  border-radius: 2px;
+  background: currentColor;
+  animation: sequence-audio-wave 0.72s ease-in-out infinite alternate;
+}
+
+.sequence-audio-equalizer i:nth-child(2) {
+  animation-delay: -0.48s;
+}
+
+.sequence-audio-equalizer i:nth-child(3) {
+  animation-delay: -0.24s;
+}
+
+@keyframes sequence-audio-wave {
+  from {
+    height: 3px;
+  }
+  to {
+    height: 10px;
+  }
 }
 
 .sequence-track-lane {
