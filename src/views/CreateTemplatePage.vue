@@ -218,6 +218,7 @@ const createInitialModel = () => ({
     overlay: '',
     audioBackground: '',
     recording: '',
+    recordingClips: [],
   },
   mediaGroups: createDefaultMediaGroups(),
   clips: [],
@@ -258,6 +259,7 @@ const draggedAreaAssetId = ref('');
 const subtitleDialogOpen = ref(false);
 const subtitleDraft = ref(null);
 const subtitleIsNew = ref(false);
+const recordingClipDraft = ref(null);
 const searchKeyword = ref('');
 const basicSettingsExpanded = ref(true);
 const toast = reactive({
@@ -305,6 +307,7 @@ const sequenceTimelineRulerRef = ref(null);
 const sequenceTracksScrollerRef = ref(null);
 const sequenceTracksScrollLeft = ref(0);
 let sequenceAudioPreviewPlayer = null;
+let sequenceRecordingPlayback = null;
 let sequenceAudioAnimationFrame = 0;
 let sequencePlayheadMoveHandler = null;
 let sequencePlayheadUpHandler = null;
@@ -567,6 +570,7 @@ function replaceModel(next, { fromPr = false } = {}) {
     selectedFilePaths[key] = '';
   });
   selectedClipId.value = '';
+  recordingClipDraft.value = null;
   isPrImportedTemplate.value = fromPr;
   activeLocalTemplateKey.value = '';
   activeLocalTemplateStatus.value = 2;
@@ -1579,7 +1583,37 @@ function removeSubtitle(subtitle) {
   );
 }
 
+function openRecordingClipEditor(clip) {
+  if (!clip) return;
+  recordingClipDraft.value = {
+    clip,
+    narration: String(clip.narration || ''),
+    prompt: String(clip.prompt || ''),
+  };
+}
+
+function closeRecordingClipEditor() {
+  recordingClipDraft.value = null;
+}
+
+function saveRecordingClipEditor() {
+  const draft = recordingClipDraft.value;
+  if (!draft) return;
+  if (!(model.tracks.recordingClips || []).includes(draft.clip)) {
+    closeRecordingClipEditor();
+    showToast('录音片段已更新，请重新选择。', 'warning');
+    return;
+  }
+  draft.clip.narration = draft.narration;
+  draft.clip.prompt = draft.prompt;
+  closeRecordingClipEditor();
+  showToast('录音片段文案已更新，生成模板后写入 XML');
+}
+
 function sequenceAudioTrackSourcePath(track) {
+  if (track === 'recording' && model.tracks.recordingClips?.length) {
+    return model.tracks.recordingClips.find((clip) => clip.sourcePath)?.sourcePath || '';
+  }
   return String(selectedFilePaths[track] || '').trim();
 }
 
@@ -1637,7 +1671,117 @@ function syncSequencePlayheadFromPlayer(player) {
   );
 }
 
+function recordingClipAtTime(timeMs) {
+  return (model.tracks.recordingClips || []).find(
+    (clip) => timeMs >= Number(clip.starttime) && timeMs < Number(clip.endtime),
+  ) || null;
+}
+
+function releaseRecordingSegmentPlayer(playback) {
+  const player = playback?.player;
+  if (!player) return;
+  playback.player = null;
+  player.pause();
+  player.onended = null;
+  player.onerror = null;
+  player.removeAttribute('src');
+  player.load();
+}
+
+async function syncRecordingSegmentPlayer(playback) {
+  if (sequenceRecordingPlayback !== playback || playback.paused) return;
+  const clip = recordingClipAtTime(sequencePlayheadTime.value);
+  if (clip === playback.clip) return;
+  releaseRecordingSegmentPlayer(playback);
+  playback.clip = clip;
+  if (!clip) {
+    loadingSequenceAudioTrack.value = '';
+    return;
+  }
+  if (!clip.sourcePath) {
+    stopSequenceAudioPreview();
+    showToast('录音片段文件不存在，请重新导入', 'error');
+    return;
+  }
+  let source;
+  try {
+    source = convertFileSrc(clip.sourcePath);
+  } catch {
+    stopSequenceAudioPreview();
+    showToast('录音片段文件路径无效', 'error');
+    return;
+  }
+  const player = new Audio(source);
+  playback.player = player;
+  loadingSequenceAudioTrack.value = 'recording';
+  player.onended = () => {
+    if (sequenceRecordingPlayback === playback && playback.player === player) {
+      releaseRecordingSegmentPlayer(playback);
+    }
+  };
+  player.onerror = () => {
+    if (sequenceRecordingPlayback !== playback || playback.player !== player) return;
+    stopSequenceAudioPreview();
+    showToast('录音片段播放失败', 'error');
+  };
+  try {
+    await waitForSequenceAudioMetadata(player);
+    if (sequenceRecordingPlayback !== playback || playback.player !== player || playback.paused) return;
+    const currentMs = sequencePlayheadTime.value;
+    if (currentMs >= Number(clip.endtime)) return;
+    const clipSeconds = Math.max(0, (currentMs - Number(clip.starttime)) / 1000);
+    const duration = Number(player.duration);
+    player.currentTime = Number.isFinite(duration)
+      ? Math.min(clipSeconds, Math.max(0, duration - 0.01))
+      : clipSeconds;
+    await player.play();
+    if (sequenceRecordingPlayback === playback && playback.player === player) {
+      loadingSequenceAudioTrack.value = '';
+    }
+  } catch (error) {
+    if (sequenceRecordingPlayback !== playback || playback.player !== player) return;
+    stopSequenceAudioPreview();
+    showToast(error?.message || '录音片段播放失败', 'error');
+  }
+}
+
+function seekRecordingPlaybackToPlayhead(playback) {
+  if (!playback || sequenceRecordingPlayback !== playback) return;
+  playback.anchorPlayheadMs = sequencePlayheadTime.value;
+  playback.anchorClockMs = performance.now();
+  releaseRecordingSegmentPlayer(playback);
+  playback.clip = null;
+  if (!playback.paused) void syncRecordingSegmentPlayer(playback);
+}
+
+function resumeRecordingPlayback(playback) {
+  if (!playback || sequenceRecordingPlayback !== playback) return;
+  playback.paused = false;
+  seekRecordingPlaybackToPlayhead(playback);
+  startSequenceAudioAnimation();
+}
+
 function updateSequenceAudioPlayhead() {
+  const recordingPlayback = sequenceRecordingPlayback;
+  if (recordingPlayback) {
+    if (recordingPlayback.paused || sequencePlayheadDragging.value) {
+      sequenceAudioAnimationFrame = 0;
+      return;
+    }
+    sequencePlayheadTime.value = clampNumber(
+      recordingPlayback.anchorPlayheadMs + performance.now() - recordingPlayback.anchorClockMs,
+      0,
+      Number(model.duration) || sequenceTimelineDuration.value,
+    );
+    if (sequencePlayheadTime.value >= Number(model.duration)) {
+      stopSequenceAudioPreview({ syncPlayhead: false });
+      return;
+    }
+    keepSequencePlayheadVisible();
+    void syncRecordingSegmentPlayer(recordingPlayback);
+    sequenceAudioAnimationFrame = window.requestAnimationFrame(updateSequenceAudioPlayhead);
+    return;
+  }
   const player = sequenceAudioPreviewPlayer;
   if (!player || player.paused || sequencePlayheadDragging.value) {
     sequenceAudioAnimationFrame = 0;
@@ -1694,6 +1838,11 @@ function waitForSequenceAudioMetadata(player) {
 }
 
 function stopSequenceAudioPreview({ syncPlayhead = true } = {}) {
+  if (sequenceRecordingPlayback) {
+    const playback = sequenceRecordingPlayback;
+    sequenceRecordingPlayback = null;
+    releaseRecordingSegmentPlayer(playback);
+  }
   const player = sequenceAudioPreviewPlayer;
   sequenceAudioPreviewPlayer = null;
   stopSequenceAudioAnimation();
@@ -1740,6 +1889,23 @@ async function toggleSequenceAudioPreview(track) {
   }
 
   stopSequenceAudioPreview();
+  if (track === 'recording' && model.tracks.recordingClips?.length) {
+    if (sequencePlayheadTime.value >= Number(model.duration)) {
+      sequencePlayheadTime.value = 0;
+    }
+    const playback = {
+      anchorPlayheadMs: sequencePlayheadTime.value,
+      anchorClockMs: performance.now(),
+      clip: null,
+      player: null,
+      paused: false,
+    };
+    sequenceRecordingPlayback = playback;
+    playingSequenceAudioTrack.value = 'recording';
+    void syncRecordingSegmentPlayer(playback);
+    startSequenceAudioAnimation();
+    return;
+  }
   let source = '';
   try {
     source = convertFileSrc(sourcePath);
@@ -1820,6 +1986,10 @@ function handleSequenceTracksScroll(event) {
 }
 
 function seekActiveSequenceAudioToPlayhead() {
+  if (sequenceRecordingPlayback) {
+    seekRecordingPlaybackToPlayhead(sequenceRecordingPlayback);
+    return;
+  }
   const player = sequenceAudioPreviewPlayer;
   if (!player?.readyState) return;
   seekSequenceAudioToPlayhead(player);
@@ -1855,6 +2025,10 @@ function handleTemplatePreviewPlaybackChange(state = {}) {
 
 function updateSequencePlayheadFromPointer(event) {
   sequencePlayheadTime.value = sequenceTimeFromClientX(event.clientX);
+  if (sequenceRecordingPlayback) {
+    seekRecordingPlaybackToPlayhead(sequenceRecordingPlayback);
+    return;
+  }
   const player = sequenceAudioPreviewPlayer;
   if (player?.readyState >= 1) {
     seekSequenceAudioToPlayhead(player);
@@ -1882,6 +2056,10 @@ function finishSequencePlayheadDrag(event, { resume = true } = {}) {
   const shouldResume = resume && sequenceAudioResumeAfterDrag;
   sequenceAudioResumeAfterDrag = false;
   const player = sequenceAudioPreviewPlayer;
+  if (shouldResume && sequenceRecordingPlayback) {
+    resumeRecordingPlayback(sequenceRecordingPlayback);
+    return;
+  }
   if (shouldResume && player) {
     void resumeSequenceAudioPreview(player);
   }
@@ -1890,8 +2068,18 @@ function finishSequencePlayheadDrag(event, { resume = true } = {}) {
 function startSequencePlayheadDrag(event) {
   if (!sequenceTimelineRulerRef.value) return;
   const player = sequenceAudioPreviewPlayer;
-  sequenceAudioResumeAfterDrag = Boolean(player && !player.paused);
-  if (sequenceAudioResumeAfterDrag) player.pause();
+  sequenceAudioResumeAfterDrag = Boolean(
+    (player && !player.paused) ||
+    (sequenceRecordingPlayback && !sequenceRecordingPlayback.paused),
+  );
+  if (sequenceAudioResumeAfterDrag) {
+    player?.pause();
+    if (sequenceRecordingPlayback) {
+      sequenceRecordingPlayback.paused = true;
+      releaseRecordingSegmentPlayer(sequenceRecordingPlayback);
+      sequenceRecordingPlayback.clip = null;
+    }
+  }
   stopSequenceAudioAnimation();
   sequencePlayheadDragging.value = true;
   updateSequencePlayheadFromPointer(event);
@@ -1921,6 +2109,9 @@ async function updateTrackFile(track) {
     stopSequenceAudioPreview();
   }
   selectedFilePaths[track] = sourcePath;
+  if (track === 'recording') {
+    model.tracks.recordingClips = [];
+  }
   model.tracks[track] = assetPath(fileName(sourcePath));
 }
 
@@ -1940,6 +2131,7 @@ function clearTrackFile(track) {
   }
   selectedFilePaths[track] = '';
   model.tracks[track] = '';
+  if (track === 'recording') model.tracks.recordingClips = [];
 }
 
 async function updateSelectedClipTopVideo() {
@@ -2605,6 +2797,20 @@ function validateModel({ forPreview = false } = {}) {
         return `${label}素材文件不存在，请重新选择。`;
       }
     }
+    if (model.tracks.recordingClips?.some((clip) => !clip.sourcePath)) {
+      return '录音片段文件不存在，请重新导入。';
+    }
+  }
+  for (const clip of model.tracks.recordingClips || []) {
+    if (
+      !Number.isInteger(Number(clip.starttime)) ||
+      !Number.isInteger(Number(clip.endtime)) ||
+      Number(clip.starttime) < 0 ||
+      Number(clip.endtime) <= Number(clip.starttime) ||
+      Number(clip.endtime) > Number(model.duration)
+    ) {
+      return '录音片段时间范围无效。';
+    }
   }
   for (const group of model.mediaGroups) {
     if (!group.name.trim()) return '素材目录名称不能为空。';
@@ -2697,6 +2903,7 @@ function resolveTemplatePreviewResourcePath(value, context = {}) {
   if (context.type === 'track') {
     return selectedFilePaths[context.key] || value;
   }
+  if (context.type === 'recordingClip') return context.clip?.sourcePath || value;
   if (context.type === 'asset') return context.asset?.sourcePath || value;
   if (context.type === 'topVideo') {
     return context.clip?.topVideoSourcePath || value;
@@ -2864,6 +3071,7 @@ function createLocalTemplateKey() {
 function getCurrentTemplateResourcePaths() {
   const resourcePaths = [
     ...Object.values(selectedFilePaths),
+    ...(model.tracks.recordingClips || []).map((clip) => clip.sourcePath),
     ...model.mediaGroups.flatMap((group) =>
       group.assets.map((asset) => asset.sourcePath),
     ),
@@ -2888,6 +3096,11 @@ function rebaseCurrentTemplateResourcePaths(assetsDirectory) {
         assetsDirectory,
         selectedFilePaths[key],
       );
+    }
+  });
+  (model.tracks.recordingClips || []).forEach((clip) => {
+    if (clip.sourcePath) {
+      clip.sourcePath = sourcePathInAssetsDirectory(assetsDirectory, clip.sourcePath);
     }
   });
   model.mediaGroups.forEach((group) => {
@@ -3123,6 +3336,12 @@ function applyTemplateForEditing(
     clip.topVideoSourcePath = resolvePrBridgeResourcePath(
       payload.projectRoot,
       clip.topVideo,
+    );
+  });
+  (nextModel.tracks.recordingClips || []).forEach((clip) => {
+    clip.sourcePath = resolvePrBridgeResourcePath(
+      payload.projectRoot,
+      clip.filepath,
     );
   });
   nextModel.clips.sort(
@@ -3511,6 +3730,16 @@ function sequenceClipStyle(clip) {
   };
 }
 
+function sequenceRecordingClipStyle(clip) {
+  const total = sequenceTimelineDuration.value;
+  const start = clampNumber(Number(clip.starttime) || 0, 0, total);
+  const end = clampNumber(Number(clip.endtime) || 0, start, total);
+  return {
+    left: `${(start / total) * 100}%`,
+    width: `${Math.max(((end - start) / total) * 100, 0.8)}%`,
+  };
+}
+
 function sequenceTrackFileLabel(path) {
   return path ? fileName(path) : '待上传';
 }
@@ -3884,14 +4113,16 @@ onBeforeUnmount(() => {
             <div>
               <strong>录音层</strong>
               <small>{{
-                model.tracks.recording
-                  ? fileName(model.tracks.recording)
-                  : '未配置时不生成'
+                model.tracks.recordingClips?.length
+                  ? `共 ${model.tracks.recordingClips.length} 段录音`
+                  : model.tracks.recording
+                    ? fileName(model.tracks.recording)
+                    : '未配置时不生成'
               }}</small>
             </div>
             <div class="track-actions">
               <button
-                v-if="model.tracks.recording"
+                v-if="model.tracks.recording || model.tracks.recordingClips?.length"
                 class="plain-icon danger-hover"
                 type="button"
                 title="移除录音"
@@ -4562,7 +4793,19 @@ onBeforeUnmount(() => {
                   </button>
                 </div>
                 <div class="sequence-track-lane">
+                  <button
+                    v-for="(clip, index) in model.tracks.recordingClips || []"
+                    :key="`recording-segment-${index}`"
+                    class="sequence-track-clip is-recording"
+                    :style="sequenceRecordingClipStyle(clip)"
+                    :title="`${fileName(clip.filepath)} · ${formatMilliseconds(clip.starttime)}–${formatMilliseconds(clip.endtime)}`"
+                    type="button"
+                    @click.stop="openRecordingClipEditor(clip)"
+                  >
+                    {{ index + 1 }} · {{ fileName(clip.filepath) }}
+                  </button>
                   <div
+                    v-if="!model.tracks.recordingClips?.length"
                     class="sequence-track-clip is-recording is-full"
                     :class="{ 'is-empty': !model.tracks.recording }"
                   >
@@ -6026,6 +6269,73 @@ onBeforeUnmount(() => {
             </button>
           </div>
         </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <Teleport to="body">
+      <Transition name="modal">
+        <div
+          v-if="recordingClipDraft"
+          class="modal-backdrop"
+          @mousedown.self="closeRecordingClipEditor"
+        >
+          <div
+            class="area-modal recording-clip-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="recording-clip-dialog-title"
+          >
+            <div class="modal-header">
+              <div>
+                <h2 id="recording-clip-dialog-title">编辑录音片段</h2>
+              </div>
+              <button
+                class="icon-button"
+                type="button"
+                title="关闭录音片段编辑"
+                @click="closeRecordingClipEditor"
+              >
+                <X :size="18" />
+              </button>
+            </div>
+            <div class="modal-body recording-clip-modal-body">
+              <div class="field">
+                <label for="recording-narration">模板旁白</label>
+                <textarea
+                  id="recording-narration"
+                  v-model="recordingClipDraft.narration"
+                  rows="4"
+                  placeholder="填写模板旁白"
+                ></textarea>
+              </div>
+              <div class="field">
+                <label for="recording-prompt">待录音提示</label>
+                <textarea
+                  id="recording-prompt"
+                  v-model="recordingClipDraft.prompt"
+                  rows="4"
+                  placeholder="填写待录音提示"
+                ></textarea>
+              </div>
+            </div>
+            <div class="modal-footer">
+              <button
+                class="button button-secondary"
+                type="button"
+                @click="closeRecordingClipEditor"
+              >
+                取消
+              </button>
+              <button
+                class="button button-primary"
+                type="button"
+                @click="saveRecordingClipEditor"
+              >
+                <Check :size="16" /> 确定
+              </button>
+            </div>
+          </div>
         </div>
       </Transition>
     </Teleport>
@@ -7924,6 +8234,10 @@ button.sequence-track-clip {
   background: #f6e6ec;
 }
 
+.sequence-track-clip.is-recording:not(.is-full) {
+  min-width: 0;
+}
+
 .sequence-track-clip.is-empty {
   color: #9a9b95;
   border-style: dashed;
@@ -8439,6 +8753,16 @@ button.sequence-track-clip.active {
 .area-modal.subtitle-modal {
   width: min(900px, 100%);
   grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.area-modal.recording-clip-modal {
+  width: min(520px, 100%);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.recording-clip-modal-body {
+  display: grid;
+  gap: 16px;
 }
 
 .subtitle-modal-body {

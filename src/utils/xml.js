@@ -101,7 +101,20 @@ export function buildXml(model, options = {}) {
     );
   }
 
-  if (model.tracks.recording) {
+  const recordingClips = model.tracks.recordingClips || [];
+  if (recordingClips.length) {
+    lines.push('            <track id="recording" z-index="4">');
+    recordingClips.forEach((clip) => {
+      lines.push(
+        `                <clip starttime="${attr(n(clip.starttime))}" endtime="${attr(n(clip.endtime))}">`,
+        `                    <narration>${text(clip.narration)}</narration>`,
+        `                    <prompt>${text(clip.prompt)}</prompt>`,
+        `                    <filepath>${text(resolveResourcePath(clip.filepath, { type: 'recordingClip', clip }))}</filepath>`,
+        '                </clip>',
+      );
+    });
+    lines.push('            </track>');
+  } else if (model.tracks.recording) {
     lines.push(
       '            <track id="recording" z-index="4">',
       `                <filepath>${text(resolveResourcePath(model.tracks.recording, { type: 'track', key: 'recording' }))}</filepath>`,
@@ -266,6 +279,16 @@ export function parseXml(xmlText, { preserveIds = false } = {}) {
   const findTrack = (id) =>
     trackNodes.find((track) => track.getAttribute('id') === id);
   const readTrackPath = (id) => childText(findTrack(id), 'filepath');
+  const recordingClips = directChildren(findTrack('recording'), 'clip').map(
+    (clipNode) => ({
+      starttime: n(clipNode.getAttribute('starttime')),
+      endtime: n(clipNode.getAttribute('endtime')),
+      narration: childText(clipNode, 'narration'),
+      prompt: childText(clipNode, 'prompt'),
+      filepath: childText(clipNode, 'filepath'),
+      sourcePath: '',
+    }),
+  );
 
   const assetIdMap = new Map();
   const mediaGroups = directChildren(template, 'media-asset').map(
@@ -498,6 +521,7 @@ export function parseXml(xmlText, { preserveIds = false } = {}) {
       overlay: readTrackPath('overlay'),
       audioBackground: readTrackPath('audio-bg'),
       recording: readTrackPath('recording'),
+      recordingClips,
     },
     mediaGroups,
     clips,

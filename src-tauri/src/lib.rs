@@ -8322,7 +8322,13 @@ mod tests {
     #[test]
     fn filters_fixed_clips_and_variable_top_videos_from_upload_xml() {
         let local_xml = r#"<xmeml><template>
-        <tracks><track id="overlay"><filepath>template/assets/top.mov</filepath></track></tracks>
+        <tracks>
+            <track id="overlay"><filepath>template/assets/top.mov</filepath></track>
+            <track id="recording">
+                <clip starttime="0" endtime="1000"><narration></narration><prompt></prompt><filepath>template/assets/recording-001.wav</filepath></clip>
+                <clip starttime="2000" endtime="3000"><narration></narration><prompt></prompt><filepath>template/assets/recording-002.wav</filepath></clip>
+            </track>
+        </tracks>
         <clips id="clips" target-track="clips">
             <clip id="fixed-1" material-type="fixed">
                 <top-video>template/assets/top-segment-001.mov</top-video>
@@ -8347,6 +8353,9 @@ mod tests {
         assert!(upload_xml.contains("variable-2"));
         assert!(upload_xml.contains("<saturation>100</saturation>"));
         assert!(upload_xml.contains("template/assets/top.mov"));
+        assert!(upload_xml.contains("template/assets/recording-001.wav"));
+        assert!(upload_xml.contains("template/assets/recording-002.wav"));
+        assert!(upload_xml.contains("<clip starttime=\"2000\" endtime=\"3000\">"));
         assert!(local_xml.contains("fixed-1"));
         assert!(local_xml.contains("top-segment-003.mov"));
     }
