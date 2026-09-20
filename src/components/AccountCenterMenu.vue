@@ -285,10 +285,15 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', closeMenu));
         <AppIcon name="lock_reset" :size="18" /><span>修改密码</span>
       </button>
       <div class="account-menu-divider"></div>
-      <button class="account-menu-item" type="button" @click="showMyTemplates">
+      <button
+        v-show="false"
+        class="account-menu-item"
+        type="button"
+        @click="showMyTemplates"
+      >
         <AppIcon name="video_library" :size="18" /><span>我的模板</span>
       </button>
-      <div class="account-menu-divider"></div>
+      <div v-show="false" class="account-menu-divider"></div>
       <button class="account-menu-item" type="button" @click="showHelp">
         <AppIcon name="help_center" :size="18" /><span>帮助中心</span>
       </button>
