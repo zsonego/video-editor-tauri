@@ -1,5 +1,6 @@
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs,
@@ -709,6 +710,13 @@ struct ProjectAssetImport {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ProjectAssetFingerprint {
+    material_key: String,
+    fingerprint: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct AdaptedProjectAssetSpeed {
     project_xml: String,
     adapted: bool,
@@ -846,6 +854,24 @@ struct ComposerBeautyFrameParams {
     transform_origin: String,
     stabilization: bool,
     one_click_beauty: bool,
+    #[serde(
+        rename = "clipDuration",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    clip_duration: Option<serde_json::Value>,
+    #[serde(
+        rename = "filterEffect",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    filter_effect: Option<String>,
+    #[serde(
+        rename = "filterDuration",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    filter_duration: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -2698,6 +2724,93 @@ fn file_content_hash(path: &Path) -> Result<String, String> {
     }
 
     Ok(format!("{:016x}", hasher.finish()))
+}
+
+fn sha256_fingerprint(reader: &mut impl Read) -> io::Result<String> {
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read_count = reader.read(&mut buffer)?;
+        if read_count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read_count]);
+    }
+    let digest = hasher.finalize();
+    let mut fingerprint = String::with_capacity(32);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in digest.iter().take(16) {
+        fingerprint.push(HEX[(byte >> 4) as usize] as char);
+        fingerprint.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    Ok(fingerprint)
+}
+
+fn asset_fingerprints_from_xml(
+    template_xml: &str,
+    template_dir: &Path,
+    assets_dir: &Path,
+) -> Vec<ProjectAssetFingerprint> {
+    let mut hashes_by_path = HashMap::<PathBuf, String>::new();
+    let mut fingerprints = Vec::new();
+    for (_, default_assets) in find_xml_element_blocks(template_xml, "default-asset") {
+        for asset_tag in find_xml_start_tags(&default_assets, "asset") {
+            let Some(material_key) = xml_attribute_value(&asset_tag, "id") else {
+                continue;
+            };
+            let filepath = xml_attribute_value(&asset_tag, "filepath").unwrap_or_default();
+            let resolved = resolve_template_resource_filepath(template_dir, assets_dir, &filepath);
+            let fingerprint = fs::canonicalize(resolved)
+                .ok()
+                .filter(|path| path.is_file())
+                .map(|path| {
+                    hashes_by_path
+                        .entry(path.clone())
+                        .or_insert_with(|| {
+                            fs::File::open(&path)
+                                .and_then(|mut file| sha256_fingerprint(&mut file))
+                                .unwrap_or_default()
+                        })
+                        .clone()
+                })
+                .unwrap_or_default();
+            fingerprints.push(ProjectAssetFingerprint {
+                material_key,
+                fingerprint,
+            });
+        }
+    }
+    fingerprints
+}
+
+fn project_asset_fingerprints(project_dir: &Path) -> Result<Vec<ProjectAssetFingerprint>, String> {
+    let (_, project_root) = ensure_aicut_dirs()?;
+    let project_root = fs::canonicalize(project_root).map_err(|error| error.to_string())?;
+    let project_dir = fs::canonicalize(project_dir).map_err(|error| error.to_string())?;
+    if !project_dir.starts_with(&project_root) {
+        return Err("项目目录无效".to_string());
+    }
+    let template_xml = fs::read_to_string(project_dir.join("template.xml"))
+        .map_err(|error| format!("读取工程模板失败: {error}"))?;
+    let template_id = find_xml_element_blocks(&template_xml, "template")
+        .into_iter()
+        .next()
+        .and_then(|(tag, _)| xml_attribute_value(&tag, "id"))
+        .unwrap_or_default();
+    let (template_dir, _, assets_dir) = if template_id.is_empty() {
+        (
+            project_dir.clone(),
+            project_dir.join("template.xml"),
+            project_dir.join("assets"),
+        )
+    } else {
+        cached_template_paths(&template_id)?
+    };
+    Ok(asset_fingerprints_from_xml(
+        &template_xml,
+        &template_dir,
+        &assets_dir,
+    ))
 }
 
 fn project_filepath_candidates_from_asset_path(
@@ -5571,6 +5684,17 @@ fn create_project_workspace(
 }
 
 #[tauri::command]
+async fn get_project_asset_fingerprints(
+    project_dir: String,
+) -> Result<Vec<ProjectAssetFingerprint>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        project_asset_fingerprints(Path::new(&project_dir))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 fn read_project_workspace(
     template_id: String,
     project_id: String,
@@ -7514,6 +7638,7 @@ pub fn run() {
             ensure_default_output_dir,
             download_help_guide,
             create_project_workspace,
+            get_project_asset_fingerprints,
             read_project_workspace,
             save_project_asset,
             adapt_project_asset_speed,
@@ -7620,6 +7745,73 @@ mod tests {
         assert_eq!(value["transform_origin"], "center");
         assert_eq!(value["lut_file"], "");
         assert!(value.get("rotation_direction").is_none());
+    }
+
+    #[test]
+    fn serializes_beauty_video_fade_params() {
+        let params = ComposerBeautyFrameParams {
+            clip_duration: Some(serde_json::json!(1320)),
+            filter_effect: Some("Fade".to_string()),
+            filter_duration: Some(serde_json::json!(250)),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(params).expect("serialize fade params");
+        assert_eq!(value["clipDuration"], 1320);
+        assert_eq!(value["filterEffect"], "Fade");
+        assert_eq!(value["filterDuration"], 250);
+
+        let no_fade = ComposerBeautyFrameParams {
+            clip_duration: Some(serde_json::json!("")),
+            filter_effect: Some(String::new()),
+            filter_duration: Some(serde_json::json!("")),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(no_fade).expect("serialize empty fade params");
+        assert_eq!(value["clipDuration"], "");
+        assert_eq!(value["filterEffect"], "");
+        assert_eq!(value["filterDuration"], "");
+    }
+
+    #[test]
+    fn hashes_file_content_as_first_32_sha256_hex_characters() {
+        let mut input = io::Cursor::new(b"abc");
+        assert_eq!(
+            sha256_fingerprint(&mut input).expect("hash content"),
+            "ba7816bf8f01cfea414140de5dae2223"
+        );
+    }
+
+    #[test]
+    fn lists_each_asset_even_when_file_fingerprints_are_shared_or_missing() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("timestamp")
+            .as_nanos();
+        let template_dir = std::env::temp_dir().join(format!(
+            "aicut-fingerprint-test-{}-{unique}",
+            std::process::id()
+        ));
+        let assets_dir = template_dir.join("assets");
+        fs::create_dir_all(&assets_dir).expect("create test assets");
+        fs::write(assets_dir.join("sample.mp4"), b"abc").expect("write test asset");
+        let xml = r#"<template><default-asset>
+            <asset id="first" filepath="template/assets/sample.mp4" />
+            <asset id="second" filepath="template/assets/sample.mp4" />
+            <asset id="missing" filepath="template/assets/missing.mp4" />
+        </default-asset></template>"#;
+
+        let fingerprints = asset_fingerprints_from_xml(xml, &template_dir, &assets_dir);
+        assert_eq!(fingerprints.len(), 3);
+        assert_eq!(fingerprints[0].material_key, "first");
+        assert_eq!(fingerprints[1].material_key, "second");
+        assert_eq!(fingerprints[0].fingerprint, fingerprints[1].fingerprint);
+        assert_eq!(
+            fingerprints[0].fingerprint,
+            "ba7816bf8f01cfea414140de5dae2223"
+        );
+        assert_eq!(fingerprints[2].material_key, "missing");
+        assert_eq!(fingerprints[2].fingerprint, "");
+        fs::remove_dir_all(&template_dir).expect("remove test assets");
     }
 
     #[test]

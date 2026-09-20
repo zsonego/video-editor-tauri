@@ -40,6 +40,10 @@ export function recordProjectExport(data) {
   return request("/api/project/export", { data });
 }
 
+export function previewProjectExport(data) {
+  return request("/api/project/export/preview", { data });
+}
+
 export function uploadProjectCover(data) {
   return request("/api/project/cover", {
     data,

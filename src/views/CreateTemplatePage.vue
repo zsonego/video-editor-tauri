@@ -50,6 +50,7 @@ import {
 import logoImage from '../assets/logo.png';
 import AccountCenterMenu from '../components/AccountCenterMenu.vue';
 import WholeVideoPreviewModal from '../components/WholeVideoPreviewModal.vue';
+import { getTransitionEffects } from '../api/dict';
 import { assetPath, buildXml, generateId, parseXml } from '../utils/xml';
 import lutManifest from '../../src-tauri/resources/luts/luts.json';
 
@@ -90,16 +91,46 @@ function handleAccountLogout() {
   router.replace('/login');
 }
 
-const transitionEffects = [
-  { value: 'Fade', label: '淡入淡出' },
-  { value: 'Scale-Transition', label: '缩放' },
-  { value: 'Blur', label: '模糊' },
-  { value: 'Slide-Left', label: '左滑' },
-  { value: 'Slide-Right', label: '右滑' },
-  { value: 'Slide-Up', label: '上滑' },
-  { value: 'Slide-Down', label: '下滑' },
-  { value: 'Flash', label: '闪光' },
-];
+const transitionEffects = ref([]);
+const defaultTransitionEffect = ref('Fade');
+let transitionEffectsRequest = null;
+
+async function loadTransitionEffects() {
+  if (transitionEffectsRequest) return transitionEffectsRequest;
+  transitionEffectsRequest = (async () => {
+    try {
+      const response = await getTransitionEffects();
+      if (response?.code !== undefined && Number(response.code) !== 0) {
+        throw new Error(response?.msg || '获取转场类型失败');
+      }
+      if (!Array.isArray(response?.data)) {
+        throw new Error('转场类型接口返回格式不正确');
+      }
+      const effects = response.data
+        .filter((item) => String(item?.status ?? '0') === '0')
+        .sort((left, right) => Number(left.dictSort) - Number(right.dictSort))
+        .map((item) => ({
+          value: String(item.dictValue || '').trim(),
+          label: String(item.dictLabel || item.dictValue || '').trim(),
+          isDefault: item.default === true || item.isDefault === 'Y',
+        }))
+        .filter((item) => item.value);
+      transitionEffects.value = effects;
+      defaultTransitionEffect.value =
+        effects.find((item) => item.isDefault)?.value ||
+        effects[0]?.value ||
+        'Fade';
+      if (!effects.length) showToast('暂无可用的转场类型', 'warning');
+    } catch (error) {
+      if (prBridgePageActive) {
+        showToast(error?.message || '获取转场类型失败', 'error');
+      }
+    }
+  })().finally(() => {
+    transitionEffectsRequest = null;
+  });
+  return transitionEffectsRequest;
+}
 
 const mirrorDirections = [
   { value: 'up', label: '向上' },
@@ -317,6 +348,23 @@ const CLIP_PREVIEW_COVER_SECONDS = 0.5;
 const selectedClip = computed(
   () => model.clips.find((clip) => clip.id === selectedClipId.value) ?? null,
 );
+const displayedTransitionEffects = computed(() => {
+  const selectedValue = selectedClip.value?.transition?.effect;
+  if (
+    !selectedValue ||
+    transitionEffects.value.some((item) => item.value === selectedValue)
+  ) {
+    return transitionEffects.value;
+  }
+  const legacyLabel =
+    selectedValue === 'Scale-Transition'
+      ? `${transitionEffects.value.find((item) => item.value === 'Scale')?.label || '缩放'}（旧版）`
+      : '当前模板转场（未收录）';
+  return [
+    { value: selectedValue, label: legacyLabel },
+    ...transitionEffects.value,
+  ];
+});
 
 const allAssets = computed(() =>
   model.mediaGroups.flatMap((group) =>
@@ -906,7 +954,7 @@ function createClip() {
     subtitles: [],
     transition: {
       enabled: false,
-      effect: 'Fade',
+      effect: defaultTransitionEffect.value,
       duration: 500,
     },
   };
@@ -3480,6 +3528,7 @@ async function startPrBridgeForPage() {
 }
 
 function activateCreateTemplatePage() {
+  void loadTransitionEffects();
   if (!prBridgePageActive) {
     prBridgePageActive = true;
     thumbnailPageDisposed = false;
@@ -3696,7 +3745,7 @@ function setClipMaterialType(clip, materialType) {
 function clipTransitionDescription(clip) {
   if (!clip?.transition?.enabled) return '';
   const effect =
-    transitionEffects.find((item) => item.value === clip.transition.effect)
+    transitionEffects.value.find((item) => item.value === clip.transition.effect)
       ?.label || clip.transition.effect || '转场';
   return `${effect} · ${formatMilliseconds(clip.transition.duration)}`;
 }
@@ -4947,11 +4996,11 @@ onBeforeUnmount(() => {
                 <label>转场特效</label>
                 <select v-model="selectedClip.transition.effect">
                   <option
-                    v-for="effect in transitionEffects"
+                    v-for="effect in displayedTransitionEffects"
                     :key="effect.value"
                     :value="effect.value"
                   >
-                    {{ effect.label }} · {{ effect.value }}
+                    {{ effect.label }}
                   </option>
                 </select>
               </div>

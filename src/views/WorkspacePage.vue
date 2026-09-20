@@ -23,6 +23,7 @@ import {
   downloadProjectCover,
   getProjectDetail,
   getMyProjects,
+  previewProjectExport,
   recordProjectExport,
   renameProject,
   updateProject,
@@ -376,6 +377,10 @@ const exportState = ref('confirm');
 const exportProgress = ref(0);
 const exportStatus = ref('正在渲染视频文件...');
 const exportRunning = ref(false);
+const exportPreparing = ref(false);
+const exportFingerprints = ref(null);
+const exportNeedDeduct = ref(false);
+const exportPreviewCredit = ref(0);
 const adaptiveDurationConfirmVisible = ref(false);
 const adaptiveDurationConfirmCount = ref(0);
 const pendingAdaptiveDurationAction = ref('');
@@ -422,6 +427,7 @@ let playerResizeObserver = null;
 let offsetPersistTimer = null;
 let projectUpdateTimer = null;
 let pendingProjectUpdate = null;
+let projectUpdateInFlight = Promise.resolve(true);
 let assetPropertyPersistTimer = null;
 let assetPropertyPersistPromise = null;
 const pendingAssetPropertyUpdates = new Map();
@@ -1046,6 +1052,9 @@ async function goHome() {
   draftLibraryVisible.value = false;
   finishedLibraryVisible.value = false;
   exportModalVisible.value = false;
+  exportFingerprints.value = null;
+  exportNeedDeduct.value = false;
+  exportPreviewCredit.value = 0;
   defaultTemplateExportConfirmVisible.value = false;
   importOverwriteConfirmVisible.value = false;
 
@@ -1578,16 +1587,21 @@ function normalizeBackendId(value) {
   return Number.isFinite(numericValue) ? numericValue : value;
 }
 
-async function syncProjectTemplateUpdate(payload) {
-  try {
-    const response = await updateProject(payload);
-    if (response?.code !== undefined && Number(response.code) !== 0) {
-      throw new Error(response?.msg || '工程信息同步失败');
+function syncProjectTemplateUpdate(payload) {
+  projectUpdateInFlight = projectUpdateInFlight.then(async () => {
+    try {
+      const response = await updateProject(payload);
+      if (response?.code !== undefined && Number(response.code) !== 0) {
+        throw new Error(response?.msg || '工程信息同步失败');
+      }
+      return true;
+    } catch (error) {
+      console.error('[project] template update sync failed:', error);
+      systemMessage.error(error?.message || '工程信息同步失败');
+      return false;
     }
-  } catch (error) {
-    console.error('[project] template update sync failed:', error);
-    systemMessage.error(error?.message || '工程信息同步失败');
-  }
+  });
+  return projectUpdateInFlight;
 }
 
 function scheduleProjectTemplateUpdate(projectXml) {
@@ -1634,8 +1648,9 @@ function flushPendingProjectTemplateUpdate() {
   const payload = pendingProjectUpdate;
   pendingProjectUpdate = null;
   if (payload) {
-    syncProjectTemplateUpdate(payload);
+    return syncProjectTemplateUpdate(payload);
   }
+  return projectUpdateInFlight;
 }
 
 async function createBackendProjectIfNeeded() {
@@ -2111,6 +2126,9 @@ function findTemplateAreaMatchesFromDom(xmlContent, assetId) {
     for (const clip of clipElements) {
       const clipStarttime = getDirectChildText(clip, ['starttime', 'start']);
       const clipDuration = getDirectChildText(clip, 'duration');
+      const filter = getDirectChildElements(clip, 'filter')[0];
+      const filterEffect = filter ? getDirectChildText(filter, 'effect') : '';
+      const filterDuration = filter ? getDirectChildText(filter, 'duration') : '';
       const areas = getDirectChildElements(clip, 'area');
       for (const area of areas) {
         if (area.getAttribute('asset-id') === assetId) {
@@ -2119,6 +2137,8 @@ function findTemplateAreaMatchesFromDom(xmlContent, assetId) {
             clipId: clip.getAttribute('id') || '',
             clipStarttime,
             clipDuration,
+            filterEffect,
+            filterDuration,
             areaId: area.getAttribute('id') || '',
             clipsAssetId: area.getAttribute('asset-id') || '',
             ...getAreaSourceDurationInfoFromElement(area),
@@ -2151,6 +2171,9 @@ function findTemplateAreaMatchesFromText(xmlContent, assetId) {
         getElementText(clipBody, 'starttime') ||
         getElementText(clipBody, 'start');
       const clipDuration = getElementText(clipBody, 'duration');
+      const filterBody = getElementText(clipBody, 'filter');
+      const filterEffect = getElementText(filterBody, 'effect');
+      const filterDuration = getElementText(filterBody, 'duration');
       const areaMatches = Array.from(
         clipBody.matchAll(/<area\b([^>]*)>([\s\S]*?)<\/area>/gi),
       );
@@ -2173,6 +2196,8 @@ function findTemplateAreaMatchesFromText(xmlContent, assetId) {
           clipId: getAttributeValue(clipAttributes, 'id'),
           clipStarttime,
           clipDuration,
+          filterEffect,
+          filterDuration,
           areaId: getAttributeValue(areaAttributes, 'id'),
           clipsAssetId,
           durationRaw,
@@ -2200,6 +2225,28 @@ function findTemplateAreaMatches(assetId) {
 // 为时间线选区查找当前素材对应的模板时长约束。
 function findTemplateAreaMatch(assetId) {
   return findTemplateAreaMatches(assetId)[0] || null;
+}
+
+function findLongestFadeFilterForAsset(assetId) {
+  let selected = null;
+  for (const match of findTemplateAreaMatches(assetId)) {
+    if (match.filterEffect?.toLowerCase() !== 'fade') continue;
+    if (!match.filterDuration) continue;
+    const filterDuration = Number(match.filterDuration);
+    if (!Number.isFinite(filterDuration) || filterDuration < 0) continue;
+    if (!selected || filterDuration > selected.filterDuration) {
+      const clipDuration = Number(match.clipDuration);
+      selected = {
+        clipDuration:
+          match.clipDuration && Number.isFinite(clipDuration) && clipDuration >= 0
+            ? clipDuration
+            : '',
+        filterEffect: 'Fade',
+        filterDuration,
+      };
+    }
+  }
+  return selected;
 }
 
 function findLongestTemplateAreaMatch(assetId) {
@@ -2537,7 +2584,7 @@ async function generateAndApplyImportedVideo(
     inputVideoPath: importedVideo.localPath,
     startTimeMs,
     durationMs,
-    params: buildBeautyFrameParams(transformValues),
+    params: buildBeautyFileParams(transformValues, assetId),
   });
 
   onProgress?.(0.88, '正在应用预览视频...');
@@ -3248,6 +3295,17 @@ function buildBeautyFrameParams(values = {}) {
   };
 }
 
+function buildBeautyFileParams(values = {}, assetId = '') {
+  return {
+    ...buildBeautyFrameParams(values),
+    ...(findLongestFadeFilterForAsset(assetId) || {
+      clipDuration: '',
+      filterEffect: '',
+      filterDuration: '',
+    }),
+  };
+}
+
 function buildProjectAssetProperties(values = {}) {
   const normalizedValues = normalizeVideoTransformValues(values);
   const beauty = normalizedValues.beauty;
@@ -3523,7 +3581,7 @@ async function processAssetVideoPreprocessTask(task) {
     inputVideoPath: task.videoPath,
     startTimeMs: task.startTimeMs,
     durationMs: task.durationMs,
-    params: buildBeautyFrameParams(task.values),
+    params: buildBeautyFileParams(task.values, task.assetId),
   });
   const latestRevision = assetVideoPropertyRevisions.get(task.assetId) || 0;
   const taskIsCurrent =
@@ -3758,6 +3816,7 @@ async function handleSidebarVideoPreview() {
   if (
     projectPreviewRunning.value ||
     exportRunning.value ||
+    exportPreparing.value ||
     assetVideoPreprocessBusy.value
   ) {
     return;
@@ -4972,20 +5031,17 @@ function syncStoredCreditBalance(creditBalance) {
   userInfoRevision.value += 1;
 }
 
-async function ensureProjectExportRecorded(exportPath) {
+async function ensureProjectExportRecorded(exportPath, fingerprints) {
   const projectId = activeBackendProjectId.value;
   if (!projectId) {
     systemMessage.error('工程 ID 不存在，无法导出');
     return false;
   }
 
-  if (activeProjectExported.value) {
-    return true;
-  }
-
   const response = await recordProjectExport({
     exportPath,
     projectId: normalizeBackendId(projectId),
+    fingerprints,
   });
 
   if (response?.code !== undefined && Number(response.code) !== 0) {
@@ -5110,7 +5166,11 @@ async function uploadGeneratedProjectCover() {
 async function showExportConfirmation() {
   console.log('[export] export button clicked');
   void unlockExportFinishedSound();
-  if (exportRunning.value || assetVideoPreprocessBusy.value) return;
+  if (
+    exportRunning.value ||
+    exportPreparing.value ||
+    assetVideoPreprocessBusy.value
+  ) return;
   if (!canExport.value) {
     console.warn(
       '[export] export disabled because editing project is not ready',
@@ -5180,9 +5240,14 @@ function ensureMp4ExportPath(filePath) {
 }
 
 async function selectExportFile() {
+  if (exportPreparing.value) return;
+  exportPreparing.value = true;
   if (exportInterval) clearInterval(exportInterval);
   resetExportProgress();
   exportSelectedPath.value = '';
+  exportFingerprints.value = null;
+  exportNeedDeduct.value = false;
+  exportPreviewCredit.value = 0;
 
   try {
     console.log('[export] ensuring default output directory');
@@ -5202,14 +5267,69 @@ async function selectExportFile() {
       return;
     }
 
-    exportSelectedPath.value = ensureMp4ExportPath(selected);
-    exportSelectedDir.value = await dirname(exportSelectedPath.value);
-    console.log('[export] selected output file:', exportSelectedPath.value);
+    const outputPath = ensureMp4ExportPath(selected);
+    const projectId = activeBackendProjectId.value;
+    const projectDir = activeProjectDir.value;
+    if (!projectId || !projectDir) {
+      throw new Error('当前工程信息不完整，无法导出');
+    }
+
+    await flushSelectedVideoOffsetPersist();
+    await flushPendingAssetPropertyUpdates();
+    const projectSynced = await flushPendingProjectTemplateUpdate();
+    if (!projectSynced) {
+      throw new Error('工程信息同步失败，请稍后重试导出');
+    }
+    const fingerprints = await invoke('get_project_asset_fingerprints', {
+      projectDir,
+    });
+    if (
+      projectId !== activeBackendProjectId.value ||
+      projectDir !== activeProjectDir.value
+    ) {
+      return;
+    }
+    if (!Array.isArray(fingerprints)) {
+      throw new Error('素材指纹生成失败');
+    }
+    const response = await previewProjectExport({
+      projectId: normalizeBackendId(projectId),
+      fingerprints,
+    });
+    if (
+      projectId !== activeBackendProjectId.value ||
+      projectDir !== activeProjectDir.value
+    ) {
+      return;
+    }
+    if (response?.code !== undefined && Number(response.code) !== 0) {
+      throw new Error(response?.msg || '导出费用预览失败');
+    }
+    const preview = getResponsePayload(response) || {};
+    if (typeof preview.needDeduct !== 'boolean') {
+      throw new Error('导出费用预览缺少扣费信息');
+    }
+    const exportCredit = Number(preview.exportCredit);
+    if (
+      preview.needDeduct &&
+      (!Number.isFinite(exportCredit) || exportCredit < 0)
+    ) {
+      throw new Error('导出费用预览缺少有效积分');
+    }
+
+    exportSelectedPath.value = outputPath;
+    exportSelectedDir.value = await dirname(outputPath);
+    exportFingerprints.value = fingerprints;
+    exportNeedDeduct.value = preview.needDeduct;
+    exportPreviewCredit.value = Number.isFinite(exportCredit) ? exportCredit : 0;
+    console.log('[export] selected output file:', outputPath);
     exportState.value = 'confirm';
     exportModalVisible.value = true;
   } catch (error) {
     console.error('[export] failed to select output file:', error);
-    systemMessage.error(error?.message || '选择导出文件失败');
+    systemMessage.error(error?.message || '准备导出失败');
+  } finally {
+    exportPreparing.value = false;
   }
 }
 
@@ -5266,6 +5386,9 @@ function closeExportModal() {
   }
 
   exportModalVisible.value = false;
+  exportFingerprints.value = null;
+  exportNeedDeduct.value = false;
+  exportPreviewCredit.value = 0;
   if (exportInterval) {
     clearInterval(exportInterval);
     exportInterval = null;
@@ -5282,6 +5405,10 @@ async function startExportProgress() {
     systemMessage.error('请先选择导出文件');
     return;
   }
+  if (!Array.isArray(exportFingerprints.value)) {
+    systemMessage.error('导出信息已失效，请重新选择导出文件');
+    return;
+  }
 
   exportRunning.value = true;
 
@@ -5289,15 +5416,19 @@ async function startExportProgress() {
   let unlistenProgress = null;
 
   try {
+    exportState.value = 'progress';
+    resetExportProgress();
+    exportStatus.value = '正在确认导出...';
     console.log('[export] recording project export before compose');
     const exportAllowed = await ensureProjectExportRecorded(
       exportSelectedPath.value,
+      exportFingerprints.value,
     );
     if (!exportAllowed) {
+      exportStatus.value = '导出请求未通过';
       return;
     }
 
-    exportState.value = 'progress';
     resetExportProgress();
 
     console.log('[export] flushing timeline offset before compose');
@@ -6494,6 +6625,7 @@ onBeforeUnmount(() => {
             'opacity-45 cursor-not-allowed hover:text-on-surface-variant hover:bg-surface-container-low/50 active:scale-100':
               !canExport ||
               exportRunning ||
+              exportPreparing ||
               projectPreviewRunning ||
               assetVideoPreprocessBusy,
           }"
@@ -6501,6 +6633,7 @@ onBeforeUnmount(() => {
           :disabled="
             !canExport ||
             exportRunning ||
+            exportPreparing ||
             projectPreviewRunning ||
             assetVideoPreprocessBusy
           "
@@ -6517,6 +6650,7 @@ onBeforeUnmount(() => {
             'opacity-45 cursor-not-allowed hover:text-on-surface-variant hover:bg-surface-container-low/50 active:scale-100':
               !canExport ||
               exportRunning ||
+              exportPreparing ||
               projectPreviewRunning ||
               assetVideoPreprocessBusy,
           }"
@@ -6524,14 +6658,15 @@ onBeforeUnmount(() => {
           :disabled="
             !canExport ||
             exportRunning ||
+            exportPreparing ||
             projectPreviewRunning ||
             assetVideoPreprocessBusy
           "
           @click="showExportConfirmation"
         >
-          <span class="text-[13px] uppercase tracking-wide whitespace-nowrap"
-            >导出</span
-          >
+          <span class="text-[13px] uppercase tracking-wide whitespace-nowrap">
+            {{ exportPreparing ? '准备中...' : '导出' }}
+          </span>
         </button>
         <AccountCenterMenu
           :refresh-key="userInfoRevision"
@@ -8173,12 +8308,12 @@ onBeforeUnmount(() => {
                     确认导出工程
                   </h3>
                   <p
-                    v-if="!activeProjectExported"
+                    v-if="exportNeedDeduct"
                     class="text-on-surface-variant text-sm"
                   >
                     本次导出将扣除
                     <span class="text-electric-blue font-bold">
-                      {{ activeTemplateExportCredit }} 积分
+                      {{ exportPreviewCredit }} 积分
                     </span>
                   </p>
                   <p
