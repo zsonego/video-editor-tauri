@@ -3589,6 +3589,23 @@ function clipMaterialType(clip) {
   return clip?.materialType === 'fixed' ? 'fixed' : 'variable';
 }
 
+function clipDisplayTitle(clip, index) {
+  const title = `片段${index + 1}`;
+  if (clipMaterialType(clip) !== 'variable') return title;
+
+  const orderedAreas = [...(clip?.areas ?? [])].sort(
+    (left, right) => Number(left.index || 0) - Number(right.index || 0),
+  );
+  for (const area of orderedAreas) {
+    const asset = videoAssetById.value.get(area.assetId);
+    if (!asset) continue;
+    const assetFileName =
+      fileName(asset.sourcePath || asset.filepath || asset.name) || asset.name;
+    if (assetFileName) return `${title}（${assetFileName}）`;
+  }
+  return title;
+}
+
 function clipPreviewAsset(clip) {
   if (clipMaterialType(clip) !== 'variable') return null;
   const orderedAreas = [...(clip?.areas ?? [])].sort(
@@ -4045,11 +4062,12 @@ onBeforeUnmount(() => {
             type="number"
             min="0"
             step="1"
+            :disabled="isPrImportedTemplate"
           />
         </div>
           </section>
 
-          <section class="side-section">
+          <section v-show="!isPrImportedTemplate" class="side-section">
         <div class="section-heading compact">
           <div>
             <span class="eyebrow">TRACKS</span>
@@ -4570,7 +4588,9 @@ onBeforeUnmount(() => {
             </div>
             <div class="clip-card-body">
               <div class="clip-title">
-                <strong>{{ clip.name }}</strong>
+                <strong :title="clipDisplayTitle(clip, index)">
+                  {{ clipDisplayTitle(clip, index) }}
+                </strong>
                 <button
                   type="button"
                   title="片段设置"
@@ -4638,7 +4658,11 @@ onBeforeUnmount(() => {
             <span
               v-for="(clip, index) in model.clips"
               :key="clip.id"
-              :class="{ active: selectedClipId === clip.id }"
+              :class="{
+                active:
+                  selectedClipId === clip.id ||
+                  sequencePlayheadClipId === clip.id,
+              }"
               :style="{ flexGrow: Math.max(Number(clip.duration), 800) }"
               @click="selectedClipId = clip.id"
               >{{ index + 1 }}</span
@@ -4699,7 +4723,7 @@ onBeforeUnmount(() => {
                 <span class="sequence-timeline-playhead-handle"></span>
                 <span class="sequence-timeline-playhead-line"></span>
               </button>
-              <div class="sequence-track-row">
+              <div v-show="false" class="sequence-track-row">
                 <div class="sequence-track-label">
                   <span>01</span><strong>固定转场层</strong>
                 </div>
@@ -4712,7 +4736,7 @@ onBeforeUnmount(() => {
                   </div>
                 </div>
               </div>
-              <div class="sequence-track-row">
+              <div v-show="false" class="sequence-track-row">
                 <div class="sequence-track-label">
                   <span>02</span><strong>素材层</strong>
                 </div>
@@ -7686,6 +7710,8 @@ label:focus-within {
 }
 
 .clip-title strong {
+  min-width: 0;
+  flex: 1;
   overflow: hidden;
   font-size: 12px;
   text-overflow: ellipsis;
