@@ -3,6 +3,10 @@ import { computed, onMounted, reactive, ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { getUserInfo, loginUser, resetPassword } from '../api/user';
 import { systemMessage } from '../utils/message';
+import {
+  clearCurrentPermissions,
+  setCurrentPermissions,
+} from '../utils/permissions';
 import backgroundVideo from '../assets/background.mp4';
 import boxImage from '../assets/box.png';
 import logoImage from '../assets/logo1.png';
@@ -193,6 +197,7 @@ function saveUserInfo(userInfo, identity) {
     renterName: userInfo?.renterName || identity?.tenantName || '',
   };
   localStorage.setItem('userInfo', JSON.stringify(storedUserInfo));
+  setCurrentPermissions(storedUserInfo.permissions, { persist: false });
 }
 
 function resetForcePasswordForm() {
@@ -386,6 +391,7 @@ async function submitLogin(extra = {}) {
 
       if (!userInfo.userId || !(userInfo.tenantId || userInfo.renterId)) {
         localStorage.removeItem('token');
+        clearCurrentPermissions();
         systemMessage.error('登录成功，但未获取到用户信息');
         return;
       }
@@ -421,6 +427,7 @@ async function submitLogin(extra = {}) {
     systemMessage.error(backendMessage || '登录失败');
   } catch (error) {
     localStorage.removeItem('token');
+    clearCurrentPermissions();
     systemMessage.error(error?.message || '登录请求失败');
   } finally {
     submitting.value = false;

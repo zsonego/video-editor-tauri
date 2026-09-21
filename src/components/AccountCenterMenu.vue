@@ -5,6 +5,10 @@ import { invoke } from '@tauri-apps/api/core';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { getUserInfo, logoutUser, resetPassword } from '../api/user';
 import { systemMessage } from '../utils/message';
+import {
+  canUseTemplateFactory,
+  setCurrentPermissions,
+} from '../utils/permissions';
 import AppIcon from './AppIcon.vue';
 
 const props = defineProps({
@@ -106,6 +110,7 @@ function syncStoredUserInfo(nextProfile) {
     }
   }
   localStorage.setItem('userInfo', JSON.stringify(merged));
+  setCurrentPermissions(nextProfile.permissions, { persist: false });
   profileRevision.value += 1;
 }
 
@@ -285,10 +290,12 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', closeMenu));
         <AppIcon name="lock_reset" :size="18" /><span>修改密码</span>
       </button>
       <div class="account-menu-divider"></div>
-      <button class="account-menu-item" type="button" @click="showMyTemplates">
-        <AppIcon name="video_library" :size="18" /><span>我的模板</span>
-      </button>
-      <div class="account-menu-divider"></div>
+      <template v-if="canUseTemplateFactory">
+        <button class="account-menu-item" type="button" @click="showMyTemplates">
+          <AppIcon name="video_library" :size="18" /><span>我的模板</span>
+        </button>
+        <div class="account-menu-divider"></div>
+      </template>
       <button class="account-menu-item" type="button" @click="showHelp">
         <AppIcon name="help_center" :size="18" /><span>帮助中心</span>
       </button>

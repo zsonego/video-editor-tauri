@@ -18,6 +18,8 @@ const props = defineProps({
   videoPreviewLoading: { type: Boolean, default: false },
   applyLoading: { type: Boolean, default: false },
   propertiesLocked: { type: Boolean, default: false },
+  projectReadOnly: { type: Boolean, default: false },
+  editAgainLoading: { type: Boolean, default: false },
   materialResetLoading: { type: Boolean, default: false },
 });
 
@@ -31,11 +33,14 @@ const emit = defineEmits([
   'restore-request',
   'apply-request',
   'material-reset-request',
+  'edit-again-request',
   'layout-change',
 ]);
 
 const CANVAS_WIDTH = 960;
 const CANVAS_HEIGHT = 540;
+const VIDEO_FRAME_RENDER_TIMEOUT = 2000;
+const VIDEO_FRAME_TIME_TOLERANCE = 0.15;
 const CORNER_ROTATION_OFFSET = 15;
 const CORNER_ROTATION_HIT_SIZE = 22;
 const ROTATE_CURSOR_PATHS = [
@@ -79,6 +84,7 @@ let videoElement = null;
 let videoBaseScale = 1;
 let animationFrameId = 0;
 let sourceRevision = 0;
+let pendingFrameRevealCleanup = null;
 let beautyPreviewRevision = 0;
 let rotationLastVisualAngle = null;
 let activeLutStyle = 'none';
@@ -402,7 +408,146 @@ function renderVideoFrame() {
   animationFrameId = requestAnimationFrame(renderVideoFrame);
 }
 
+function cancelPendingFrameReveal() {
+  pendingFrameRevealCleanup?.();
+  pendingFrameRevealCleanup = null;
+}
+
+// 暂停的视频 seek 后不会持续触发 Canvas 重绘，需要等目标帧解码完成再绘制。
+function revealVideoFrameAt(video, targetTime, revision) {
+  cancelPendingFrameReveal();
+  if (!video || video !== videoElement || revision !== sourceRevision) return;
+
+  const duration = Number.isFinite(video.duration) ? video.duration : 0;
+  const nextTime = duration
+    ? Math.min(duration, Math.max(0, Number(targetTime) || 0))
+    : Math.max(0, Number(targetTime) || 0);
+  let finished = false;
+  let fallbackTimer = null;
+  let frameCallbackId = null;
+  let firstAnimationFrameId = null;
+  let secondAnimationFrameId = null;
+  let seekCompleted = false;
+  let targetFramePresented = false;
+
+  const isCurrentSource = () =>
+    video === videoElement && revision === sourceRevision;
+
+  const renderCurrentFrame = () => {
+    if (!isCurrentSource()) return;
+    fabricCanvas?.requestRenderAll();
+    emitTimeUpdate();
+  };
+
+  const cleanup = () => {
+    video.removeEventListener('seeked', onSeeked);
+    if (fallbackTimer !== null) {
+      window.clearTimeout(fallbackTimer);
+      fallbackTimer = null;
+    }
+    if (firstAnimationFrameId !== null) {
+      cancelAnimationFrame(firstAnimationFrameId);
+      firstAnimationFrameId = null;
+    }
+    if (secondAnimationFrameId !== null) {
+      cancelAnimationFrame(secondAnimationFrameId);
+      secondAnimationFrameId = null;
+    }
+    if (
+      frameCallbackId !== null &&
+      typeof video.cancelVideoFrameCallback === 'function'
+    ) {
+      video.cancelVideoFrameCallback(frameCallbackId);
+      frameCallbackId = null;
+    }
+  };
+
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    cleanup();
+    if (pendingFrameRevealCleanup === cancel) {
+      pendingFrameRevealCleanup = null;
+    }
+    renderCurrentFrame();
+  };
+
+  const cancel = () => {
+    if (finished) return;
+    finished = true;
+    cleanup();
+  };
+
+  const finishWhenReady = () => {
+    if (seekCompleted && targetFramePresented) finish();
+  };
+
+  const watchTargetFrame = () => {
+    if (typeof video.requestVideoFrameCallback !== 'function') return;
+    frameCallbackId = video.requestVideoFrameCallback((_now, metadata) => {
+      frameCallbackId = null;
+      if (finished || !isCurrentSource()) {
+        cancel();
+        return;
+      }
+      const mediaTime = Number(metadata?.mediaTime);
+      if (
+        !Number.isFinite(mediaTime) ||
+        Math.abs(mediaTime - nextTime) <= VIDEO_FRAME_TIME_TOLERANCE
+      ) {
+        targetFramePresented = true;
+        finishWhenReady();
+        return;
+      }
+      watchTargetFrame();
+    });
+  };
+
+  const renderAfterBrowserPaint = () => {
+    firstAnimationFrameId = requestAnimationFrame(() => {
+      firstAnimationFrameId = null;
+      secondAnimationFrameId = requestAnimationFrame(() => {
+        secondAnimationFrameId = null;
+        targetFramePresented = true;
+        finishWhenReady();
+      });
+    });
+  };
+
+  function onSeeked() {
+    seekCompleted = true;
+    // 部分 WebView 在 seeked 时已经解码完成，先重绘一次缩短黑屏时间。
+    renderCurrentFrame();
+    if (typeof video.requestVideoFrameCallback !== 'function') {
+      renderAfterBrowserPaint();
+      return;
+    }
+    finishWhenReady();
+  }
+
+  pendingFrameRevealCleanup = cancel;
+
+  const currentTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+  if (video.readyState >= 2 && Math.abs(currentTime - nextTime) < 0.001) {
+    seekCompleted = true;
+    renderCurrentFrame();
+    renderAfterBrowserPaint();
+    fallbackTimer = window.setTimeout(finish, VIDEO_FRAME_RENDER_TIMEOUT);
+    return;
+  }
+
+  video.addEventListener('seeked', onSeeked, { once: true });
+  try {
+    watchTargetFrame();
+    video.currentTime = nextTime;
+    fallbackTimer = window.setTimeout(finish, VIDEO_FRAME_RENDER_TIMEOUT);
+  } catch {
+    finish();
+  }
+}
+
 function onVideoPlay() {
+  cancelPendingFrameReveal();
   isPlaying.value = true;
   emitPlaybackState();
   renderVideoFrame();
@@ -418,6 +563,7 @@ function onVideoPause() {
 
 function disposeVideo() {
   sourceRevision += 1;
+  cancelPendingFrameReveal();
   rotationLastVisualAngle = null;
   clearBeautyPreview();
   cancelAnimationFrame(animationFrameId);
@@ -451,13 +597,10 @@ function loadSource(source) {
   video.crossOrigin = 'anonymous';
   videoElement = video;
   video.addEventListener(
-    'loadedmetadata',
+    'loadeddata',
     () => addVideoToCanvas(video, revision),
     { once: true },
   );
-  video.addEventListener('loadeddata', () => fabricCanvas?.requestRenderAll(), {
-    once: true,
-  });
   video.addEventListener('play', onVideoPlay);
   video.addEventListener('pause', onVideoPause);
   video.addEventListener('ended', onVideoPause);
@@ -548,13 +691,7 @@ function seekTo(value) {
   const nextTime = duration
     ? Math.min(duration, Math.max(0, Number(value) || 0))
     : Math.max(0, Number(value) || 0);
-  try {
-    videoElement.currentTime = nextTime;
-    fabricCanvas?.requestRenderAll();
-    emitTimeUpdate();
-  } catch {
-    // 元数据就绪后由父组件再次同步时间。
-  }
+  revealVideoFrameAt(videoElement, nextTime, sourceRevision);
 }
 
 function getCurrentTime() {
@@ -824,7 +961,7 @@ defineExpose({
           <button
             class="material-reset-button"
             type="button"
-            :disabled="materialResetLoading"
+            :disabled="materialResetLoading || projectReadOnly"
             @click="materialResetConfirmVisible = true"
           >
             {{ materialResetLoading ? '重置中…' : '素材重置' }}
@@ -1188,7 +1325,20 @@ defineExpose({
             </div>
           </section>
         </div>
-        <div v-if="!propertiesLocked" class="properties-footer">
+        <div
+          v-if="projectReadOnly"
+          class="properties-footer properties-footer-single"
+        >
+          <button
+            class="property-footer-button property-footer-button-primary"
+            type="button"
+            :disabled="editAgainLoading"
+            @click="emit('edit-again-request')"
+          >
+            {{ editAgainLoading ? '处理中…' : '再次编辑' }}
+          </button>
+        </div>
+        <div v-else-if="!propertiesLocked" class="properties-footer">
           <button
             class="property-footer-button"
             type="button"
@@ -1673,6 +1823,10 @@ defineExpose({
   border-top: 1px solid #3a3a3a;
   background: #242424;
   box-shadow: 0 -5px 14px rgba(0, 0, 0, 0.18);
+}
+
+.properties-footer-single {
+  grid-template-columns: 1fr;
 }
 
 .property-footer-button {

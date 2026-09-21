@@ -855,23 +855,41 @@ struct ComposerBeautyFrameParams {
     stabilization: bool,
     one_click_beauty: bool,
     #[serde(
+        rename = "clipStartTime",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    clip_start_time: Option<serde_json::Value>,
+    #[serde(
         rename = "clipDuration",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     clip_duration: Option<serde_json::Value>,
     #[serde(
-        rename = "filterEffect",
+        rename = "startFilterEffect",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    filter_effect: Option<String>,
+    start_filter_effect: Option<String>,
     #[serde(
-        rename = "filterDuration",
+        rename = "startFilterDuration",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    filter_duration: Option<serde_json::Value>,
+    start_filter_duration: Option<serde_json::Value>,
+    #[serde(
+        rename = "endFilterEffect",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    end_filter_effect: Option<String>,
+    #[serde(
+        rename = "endFilterDuration",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    end_filter_duration: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -2728,7 +2746,7 @@ fn file_content_hash(path: &Path) -> Result<String, String> {
 
 fn sha256_fingerprint(reader: &mut impl Read) -> io::Result<String> {
     let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
         let read_count = reader.read(&mut buffer)?;
         if read_count == 0 {
@@ -2746,13 +2764,54 @@ fn sha256_fingerprint(reader: &mut impl Read) -> io::Result<String> {
     Ok(fingerprint)
 }
 
+fn sha256_fingerprints_for_paths(paths: &[PathBuf]) -> Vec<String> {
+    if paths.is_empty() {
+        return Vec::new();
+    }
+
+    const MAX_FINGERPRINT_WORKERS: usize = 4;
+    let worker_count = thread::available_parallelism()
+        .map(|parallelism| parallelism.get())
+        .unwrap_or(1)
+        .min(MAX_FINGERPRINT_WORKERS)
+        .min(paths.len());
+    let mut fingerprints = vec![String::new(); paths.len()];
+
+    thread::scope(|scope| {
+        let mut workers = Vec::with_capacity(worker_count);
+        for worker_index in 0..worker_count {
+            workers.push(scope.spawn(move || {
+                let mut results = Vec::new();
+                for path_index in (worker_index..paths.len()).step_by(worker_count) {
+                    let fingerprint = fs::File::open(&paths[path_index])
+                        .and_then(|mut file| sha256_fingerprint(&mut file))
+                        .unwrap_or_default();
+                    results.push((path_index, fingerprint));
+                }
+                results
+            }));
+        }
+
+        for worker in workers {
+            if let Ok(results) = worker.join() {
+                for (path_index, fingerprint) in results {
+                    fingerprints[path_index] = fingerprint;
+                }
+            }
+        }
+    });
+
+    fingerprints
+}
+
 fn asset_fingerprints_from_xml(
     template_xml: &str,
     template_dir: &Path,
     assets_dir: &Path,
 ) -> Vec<ProjectAssetFingerprint> {
-    let mut hashes_by_path = HashMap::<PathBuf, String>::new();
-    let mut fingerprints = Vec::new();
+    let mut path_indices = HashMap::<PathBuf, usize>::new();
+    let mut unique_paths = Vec::<PathBuf>::new();
+    let mut assets = Vec::<(String, Option<usize>)>::new();
     for (_, default_assets) in find_xml_element_blocks(template_xml, "default-asset") {
         for asset_tag in find_xml_start_tags(&default_assets, "asset") {
             let Some(material_key) = xml_attribute_value(&asset_tag, "id") else {
@@ -2760,27 +2819,34 @@ fn asset_fingerprints_from_xml(
             };
             let filepath = xml_attribute_value(&asset_tag, "filepath").unwrap_or_default();
             let resolved = resolve_template_resource_filepath(template_dir, assets_dir, &filepath);
-            let fingerprint = fs::canonicalize(resolved)
+            let path_index = fs::canonicalize(resolved)
                 .ok()
                 .filter(|path| path.is_file())
                 .map(|path| {
-                    hashes_by_path
-                        .entry(path.clone())
-                        .or_insert_with(|| {
-                            fs::File::open(&path)
-                                .and_then(|mut file| sha256_fingerprint(&mut file))
-                                .unwrap_or_default()
-                        })
-                        .clone()
-                })
-                .unwrap_or_default();
-            fingerprints.push(ProjectAssetFingerprint {
-                material_key,
-                fingerprint,
-            });
+                    if let Some(path_index) = path_indices.get(&path) {
+                        *path_index
+                    } else {
+                        let path_index = unique_paths.len();
+                        unique_paths.push(path.clone());
+                        path_indices.insert(path, path_index);
+                        path_index
+                    }
+                });
+            assets.push((material_key, path_index));
         }
     }
-    fingerprints
+
+    let unique_fingerprints = sha256_fingerprints_for_paths(&unique_paths);
+    assets
+        .into_iter()
+        .map(|(material_key, path_index)| ProjectAssetFingerprint {
+            material_key,
+            fingerprint: path_index
+                .and_then(|index| unique_fingerprints.get(index))
+                .cloned()
+                .unwrap_or_default(),
+        })
+        .collect()
 }
 
 fn project_asset_fingerprints(project_dir: &Path) -> Result<Vec<ProjectAssetFingerprint>, String> {
@@ -2896,6 +2962,138 @@ fn remove_xml_attribute(tag: &str, attribute: &str) -> String {
     }
 
     format!("{}{}", &tag[..removal_start], &tag[value_end..])
+}
+
+fn remove_attribute_from_xml_start_tags(xml: &str, tag_name: &str, attribute: &str) -> String {
+    let open_pattern = format!("<{tag_name}");
+    let mut output = String::with_capacity(xml.len());
+    let mut search_start = 0;
+
+    while let Some(relative_start) = xml[search_start..].find(&open_pattern) {
+        let tag_start = search_start + relative_start;
+        let after_name = xml[tag_start + open_pattern.len()..].chars().next();
+        if !is_xml_name_boundary(after_name) {
+            output.push_str(&xml[search_start..tag_start + open_pattern.len()]);
+            search_start = tag_start + open_pattern.len();
+            continue;
+        }
+
+        let Some(relative_tag_end) = xml[tag_start..].find('>') else {
+            break;
+        };
+        let tag_end = tag_start + relative_tag_end + 1;
+        output.push_str(&xml[search_start..tag_start]);
+        output.push_str(&remove_xml_attribute(&xml[tag_start..tag_end], attribute));
+        search_start = tag_end;
+    }
+
+    output.push_str(&xml[search_start..]);
+    output
+}
+
+fn remove_all_xml_elements(xml: &str, element_name: &str) -> Result<String, String> {
+    let opening_prefix = format!("<{element_name}");
+    let closing_tag = format!("</{element_name}>");
+    let mut output = xml.to_string();
+    let mut search_start = 0;
+
+    while let Some(relative_start) = output[search_start..].find(&opening_prefix) {
+        let element_start = search_start + relative_start;
+        let after_name = output[element_start + opening_prefix.len()..]
+            .chars()
+            .next();
+        if !is_xml_name_boundary(after_name) {
+            search_start = element_start + opening_prefix.len();
+            continue;
+        }
+
+        let relative_open_end = output[element_start..]
+            .find('>')
+            .ok_or_else(|| format!("XML 中的 {element_name} 节点未正确闭合"))?;
+        let open_end = element_start + relative_open_end + 1;
+        let element_end = if output[element_start..open_end].trim_end().ends_with("/>") {
+            open_end
+        } else {
+            let relative_close_start = output[open_end..]
+                .find(&closing_tag)
+                .ok_or_else(|| format!("XML 中的 {element_name} 节点未正确闭合"))?;
+            open_end + relative_close_start + closing_tag.len()
+        };
+
+        let line_start = output[..element_start]
+            .rfind('\n')
+            .map(|position| position + 1)
+            .unwrap_or(0);
+        let line_is_indented = output[line_start..element_start]
+            .chars()
+            .all(|character| matches!(character, ' ' | '\t' | '\r'));
+        let removal_start = if line_is_indented {
+            line_start
+        } else {
+            element_start
+        };
+        let mut removal_end = element_end;
+        while matches!(output.as_bytes().get(removal_end), Some(b' ' | b'\t')) {
+            removal_end += 1;
+        }
+        if output.as_bytes().get(removal_end) == Some(&b'\r') {
+            removal_end += 1;
+        }
+        if output.as_bytes().get(removal_end) == Some(&b'\n') {
+            removal_end += 1;
+        }
+        output.replace_range(removal_start..removal_end, "");
+        search_start = removal_start;
+    }
+
+    Ok(output)
+}
+
+fn clear_project_generatepaths(xml: &str) -> Result<String, String> {
+    let xml = remove_all_xml_elements(xml, "generatepath")?;
+    Ok(remove_attribute_from_xml_start_tags(
+        &xml,
+        "asset",
+        "generatepath",
+    ))
+}
+
+fn update_project_root_identity(
+    project_file_xml: &str,
+    project_id: &str,
+    project_name: &str,
+) -> Result<String, String> {
+    let open_pattern = "<project";
+    let mut search_start = 0;
+
+    while let Some(relative_start) = project_file_xml[search_start..].find(open_pattern) {
+        let tag_start = search_start + relative_start;
+        let after_name = project_file_xml[tag_start + open_pattern.len()..]
+            .chars()
+            .next();
+        if !is_xml_name_boundary(after_name) {
+            search_start = tag_start + open_pattern.len();
+            continue;
+        }
+        let relative_tag_end = project_file_xml[tag_start..]
+            .find('>')
+            .ok_or_else(|| "projectFile.xml 中的 project 节点未正确闭合".to_string())?;
+        let tag_end = tag_start + relative_tag_end + 1;
+        let tag = replace_or_insert_xml_attribute(
+            &project_file_xml[tag_start..tag_end],
+            "id",
+            project_id,
+        );
+        let tag = replace_or_insert_xml_attribute(&tag, "name", project_name);
+        return Ok(format!(
+            "{}{}{}",
+            &project_file_xml[..tag_start],
+            tag,
+            &project_file_xml[tag_end..]
+        ));
+    }
+
+    Err("projectFile.xml 缺少 project 节点".to_string())
 }
 
 fn find_xml_attribute_position(tag: &str, attribute: &str) -> Option<usize> {
@@ -5684,6 +5882,94 @@ fn create_project_workspace(
 }
 
 #[tauri::command]
+fn clone_project_workspace(
+    source_project_dir: String,
+    template_id: String,
+    new_project_id: String,
+    new_project_name: String,
+) -> Result<LocalProjectWorkspace, String> {
+    let template_id = template_id.trim();
+    let new_project_id = new_project_id.trim();
+    let new_project_name = new_project_name.trim();
+    if template_id.is_empty() || new_project_id.is_empty() || new_project_name.is_empty() {
+        return Err("新工程 ID、名称或模板 ID 不能为空".to_string());
+    }
+
+    let (_, project_root) = ensure_aicut_dirs()?;
+    let project_root = fs::canonicalize(project_root).map_err(|error| error.to_string())?;
+    let source_project_dir =
+        fs::canonicalize(source_project_dir).map_err(|error| format!("读取原工程失败: {error}"))?;
+    if !source_project_dir.starts_with(&project_root) || !source_project_dir.is_dir() {
+        return Err("原工程目录无效".to_string());
+    }
+
+    let workspace_id = format!(
+        "{}-{}",
+        sanitize_name(template_id),
+        sanitize_name(new_project_id)
+    );
+    let target_dir = project_root.join(&workspace_id);
+    if target_dir.is_dir() {
+        return read_project_workspace(template_id.to_string(), new_project_id.to_string());
+    }
+    if target_dir.exists() {
+        return Err("新工程目录已存在且不是文件夹".to_string());
+    }
+
+    let source_template_path = source_project_dir.join("template.xml");
+    let source_project_file_path = source_project_dir.join("projectFile.xml");
+    if !source_template_path.is_file() || !source_project_file_path.is_file() {
+        return Err("原工程缺少 template.xml 或 projectFile.xml".to_string());
+    }
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos();
+    let temporary_dir = project_root.join(format!(
+        ".{workspace_id}.copy-{}-{timestamp}",
+        std::process::id()
+    ));
+    fs::create_dir(&temporary_dir).map_err(|error| format!("创建临时工程目录失败: {error}"))?;
+
+    let copy_result = (|| -> Result<(), String> {
+        let template_xml = fs::read_to_string(&source_template_path)
+            .map_err(|error| format!("读取原工程 template.xml 失败: {error}"))?;
+        let project_file_xml = fs::read_to_string(&source_project_file_path)
+            .map_err(|error| format!("读取原工程 projectFile.xml 失败: {error}"))?;
+        let template_xml = clear_project_generatepaths(&template_xml)?;
+        let project_file_xml = clear_project_generatepaths(&project_file_xml)?;
+        let project_file_xml =
+            update_project_root_identity(&project_file_xml, &workspace_id, new_project_name)?;
+
+        fs::write(temporary_dir.join("template.xml"), template_xml)
+            .map_err(|error| format!("写入副本 template.xml 失败: {error}"))?;
+        fs::write(temporary_dir.join("projectFile.xml"), project_file_xml)
+            .map_err(|error| format!("写入副本 projectFile.xml 失败: {error}"))?;
+
+        let source_title_path = source_project_dir.join("title.png");
+        if source_title_path.is_file() {
+            fs::copy(source_title_path, temporary_dir.join("title.png"))
+                .map_err(|error| format!("复制工程封面失败: {error}"))?;
+        }
+
+        fs::rename(&temporary_dir, &target_dir)
+            .map_err(|error| format!("保存副本工程目录失败: {error}"))?;
+        Ok(())
+    })();
+
+    if let Err(error) = copy_result {
+        let _ = fs::remove_dir_all(&temporary_dir);
+        if target_dir.is_dir() {
+            return read_project_workspace(template_id.to_string(), new_project_id.to_string());
+        }
+        return Err(error);
+    }
+
+    read_project_workspace(template_id.to_string(), new_project_id.to_string())
+}
+
+#[tauri::command]
 async fn get_project_asset_fingerprints(
     project_dir: String,
 ) -> Result<Vec<ProjectAssetFingerprint>, String> {
@@ -7638,6 +7924,7 @@ pub fn run() {
             ensure_default_output_dir,
             download_help_guide,
             create_project_workspace,
+            clone_project_workspace,
             get_project_asset_fingerprints,
             read_project_workspace,
             save_project_asset,
@@ -7748,28 +8035,42 @@ mod tests {
     }
 
     #[test]
-    fn serializes_beauty_video_fade_params() {
+    fn serializes_beauty_video_transition_params() {
         let params = ComposerBeautyFrameParams {
+            clip_start_time: Some(serde_json::json!(3200)),
             clip_duration: Some(serde_json::json!(1320)),
-            filter_effect: Some("Fade".to_string()),
-            filter_duration: Some(serde_json::json!(250)),
+            start_filter_effect: Some("Fade".to_string()),
+            start_filter_duration: Some(serde_json::json!(1000)),
+            end_filter_effect: Some("Slide-Left".to_string()),
+            end_filter_duration: Some(serde_json::json!(500)),
             ..Default::default()
         };
-        let value = serde_json::to_value(params).expect("serialize fade params");
+        let value = serde_json::to_value(params).expect("serialize transition params");
+        assert_eq!(value["clipStartTime"], 3200);
         assert_eq!(value["clipDuration"], 1320);
-        assert_eq!(value["filterEffect"], "Fade");
-        assert_eq!(value["filterDuration"], 250);
+        assert_eq!(value["startFilterEffect"], "Fade");
+        assert_eq!(value["startFilterDuration"], 1000);
+        assert_eq!(value["endFilterEffect"], "Slide-Left");
+        assert_eq!(value["endFilterDuration"], 500);
+        assert!(value.get("filterEffect").is_none());
+        assert!(value.get("filterDuration").is_none());
 
-        let no_fade = ComposerBeautyFrameParams {
+        let no_transition = ComposerBeautyFrameParams {
+            clip_start_time: Some(serde_json::json!(0)),
             clip_duration: Some(serde_json::json!("")),
-            filter_effect: Some(String::new()),
-            filter_duration: Some(serde_json::json!("")),
+            start_filter_effect: Some(String::new()),
+            start_filter_duration: Some(serde_json::json!(0)),
+            end_filter_effect: Some(String::new()),
+            end_filter_duration: Some(serde_json::json!(0)),
             ..Default::default()
         };
-        let value = serde_json::to_value(no_fade).expect("serialize empty fade params");
+        let value = serde_json::to_value(no_transition).expect("serialize empty transition params");
+        assert_eq!(value["clipStartTime"], 0);
         assert_eq!(value["clipDuration"], "");
-        assert_eq!(value["filterEffect"], "");
-        assert_eq!(value["filterDuration"], "");
+        assert_eq!(value["startFilterEffect"], "");
+        assert_eq!(value["startFilterDuration"], 0);
+        assert_eq!(value["endFilterEffect"], "");
+        assert_eq!(value["endFilterDuration"], 0);
     }
 
     #[test]
@@ -7794,23 +8095,29 @@ mod tests {
         let assets_dir = template_dir.join("assets");
         fs::create_dir_all(&assets_dir).expect("create test assets");
         fs::write(assets_dir.join("sample.mp4"), b"abc").expect("write test asset");
+        fs::write(assets_dir.join("second.mp4"), b"xyz").expect("write second test asset");
         let xml = r#"<template><default-asset>
             <asset id="first" filepath="template/assets/sample.mp4" />
+            <asset id="unique" filepath="template/assets/second.mp4" />
             <asset id="second" filepath="template/assets/sample.mp4" />
             <asset id="missing" filepath="template/assets/missing.mp4" />
         </default-asset></template>"#;
 
         let fingerprints = asset_fingerprints_from_xml(xml, &template_dir, &assets_dir);
-        assert_eq!(fingerprints.len(), 3);
+        assert_eq!(fingerprints.len(), 4);
         assert_eq!(fingerprints[0].material_key, "first");
-        assert_eq!(fingerprints[1].material_key, "second");
-        assert_eq!(fingerprints[0].fingerprint, fingerprints[1].fingerprint);
+        assert_eq!(fingerprints[1].material_key, "unique");
+        assert_eq!(fingerprints[2].material_key, "second");
+        assert_eq!(fingerprints[0].fingerprint, fingerprints[2].fingerprint);
         assert_eq!(
             fingerprints[0].fingerprint,
             "ba7816bf8f01cfea414140de5dae2223"
         );
-        assert_eq!(fingerprints[2].material_key, "missing");
-        assert_eq!(fingerprints[2].fingerprint, "");
+        let expected_unique =
+            sha256_fingerprint(&mut io::Cursor::new(b"xyz")).expect("hash unique content");
+        assert_eq!(fingerprints[1].fingerprint, expected_unique);
+        assert_eq!(fingerprints[3].material_key, "missing");
+        assert_eq!(fingerprints[3].fingerprint, "");
         fs::remove_dir_all(&template_dir).expect("remove test assets");
     }
 
@@ -7924,6 +8231,35 @@ mod tests {
             .expect("remove generated path property");
         assert!(!reset.contains("<generatepath>"));
         assert!(reset.contains("<saturation>122.0</saturation>"));
+    }
+
+    #[test]
+    fn clears_all_project_generatepaths_without_removing_other_properties() {
+        let xml = r#"<xmeml>
+    <asset id="asset-a" filepath="/assets/a.mp4" generatepath="/generated/a.mp4" />
+    <area asset-id="asset-a">
+        <property>
+            <whiteness>0.5</whiteness>
+            <generatepath>/generated/a.mp4</generatepath>
+        </property>
+    </area>
+</xmeml>"#;
+
+        let cleared = clear_project_generatepaths(xml).expect("clear generate paths");
+
+        assert!(!cleared.contains("generatepath"));
+        assert!(cleared.contains("filepath=\"/assets/a.mp4\""));
+        assert!(cleared.contains("<whiteness>0.5</whiteness>"));
+    }
+
+    #[test]
+    fn updates_copied_project_root_identity() {
+        let xml = r#"<xmeml><project id="26-638" name="原工程"><meta /></project></xmeml>"#;
+        let updated = update_project_root_identity(xml, "26-639", "旅拍丽江假期_副本")
+            .expect("update project identity");
+
+        assert!(updated.contains(r#"<project id="26-639" name="旅拍丽江假期_副本">"#));
+        assert!(!updated.contains("26-638"));
     }
 
     #[test]

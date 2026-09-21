@@ -18,6 +18,7 @@ import {
 } from '@tauri-apps/plugin-dialog';
 import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener';
 import {
+  copyProject,
   createProject,
   deleteProjects,
   downloadProjectCover,
@@ -39,6 +40,7 @@ import {
   getTemplates,
 } from '../api/template';
 import { systemMessage } from '../utils/message';
+import { canUseTemplateFactory } from '../utils/permissions';
 import dingAudio from '../assets/ding.mp3';
 import hotImage from '../assets/hot.png';
 import logoImage from '../assets/logo.png';
@@ -55,8 +57,8 @@ const VideoTransformer = defineAsyncComponent(
 const emit = defineEmits(['logout']);
 const route = useRoute();
 const router = useRouter();
-const CREATE_TEMPLATE_ENTRY_VISIBLE = true;
 const GLOBAL_TIMELINE_VISIBLE = true;
+const PROJECT_COPY_RECOVERY_STORAGE_KEY = 'aicut-pending-project-copy';
 
 // 模板列表、收藏列表及请求状态。
 const categories = ref([]);
@@ -105,6 +107,8 @@ const activeTemplateDemoSource = ref('');
 const activeProjectDir = ref('');
 const activeBackendProjectId = ref('');
 const activeProjectExported = ref(false);
+const activeProjectHasPaid = ref(false);
+const projectCopying = ref(false);
 const editingFromDraftLibrary = ref(false);
 const favoriteTemplateIds = ref(new Set());
 const favoriteUpdatingIds = ref(new Set());
@@ -172,6 +176,7 @@ const trackVolumePopupStyle = reactive({
 const trackVolumeProgressRef = ref(null);
 const trackVolumeDragging = ref(false);
 function toggleAudioDropdown(clipId, event) {
+  if (activeProjectReadOnly.value) return;
   const willOpen = activeAudioDropdownClipId.value !== clipId;
   activeAudioDropdownClipId.value = willOpen ? clipId : '';
   hoveredAudioTextName.value = '';
@@ -202,12 +207,14 @@ function toggleAudioDropdown(clipId, event) {
 }
 
 function selectDemoAudio(clipId, audioName) {
+  if (activeProjectReadOnly.value) return;
   demoAudioSelections[clipId] = audioName;
   activeAudioDropdownClipId.value = '';
   hoveredAudioTextName.value = '';
 }
 
 function toggleTrackVolumePopup(trackId, event) {
+  if (activeProjectReadOnly.value) return;
   const willOpen = activeTrackVolumeId.value !== trackId;
   activeTrackVolumeId.value = willOpen ? trackId : '';
   activeAudioDropdownClipId.value = '';
@@ -236,6 +243,7 @@ function toggleTrackVolumePopup(trackId, event) {
 }
 
 function adjustTrackVolume(trackId, change) {
+  if (activeProjectReadOnly.value) return;
   const currentVolume = Number(trackVolumes[trackId]) || 0;
   trackVolumes[trackId] = Math.min(100, Math.max(0, currentVolume + change));
 }
@@ -253,6 +261,7 @@ function setTrackVolumeFromClientY(clientY) {
 }
 
 function startTrackVolumeDrag(event) {
+  if (activeProjectReadOnly.value) return;
   event.preventDefault();
   event.stopPropagation();
   event.currentTarget.setPointerCapture?.(event.pointerId);
@@ -442,6 +451,7 @@ let pendingMainVideoSeekTime = null;
 let beautyPreviewTimer = null;
 let pendingBeautyPreview = null;
 let beautyPreviewGeneration = 0;
+let pendingProjectCopyRecovery = null;
 const canceledTemplateDownloadIds = new Set();
 const VIDEO_FRAME_REVEAL_TIME = 0.001;
 const VIDEO_FRAME_REVEAL_TIMEOUT = 2000;
@@ -1016,8 +1026,9 @@ const selectedVideoGeneratePath = computed(() =>
   ),
 );
 const selectedVideoPropertiesLocked = computed(
-  () => Boolean(selectedVideoGeneratePath.value),
+  () => activeProjectHasPaid.value || Boolean(selectedVideoGeneratePath.value),
 );
+const activeProjectReadOnly = computed(() => activeProjectHasPaid.value);
 
 // 页面级导航和主视图切换。
 function statusMeta(status) {
@@ -1587,6 +1598,48 @@ function normalizeBackendId(value) {
   return Number.isFinite(numericValue) ? numericValue : value;
 }
 
+function readPendingProjectCopy(sourceProjectId, templateId) {
+  try {
+    const pending =
+      pendingProjectCopyRecovery ||
+      JSON.parse(
+        localStorage.getItem(PROJECT_COPY_RECOVERY_STORAGE_KEY) || 'null',
+      );
+    if (
+      String(pending?.sourceProjectId || '') === String(sourceProjectId || '') &&
+      String(pending?.templateId || '') === String(templateId || '') &&
+      pending?.newProjectId &&
+      pending?.newProjectName
+    ) {
+      return pending;
+    }
+  } catch (error) {
+    console.error('[project-copy] recovery state read failed:', error);
+  }
+  return null;
+}
+
+function savePendingProjectCopy(pending) {
+  pendingProjectCopyRecovery = pending;
+  try {
+    localStorage.setItem(
+      PROJECT_COPY_RECOVERY_STORAGE_KEY,
+      JSON.stringify(pending),
+    );
+  } catch (error) {
+    console.error('[project-copy] recovery state save failed:', error);
+  }
+}
+
+function clearPendingProjectCopy() {
+  pendingProjectCopyRecovery = null;
+  try {
+    localStorage.removeItem(PROJECT_COPY_RECOVERY_STORAGE_KEY);
+  } catch (error) {
+    console.error('[project-copy] recovery state clear failed:', error);
+  }
+}
+
 function syncProjectTemplateUpdate(payload) {
   projectUpdateInFlight = projectUpdateInFlight.then(async () => {
     try {
@@ -1605,6 +1658,7 @@ function syncProjectTemplateUpdate(payload) {
 }
 
 function scheduleProjectTemplateUpdate(projectXml) {
+  if (activeProjectReadOnly.value) return;
   if (!projectXml || !activeBackendProjectId.value || !activeTemplateId.value) {
     return;
   }
@@ -1693,6 +1747,7 @@ async function createBackendProjectIfNeeded() {
       throw new Error('创建工程成功，但未返回工程 ID');
     }
     activeProjectExported.value = false;
+    activeProjectHasPaid.value = false;
     console.log('[project] backend project created', {
       projectId: activeBackendProjectId.value,
     });
@@ -2123,12 +2178,22 @@ function findTemplateAreaMatchesFromDom(xmlContent, assetId) {
   const clips = Array.from(xml.querySelectorAll('clips'));
   for (const clipsElement of clips) {
     const clipElements = getDirectChildElements(clipsElement, 'clip');
-    for (const clip of clipElements) {
+    for (const [clipIndex, clip] of clipElements.entries()) {
       const clipStarttime = getDirectChildText(clip, ['starttime', 'start']);
       const clipDuration = getDirectChildText(clip, 'duration');
       const filter = getDirectChildElements(clip, 'filter')[0];
       const filterEffect = filter ? getDirectChildText(filter, 'effect') : '';
       const filterDuration = filter ? getDirectChildText(filter, 'duration') : '';
+      const previousClip = clipElements[clipIndex - 1];
+      const previousFilter = previousClip
+        ? getDirectChildElements(previousClip, 'filter')[0]
+        : null;
+      const previousFilterEffect = previousFilter
+        ? getDirectChildText(previousFilter, 'effect')
+        : '';
+      const previousFilterDuration = previousFilter
+        ? getDirectChildText(previousFilter, 'duration')
+        : '';
       const areas = getDirectChildElements(clip, 'area');
       for (const area of areas) {
         if (area.getAttribute('asset-id') === assetId) {
@@ -2139,6 +2204,8 @@ function findTemplateAreaMatchesFromDom(xmlContent, assetId) {
             clipDuration,
             filterEffect,
             filterDuration,
+            previousFilterEffect,
+            previousFilterDuration,
             areaId: area.getAttribute('id') || '',
             clipsAssetId: area.getAttribute('asset-id') || '',
             ...getAreaSourceDurationInfoFromElement(area),
@@ -2164,7 +2231,7 @@ function findTemplateAreaMatchesFromText(xmlContent, assetId) {
       clipsBody.matchAll(/<clip\b([^>]*)>([\s\S]*?)<\/clip>/gi),
     );
 
-    for (const clipMatch of clipMatches) {
+    for (const [clipIndex, clipMatch] of clipMatches.entries()) {
       const clipAttributes = clipMatch[1] || '';
       const clipBody = clipMatch[2] || '';
       const clipStarttime =
@@ -2174,6 +2241,16 @@ function findTemplateAreaMatchesFromText(xmlContent, assetId) {
       const filterBody = getElementText(clipBody, 'filter');
       const filterEffect = getElementText(filterBody, 'effect');
       const filterDuration = getElementText(filterBody, 'duration');
+      const previousClipBody = clipMatches[clipIndex - 1]?.[2] || '';
+      const previousFilterBody = getElementText(previousClipBody, 'filter');
+      const previousFilterEffect = getElementText(
+        previousFilterBody,
+        'effect',
+      );
+      const previousFilterDuration = getElementText(
+        previousFilterBody,
+        'duration',
+      );
       const areaMatches = Array.from(
         clipBody.matchAll(/<area\b([^>]*)>([\s\S]*?)<\/area>/gi),
       );
@@ -2198,6 +2275,8 @@ function findTemplateAreaMatchesFromText(xmlContent, assetId) {
           clipDuration,
           filterEffect,
           filterDuration,
+          previousFilterEffect,
+          previousFilterDuration,
           areaId: getAttributeValue(areaAttributes, 'id'),
           clipsAssetId,
           durationRaw,
@@ -2227,26 +2306,60 @@ function findTemplateAreaMatch(assetId) {
   return findTemplateAreaMatches(assetId)[0] || null;
 }
 
-function findLongestFadeFilterForAsset(assetId) {
-  let selected = null;
-  for (const match of findTemplateAreaMatches(assetId)) {
-    if (match.filterEffect?.toLowerCase() !== 'fade') continue;
-    if (!match.filterDuration) continue;
-    const filterDuration = Number(match.filterDuration);
-    if (!Number.isFinite(filterDuration) || filterDuration < 0) continue;
-    if (!selected || filterDuration > selected.filterDuration) {
-      const clipDuration = Number(match.clipDuration);
-      selected = {
-        clipDuration:
-          match.clipDuration && Number.isFinite(clipDuration) && clipDuration >= 0
-            ? clipDuration
-            : '',
-        filterEffect: 'Fade',
-        filterDuration,
-      };
-    }
+function normalizeClipTransition(effectValue, durationValue) {
+  const effect = String(effectValue || '').trim();
+  const duration = Number(durationValue);
+  if (!effect || !Number.isFinite(duration) || duration <= 0) {
+    return { effect: '', duration: 0 };
   }
-  return selected;
+  return { effect, duration: duration / 2 };
+}
+
+function buildClipTransitionParams(assetId) {
+  const candidates = findTemplateAreaMatches(assetId).map((match) => {
+    const startTransition = normalizeClipTransition(
+      match.previousFilterEffect,
+      match.previousFilterDuration,
+    );
+    const endTransition = normalizeClipTransition(
+      match.filterEffect,
+      match.filterDuration,
+    );
+    const clipDuration = Number(match.clipDuration);
+
+    return {
+      clipDuration:
+        match.clipDuration && Number.isFinite(clipDuration) && clipDuration >= 0
+          ? clipDuration
+          : '',
+      startFilterEffect: startTransition.effect,
+      startFilterDuration: startTransition.duration,
+      endFilterEffect: endTransition.effect,
+      endFilterDuration: endTransition.duration,
+      transitionDuration:
+        startTransition.duration + endTransition.duration,
+    };
+  });
+
+  const selected = candidates.reduce((best, candidate) => {
+    if (!best || candidate.transitionDuration > best.transitionDuration) {
+      return candidate;
+    }
+    return best;
+  }, null);
+
+  if (!selected) {
+    return {
+      clipDuration: '',
+      startFilterEffect: '',
+      startFilterDuration: 0,
+      endFilterEffect: '',
+      endFilterDuration: 0,
+    };
+  }
+
+  const { transitionDuration: _transitionDuration, ...params } = selected;
+  return params;
 }
 
 function findLongestTemplateAreaMatch(assetId) {
@@ -2427,6 +2540,8 @@ function clearProjectEditingState() {
     delete videoTransformStateCache[key];
   }
   invalidDurationVideoKeys.value = new Set();
+  activeProjectHasPaid.value = false;
+  projectCopying.value = false;
   selectedVideoName.value = '';
   selectedVideoKey.value = '';
   selectedVideoAssetId.value = '';
@@ -2584,7 +2699,7 @@ async function generateAndApplyImportedVideo(
     inputVideoPath: importedVideo.localPath,
     startTimeMs,
     durationMs,
-    params: buildBeautyFileParams(transformValues, assetId),
+    params: buildBeautyFileParams(transformValues, assetId, startTimeMs),
   });
 
   onProgress?.(0.88, '正在应用预览视频...');
@@ -2990,6 +3105,7 @@ async function openOneClickImportFilePicker(target, mode = 'overwrite') {
 }
 
 function requestOneClickImportTarget(target) {
+  if (activeProjectReadOnly.value) return;
   const normalizedTarget = normalizeOneClickImportTarget(target);
   if (
     hasImportedVideoInOneClickTarget(normalizedTarget) &&
@@ -3045,6 +3161,7 @@ async function resolveRepeatImport(shouldRepeat) {
 
 // 替换单个已导入视频，同时清理被替换的工程素材文件。
 async function openReplaceFilePicker(segment, videoIndex) {
+  if (activeProjectReadOnly.value) return;
   const [filePath] = await pickVideoPaths(false);
   const previousState = getSegmentImportState(segment.id);
 
@@ -3295,14 +3412,15 @@ function buildBeautyFrameParams(values = {}) {
   };
 }
 
-function buildBeautyFileParams(values = {}, assetId = '') {
+function buildBeautyFileParams(
+  values = {},
+  assetId = '',
+  clipStartTimeMs = 0,
+) {
   return {
     ...buildBeautyFrameParams(values),
-    ...(findLongestFadeFilterForAsset(assetId) || {
-      clipDuration: '',
-      filterEffect: '',
-      filterDuration: '',
-    }),
+    clipStartTime: Math.max(0, Math.round(Number(clipStartTimeMs) || 0)),
+    ...buildClipTransitionParams(assetId),
   };
 }
 
@@ -3581,7 +3699,11 @@ async function processAssetVideoPreprocessTask(task) {
     inputVideoPath: task.videoPath,
     startTimeMs: task.startTimeMs,
     durationMs: task.durationMs,
-    params: buildBeautyFileParams(task.values, task.assetId),
+    params: buildBeautyFileParams(
+      task.values,
+      task.assetId,
+      task.startTimeMs,
+    ),
   });
   const latestRevision = assetVideoPropertyRevisions.get(task.assetId) || 0;
   const taskIsCurrent =
@@ -3691,6 +3813,7 @@ async function runAssetVideoPreprocessQueue() {
 }
 
 function scheduleProjectAssetPropertyUpdate(assetId, values) {
+  if (activeProjectReadOnly.value) return;
   const normalizedAssetId = String(assetId || '').trim();
   const projectDir = activeProjectDir.value;
   if (!normalizedAssetId || !projectDir) return;
@@ -3787,6 +3910,7 @@ function scheduleBeautyPreview(values, delay = BEAUTY_PREVIEW_DEBOUNCE_MS) {
 }
 
 async function handleBeautyPreviewRequest(values) {
+  if (activeProjectReadOnly.value) return;
   if (beautyVideoPreviewLoading.value) return;
   if (!selectedVideoPath.value) {
     systemMessage.error('当前视频没有可用的本地文件路径');
@@ -3971,7 +4095,7 @@ async function handleApplyGeneratedVideo(values) {
 }
 
 async function handleMaterialResetRequest() {
-  if (materialResetting.value) return;
+  if (materialResetting.value || activeProjectReadOnly.value) return;
   const projectDir = activeProjectDir.value;
   const assetId = selectedVideoAssetId.value;
   if (!projectDir || !assetId) {
@@ -4399,6 +4523,7 @@ function handleModalVideoLoadedMetadata() {
 
 // 将用户调整后的素材偏移写回工程 XML。
 async function persistSelectedVideoOffset(assetId, offsetMs) {
+  if (activeProjectReadOnly.value) return;
   if (!activeProjectDir.value || !assetId) return;
 
   try {
@@ -4421,6 +4546,7 @@ async function persistSelectedVideoOffset(assetId, offsetMs) {
 }
 
 function scheduleSelectedVideoOffsetPersist() {
+  if (activeProjectReadOnly.value) return;
   if (offsetPersistTimer) {
     window.clearTimeout(offsetPersistTimer);
   }
@@ -4436,6 +4562,7 @@ function scheduleSelectedVideoOffsetPersist() {
 }
 
 async function flushSelectedVideoOffsetPersist() {
+  if (activeProjectReadOnly.value) return;
   if (offsetPersistTimer) {
     window.clearTimeout(offsetPersistTimer);
     offsetPersistTimer = null;
@@ -4448,7 +4575,83 @@ async function flushSelectedVideoOffsetPersist() {
   await persistSelectedVideoOffset(assetId, offsetMs);
 }
 
+async function handleEditPaidProjectAgain() {
+  if (!activeProjectReadOnly.value || projectCopying.value) return;
+  if (projectPreviewRunning.value || exportRunning.value || exportPreparing.value) {
+    systemMessage.error('请等待当前预览或导出完成后再进行编辑');
+    return;
+  }
+  const sourceProjectId = activeBackendProjectId.value;
+  const templateId = activeTemplateId.value;
+  const sourceProjectDir = activeProjectDir.value;
+  const projectXml = activeTemplateLocalInfo.value?.xmlContent || '';
+  if (!sourceProjectId || !templateId || !sourceProjectDir || !projectXml) {
+    systemMessage.error('当前工程信息不完整，无法再次编辑');
+    return;
+  }
+
+  projectCopying.value = true;
+  let pendingCopy = readPendingProjectCopy(sourceProjectId, templateId);
+  try {
+    let successMessage = '工程副本创建成功';
+
+    if (!pendingCopy) {
+      const response = await copyProject({
+        sourceProjectId: normalizeBackendId(sourceProjectId),
+        projectXml,
+      });
+      if (response?.code !== undefined && Number(response.code) !== 0) {
+        throw new Error(response?.msg || '工程复制失败');
+      }
+      const payload = getResponsePayload(response) || {};
+      if (!payload.projectId || !payload.projectName) {
+        throw new Error('工程复制成功，但未返回新工程 ID 或名称');
+      }
+      pendingCopy = {
+        sourceProjectId: String(sourceProjectId),
+        templateId: String(templateId),
+        newProjectId: String(payload.projectId),
+        newProjectName: String(payload.projectName),
+      };
+      savePendingProjectCopy(pendingCopy);
+      successMessage = response?.msg || successMessage;
+    }
+
+    const workspace = await invoke('clone_project_workspace', {
+      sourceProjectDir,
+      templateId: String(templateId),
+      newProjectId: String(pendingCopy.newProjectId),
+      newProjectName: pendingCopy.newProjectName,
+    });
+    await activateDraftProjectWorkspace(
+      {
+        projectId: pendingCopy.newProjectId,
+        projectName: pendingCopy.newProjectName,
+        templateId,
+        hasPaid: 0,
+        statusName: '编辑中',
+        exportCredit: activeTemplateExportCredit.value,
+      },
+      workspace,
+      { initializeProperties: false },
+    );
+    clearPendingProjectCopy();
+    void loadMyProjects();
+    systemMessage.success(successMessage);
+  } catch (error) {
+    const message = error?.message || '工程复制失败';
+    systemMessage.error(
+      pendingCopy
+        ? `${message}，可点击“再次编辑”重试本地创建`
+        : message,
+    );
+  } finally {
+    projectCopying.value = false;
+  }
+}
+
 async function applySubtitleChange() {
+  if (activeProjectReadOnly.value) return;
   const text = subtitleText.value.trim();
   if (!text) {
     systemMessage.error('请输入内容');
@@ -4477,7 +4680,7 @@ async function applySubtitleChange() {
 
 // 拖动选区时限制其始终落在时间线有效范围内。
 function startTimelineDrag(event) {
-  if (beautyVideoPreviewActive.value) return;
+  if (beautyVideoPreviewActive.value || activeProjectReadOnly.value) return;
   const track = timelineTrackRef.value;
   if (!track) return;
 
@@ -4708,6 +4911,103 @@ async function confirmDraftBatchDelete() {
   }
 }
 
+function cancelPendingProjectWorkspaceTasks() {
+  cancelAllAssetVideoPreprocessTasks();
+  invalidateBeautyPreview();
+  videoTransformerRef.value?.pause?.();
+  videoTransformerRef.value?.clearBeautyPreview?.();
+
+  if (offsetPersistTimer) {
+    window.clearTimeout(offsetPersistTimer);
+    offsetPersistTimer = null;
+  }
+  if (assetPropertyPersistTimer) {
+    window.clearTimeout(assetPropertyPersistTimer);
+    assetPropertyPersistTimer = null;
+  }
+  pendingAssetPropertyUpdates.clear();
+  if (projectUpdateTimer) {
+    window.clearTimeout(projectUpdateTimer);
+    projectUpdateTimer = null;
+  }
+  pendingProjectUpdate = null;
+
+  projectPreviewProgressUnlisten?.();
+  projectPreviewProgressUnlisten = null;
+  projectPreviewSource.value = '';
+  projectPreviewProgress.value = 0;
+  projectPreviewStatus.value = '正在准备预览...';
+  projectPreviewModalVisible.value = false;
+}
+
+async function activateDraftProjectWorkspace(
+  detail,
+  workspace,
+  options = {},
+) {
+  const templateXml = workspace?.templateXml || '';
+  const projectFileXml = workspace?.projectFileXml || '';
+  if (!templateXml || !projectFileXml) {
+    throw new Error('本地工程 XML 内容为空');
+  }
+
+  cancelPendingProjectWorkspaceTasks();
+  clearProjectEditingState();
+  activeBackendProjectId.value = detail.projectId;
+  activeProjectHasPaid.value = Number(detail.hasPaid) === 1;
+  activeProjectExported.value =
+    String(detail.statusName || '').trim() === '已导出';
+  editingFromDraftLibrary.value = true;
+  activeTemplateId.value = String(detail.templateId);
+  originalTemplateXmlContent.value = '';
+  activeTemplateExportCredit.value = Number(detail.exportCredit) || 0;
+  activeTemplateName.value = detail.projectName || '未命名工程';
+  previewTitle.value = activeTemplateName.value;
+  activeProjectDir.value = workspace.projectDir || '';
+  activeTemplateLocalInfo.value = {
+    templateDir: workspace.projectDir || '',
+    templateFilePath: workspace.templateFilePath || '',
+    assetsDir: workspace.assetsDir || '',
+    xmlContent: templateXml,
+    existingAssetIds: workspace.existingAssetIds || [],
+  };
+  activeTemplateSegments.value = parseTemplateSegments(templateXml);
+  activeTemplateDemoSource.value = resolveTemplateVideoSource(
+    parseTemplateDemoPath(templateXml),
+  );
+
+  await initializeDefaultTemplateAssets();
+  restoreProjectVideoOffsets(projectFileXml);
+  if (
+    !activeProjectReadOnly.value &&
+    options.initializeProperties !== false
+  ) {
+    await initializeProjectAssetProperties();
+  } else if (!activeProjectReadOnly.value) {
+    scheduleProjectTemplateUpdate(templateXml);
+  }
+  refreshInvalidDurationVideoState();
+
+  draftLibraryVisible.value = false;
+  resetDraftBatchDelete();
+  sidebarHidden.value = false;
+  mainMode.value = 'player';
+  timelineCollapsed.value = false;
+  currentViewState.value = 'import';
+  showFinishedControls.value = false;
+
+  const videos = importSegments.value.flatMap((segment) =>
+    segment.videos.map((video) => ({ video, styleName: segment.name })),
+  );
+  const firstVideo = videos.find(({ video }) => video.source) || videos[0];
+  if (firstVideo) {
+    selectVideoForTimeline(firstVideo.video, firstVideo.styleName);
+  } else {
+    selectVideoForTimeline('视频 1', '视频轨道 V1');
+  }
+  nextTick(schedulePlayerResize);
+}
+
 async function openDraftProject(projectId) {
   if (!projectId || draftOpeningId.value) return;
 
@@ -4745,60 +5045,14 @@ async function openDraftProject(projectId) {
         templateId: String(templateId),
       });
     }
-    cancelAllAssetVideoPreprocessTasks();
-
-    const templateXml = workspace.templateXml || '';
-    const projectFileXml = workspace.projectFileXml || '';
-    if (!templateXml || !projectFileXml) {
-      throw new Error('本地工程 XML 内容为空');
-    }
-
-    clearProjectEditingState();
-    activeBackendProjectId.value = detailProjectId;
-    activeProjectExported.value =
-      String(detail.statusName || '').trim() === '已导出';
-    editingFromDraftLibrary.value = true;
-    activeTemplateId.value = String(templateId);
-    originalTemplateXmlContent.value = '';
-    activeTemplateExportCredit.value = Number(detail.exportCredit) || 0;
-    activeTemplateName.value = detail.projectName || '未命名工程';
-    previewTitle.value = activeTemplateName.value;
-    activeProjectDir.value = workspace.projectDir || '';
-    activeTemplateLocalInfo.value = {
-      templateDir: workspace.projectDir || '',
-      templateFilePath: workspace.templateFilePath || '',
-      assetsDir: workspace.assetsDir || '',
-      xmlContent: templateXml,
-      existingAssetIds: workspace.existingAssetIds || [],
-    };
-    activeTemplateSegments.value = parseTemplateSegments(templateXml);
-    activeTemplateDemoSource.value = resolveTemplateVideoSource(
-      parseTemplateDemoPath(templateXml),
+    await activateDraftProjectWorkspace(
+      {
+        ...detail,
+        projectId: detailProjectId,
+        templateId,
+      },
+      workspace,
     );
-
-    await initializeDefaultTemplateAssets();
-    restoreProjectVideoOffsets(projectFileXml);
-    await initializeProjectAssetProperties();
-    refreshInvalidDurationVideoState();
-
-    draftLibraryVisible.value = false;
-    resetDraftBatchDelete();
-    sidebarHidden.value = false;
-    mainMode.value = 'player';
-    timelineCollapsed.value = false;
-    currentViewState.value = 'import';
-    showFinishedControls.value = false;
-
-    const videos = importSegments.value.flatMap((segment) =>
-      segment.videos.map((video) => ({ video, styleName: segment.name })),
-    );
-    const firstVideo = videos.find(({ video }) => video.source) || videos[0];
-    if (firstVideo) {
-      selectVideoForTimeline(firstVideo.video, firstVideo.styleName);
-    } else {
-      selectVideoForTimeline('视频 1', '视频轨道 V1');
-    }
-    nextTick(schedulePlayerResize);
   } catch (error) {
     systemMessage.error(error?.message || '工程打开失败');
   } finally {
@@ -6175,19 +6429,14 @@ async function attachTemplateCovers(items) {
 }
 
 async function getProjectCoverUrl(project) {
-  const renterId =
-    project.renterId ||
-    project.renter_id ||
-    project.tenantId ||
-    getStoredTenantId();
-  const projectId = project.projectId || project.deleteId;
-  if (!renterId || !projectId) return '';
+  const coverPic = String(project.coverPic || '').trim();
+  if (!coverPic.startsWith('/api')) return '';
 
-  const key = `${renterId}/${projectId}`;
+  const key = coverPic;
   if (projectCoverUrls.has(key)) return projectCoverUrls.get(key);
   if (projectCoverRequests.has(key)) return projectCoverRequests.get(key);
 
-  const request = downloadProjectCover(renterId, projectId)
+  const request = downloadProjectCover(coverPic)
     .then((blob) => {
       if (!(blob instanceof Blob) || blob.size === 0) return '';
 
@@ -6264,10 +6513,28 @@ function normalizeProjectStatus(status) {
     : 'editing';
 }
 
+function formatProjectUpdatedTime(project) {
+  const value = String(
+    project.updateTime ||
+      project.update_time ||
+      project.createTime ||
+      project.create_time ||
+      '',
+  ).trim();
+  if (!value) return '--';
+
+  const dateTimeMatch = value.match(
+    /^(\d{4}-\d{2}-\d{2})[T\s](\d{2}:\d{2}:\d{2})/,
+  );
+  if (dateTimeMatch) {
+    return `${dateTimeMatch[1]} ${dateTimeMatch[2]}`;
+  }
+
+  return value;
+}
+
 function mapProject(project, index) {
   const status = normalizeProjectStatus(project.status);
-  const statusLabel =
-    project.statusName || (status === 'exported' ? '已导出' : '编辑中');
 
   return {
     ...project,
@@ -6276,7 +6543,7 @@ function mapProject(project, index) {
     title: project.projectName || project.title || '未命名工程',
     status,
     duration: project.duration || '--:--',
-    time: statusLabel,
+    time: formatProjectUpdatedTime(project),
     image: '',
   };
 }
@@ -6604,7 +6871,7 @@ onBeforeUnmount(() => {
         </div>
         <div class="flex-1"></div>
         <button
-          v-show="CREATE_TEMPLATE_ENTRY_VISIBLE"
+          v-if="canUseTemplateFactory"
           class="h-9 w-24 text-on-surface-variant hover:text-electric-blue shrink-0 flex items-center justify-center gap-1.5 bg-surface-container-low/50 shadow-sm rounded-lg transition-all active:scale-95 hover:bg-surface-container-high border border-outline-variant/20"
           type="button"
           @click="showCreateTemplate"
@@ -6804,11 +7071,12 @@ onBeforeUnmount(() => {
               class="flex-1 min-w-0 h-7 bg-surface-container-lowest/50 border border-outline-variant/30 rounded px-2 text-[10px] text-on-surface placeholder:text-on-surface-variant/50 focus:border-electric-blue outline-none transition-colors"
               placeholder="输入标题内容"
               type="text"
+              :disabled="activeProjectReadOnly"
             />
             <button
               class="h-6 px-1.5 bg-electric-blue text-white rounded text-[9px] font-bold shadow shadow-electric-blue/20 hover:brightness-110 active:scale-95 transition-all shrink-0 whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
               type="button"
-              :disabled="subtitleApplying"
+              :disabled="subtitleApplying || activeProjectReadOnly"
               @click="applySubtitleChange"
             >
               {{ subtitleApplying ? '应用中...' : '应用更改' }}
@@ -7004,13 +7272,14 @@ onBeforeUnmount(() => {
                         </div>
                         <div class="flex items-center gap-2 shrink-0">
                           <button
-                            class="px-3 py-1.5 text-[11px] font-bold rounded-md flex items-center gap-1 transition-colors"
+                            class="px-3 py-1.5 text-[11px] font-bold rounded-md flex items-center gap-1 transition-colors disabled:opacity-40 disabled:grayscale disabled:cursor-not-allowed disabled:pointer-events-none disabled:shadow-none"
                             :class="
                               isSegmentGroupFullyImported(collection)
                                 ? 'bg-white/5 text-on-surface-variant/60 border border-white/10 hover:bg-white/10'
                                 : 'bg-electric-blue text-white shadow-lg shadow-electric-blue/10 hover:brightness-110'
                             "
                             type="button"
+                            :disabled="activeProjectReadOnly"
                             @click="requestGroupOneClickImport(collection)"
                           >
                             {{ `一键导入 (${collection.count})` }}
@@ -7064,13 +7333,14 @@ onBeforeUnmount(() => {
                             </div>
                           </div>
                           <button
-                            class="px-3 py-1.5 text-[11px] font-bold rounded-md flex items-center gap-1 shrink-0 transition-colors"
+                            class="px-3 py-1.5 text-[11px] font-bold rounded-md flex items-center gap-1 shrink-0 transition-colors disabled:opacity-40 disabled:grayscale disabled:cursor-not-allowed disabled:pointer-events-none disabled:shadow-none"
                             :class="
                               isSegmentFullyImported(style)
                                 ? 'bg-white/5 text-on-surface-variant/60 border border-white/10 hover:bg-white/10'
                                 : 'bg-electric-blue text-white shadow-lg shadow-electric-blue/10 hover:brightness-110'
                             "
                             type="button"
+                            :disabled="activeProjectReadOnly"
                             @click="requestOneClickImport(style)"
                           >
                             {{ collection.isGroup ? '导入' : '一键导入' }}
@@ -7135,12 +7405,13 @@ onBeforeUnmount(() => {
                             </div>
                             <button
                               type="button"
-                              class="px-2 py-1 rounded text-[10px] font-bold shrink-0 transition-colors"
+                              class="px-2 py-1 rounded text-[10px] font-bold shrink-0 transition-colors disabled:opacity-40 disabled:grayscale disabled:cursor-not-allowed disabled:pointer-events-none disabled:shadow-none"
                               :class="
                                 isProjectImportedVideo(video)
                                   ? 'bg-white/5 text-on-surface-variant/60 border border-white/10 hover:bg-white/10'
                                   : 'bg-electric-blue/10 text-electric-blue hover:bg-electric-blue/20'
                               "
+                              :disabled="activeProjectReadOnly"
                               @click.stop="
                                 openReplaceFilePicker(style, videoIndex)
                               "
@@ -7279,6 +7550,8 @@ onBeforeUnmount(() => {
                 :video-preview-loading="beautyVideoPreviewLoading"
                 :apply-loading="generatedVideoApplying"
                 :properties-locked="selectedVideoPropertiesLocked"
+                :project-read-only="activeProjectReadOnly"
+                :edit-again-loading="projectCopying"
                 :material-reset-loading="materialResetting"
                 @change="handleTimelineVideoTransformChange"
                 @video-loaded="handleTransformerVideoLoaded"
@@ -7288,6 +7561,7 @@ onBeforeUnmount(() => {
                 @restore-request="handleRestoreAssetProperties"
                 @apply-request="handleApplyGeneratedVideo"
                 @material-reset-request="handleMaterialResetRequest"
+                @edit-again-request="handleEditPaidProjectAgain"
                 @layout-change="schedulePlayerResize"
                 @error="systemMessage.error($event)"
               >
@@ -7349,7 +7623,10 @@ onBeforeUnmount(() => {
                         <div ref="timelineTrackRef" class="duration-track">
                           <div
                             class="duration-selection bg-electric-blue/20 border-2 border-electric-blue rounded-md flex items-center px-2 shadow-[0_0_15px_rgba(74,142,255,0.25)]"
-                            :class="{ 'is-dragging': timelineDragging }"
+                            :class="{
+                              'is-dragging': timelineDragging,
+                              'opacity-50 cursor-not-allowed': activeProjectReadOnly,
+                            }"
                             :style="{
                               ...timelineSelectionStyle,
                               boxShadow:

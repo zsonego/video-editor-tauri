@@ -32,3 +32,6 @@ libloading = "0.8"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "0.3", default-features = false, features = ["NSArray", "NSLocale", "NSString"] }
+
+[profile.dev.package.sha2]
+opt-level = 3

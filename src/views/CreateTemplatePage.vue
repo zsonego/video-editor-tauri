@@ -52,6 +52,10 @@ import AccountCenterMenu from '../components/AccountCenterMenu.vue';
 import WholeVideoPreviewModal from '../components/WholeVideoPreviewModal.vue';
 import { getTransitionEffects } from '../api/dict';
 import { assetPath, buildXml, generateId, parseXml } from '../utils/xml';
+import {
+  canUseTemplateFactory,
+  clearCurrentPermissions,
+} from '../utils/permissions';
 import lutManifest from '../../src-tauri/resources/luts/luts.json';
 
 defineOptions({ name: 'CreateTemplatePage' });
@@ -88,6 +92,7 @@ function openWorkspaceLibrary() {
 function handleAccountLogout() {
   localStorage.removeItem('token');
   localStorage.removeItem('userInfo');
+  clearCurrentPermissions();
   router.replace('/login');
 }
 
@@ -3928,6 +3933,7 @@ onBeforeUnmount(() => {
       </div>
       <div class="flex-1"></div>
       <button
+        v-if="canUseTemplateFactory"
         class="h-9 w-24 text-electric-blue shrink-0 flex items-center justify-center gap-1.5 bg-surface-container-high shadow-sm rounded-lg border border-electric-blue/40"
         type="button"
       >

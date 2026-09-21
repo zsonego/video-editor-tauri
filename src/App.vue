@@ -4,6 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { getFileDownloadUrl } from './api/file';
+import { getUserInfo } from './api/user';
 import SessionExpiredDialogHost from './components/SessionExpiredDialogHost.vue';
 import SystemMessageHost from './components/SystemMessageHost.vue';
 import {
@@ -12,6 +13,10 @@ import {
   WINDOWS_RUNTIME_DOWNLOAD_PATH,
   WINDOWS_RUNTIME_VERSION,
 } from './config/windowsRuntime';
+import {
+  clearCurrentPermissions,
+  setCurrentPermissions,
+} from './utils/permissions';
 
 const router = useRouter();
 const appBootLoading = ref(false);
@@ -25,6 +30,45 @@ const appBootTotalBytes = ref(0);
 const appBootError = ref('');
 const activeRuntimeDownloadId = ref('');
 let unlistenRuntimeProgress = null;
+
+function getStoredUserIdentity() {
+  try {
+    const stored = JSON.parse(localStorage.getItem('userInfo') || 'null') || {};
+    const profile = stored.user || stored.profile || stored.sysUser || stored;
+    return {
+      renterId:
+        stored.renterId ||
+        stored.tenantId ||
+        profile.renterId ||
+        profile.tenantId ||
+        '',
+      userId: stored.userId || profile.userId || '',
+    };
+  } catch {
+    return { renterId: '', userId: '' };
+  }
+}
+
+async function refreshStartupPermissions() {
+  if (!localStorage.getItem('token')) {
+    clearCurrentPermissions();
+    return;
+  }
+
+  clearCurrentPermissions();
+  try {
+    const response = await getUserInfo(getStoredUserIdentity());
+    if (response?.code !== undefined && Number(response.code) !== 0) {
+      throw new Error(response?.msg || '用户权限查询失败');
+    }
+    const permissions = Array.isArray(response?.permissions)
+      ? response.permissions
+      : response?.data?.permissions;
+    setCurrentPermissions(permissions);
+  } catch (error) {
+    console.warn('[permissions] startup refresh failed:', error);
+  }
+}
 
 const appBootByteProgress = computed(() => {
   if (appBootPhase.value !== 'download' || !appBootTotalBytes.value) return '';
@@ -134,6 +178,10 @@ onMounted(async () => {
   }
 });
 
+onMounted(() => {
+  void refreshStartupPermissions();
+});
+
 onBeforeUnmount(() => {
   unlistenRuntimeProgress?.();
 });
@@ -150,12 +198,14 @@ function handleLoginSuccess() {
 function handleLogout() {
   localStorage.removeItem('token');
   localStorage.removeItem('userInfo');
+  clearCurrentPermissions();
   router.replace('/login');
 }
 
 function handleSessionExpiredConfirm() {
   localStorage.clear();
   sessionStorage.clear();
+  clearCurrentPermissions();
   router.replace('/login');
 }
 

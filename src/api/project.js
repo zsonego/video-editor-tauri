@@ -12,14 +12,9 @@ export function getMyProjects(data) {
   return request("/api/project/my", { data });
 }
 
-export function downloadProjectCover(renterId, projectId) {
-  return request("/api/aicut/file/download", {
+export function downloadProjectCover(coverPic) {
+  return request(coverPic, {
     method: "GET",
-    data: {
-      bucket: "media-tenants",
-      path: `${renterId}/${projectId}/cover.png`,
-      thumbnail: true,
-    },
     responseType: "blob",
   });
 }
@@ -34,6 +29,10 @@ export function renameProject(data) {
 
 export function updateProject(data) {
   return request("/api/project/update", { data });
+}
+
+export function copyProject(data) {
+  return request("/api/project/copy", { data });
 }
 
 export function recordProjectExport(data) {

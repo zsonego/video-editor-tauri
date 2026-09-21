@@ -8,6 +8,10 @@ import AppIcon from '../components/AppIcon.vue';
 import { submitLocalTemplate } from '../api/templateUpload';
 import { queryMyTemplates } from '../api/template';
 import { systemMessage } from '../utils/message';
+import {
+  canUseTemplateFactory,
+  clearCurrentPermissions,
+} from '../utils/permissions';
 
 const router = useRouter();
 const templates = ref([]);
@@ -75,6 +79,7 @@ function openProjectLibrary() {
 function handleAccountLogout() {
   localStorage.removeItem('token');
   localStorage.removeItem('userInfo');
+  clearCurrentPermissions();
   router.replace('/login');
 }
 
@@ -240,7 +245,12 @@ onMounted(() => {
           </div>
         </div>
         <div class="flex-1"></div>
-        <button class="header-action" type="button" @click="createTemplate">
+        <button
+          v-if="canUseTemplateFactory"
+          class="header-action"
+          type="button"
+          @click="createTemplate"
+        >
           <span>创建模板</span>
         </button>
         <button class="header-action" type="button" @click="openProjectLibrary">
@@ -267,7 +277,13 @@ onMounted(() => {
         <div v-else-if="!templates.length" class="library-state">
           <span class="state-icon"><AppIcon name="video_library" :size="38" /></span>
           <strong>还没有自己创建的模板</strong>
-          <button type="button" @click="createTemplate">去创建模板</button>
+          <button
+            v-if="canUseTemplateFactory"
+            type="button"
+            @click="createTemplate"
+          >
+            去创建模板
+          </button>
         </div>
 
         <div v-else class="template-grid">
