@@ -4,7 +4,7 @@
   "version": "0.1.1",
   "identifier": "com.loogear.aicut",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": "node scripts/prepare-native-dev.mjs && pnpm dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "pnpm build",
     "frontendDist": "../dist"
