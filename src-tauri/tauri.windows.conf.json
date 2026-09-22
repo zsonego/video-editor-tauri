@@ -4,6 +4,8 @@
     "beforeBuildCommand": "node scripts/sync-windows-native.mjs release && pnpm build"
   },
   "bundle": {
+    "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
     "resources": {
       "libs/windows/": "",
       "resources/luts/": "luts/"

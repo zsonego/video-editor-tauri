@@ -11,6 +11,7 @@ import {
   clearStoredUploadBuckets,
   refreshStoredUploadBuckets,
 } from '../utils/uploadBuckets';
+import { refreshComposerBeautyPresets } from '../utils/beautyPresets';
 import backgroundVideo from '../assets/background.mp4';
 import boxImage from '../assets/box.png';
 import logoImage from '../assets/logo1.png';
@@ -212,6 +213,11 @@ function resetForcePasswordForm() {
 
 async function finishLogin(loginResponse, userInfo, identity, backendMessage = '') {
   await refreshStoredUploadBuckets();
+  try {
+    await refreshComposerBeautyPresets();
+  } catch (error) {
+    console.warn('[beauty] login preset refresh failed:', error);
+  }
   saveUserInfo(userInfo, identity);
   systemMessage.success(backendMessage || '登录成功');
   tenantDialogVisible.value = false;

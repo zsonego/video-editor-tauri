@@ -3,6 +3,7 @@
     "targets": [
       "app"
     ],
+    "createUpdaterArtifacts": false,
     "category": "Video",
     "resources": {
       "infoplist/": "",

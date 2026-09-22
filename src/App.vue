@@ -21,6 +21,7 @@ import {
   clearStoredUploadBuckets,
   refreshStoredUploadBuckets,
 } from './utils/uploadBuckets';
+import { refreshComposerBeautyPresets } from './utils/beautyPresets';
 
 const router = useRouter();
 const appBootLoading = ref(false);
@@ -71,6 +72,11 @@ async function refreshStartupPermissions() {
       : response?.data?.permissions;
     setCurrentPermissions(permissions);
     await refreshStoredUploadBuckets();
+    try {
+      await refreshComposerBeautyPresets();
+    } catch (error) {
+      console.warn('[beauty] startup preset refresh failed:', error);
+    }
   } catch (error) {
     console.warn('[permissions] startup refresh failed:', error);
   }

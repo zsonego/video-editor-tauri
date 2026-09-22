@@ -30,6 +30,7 @@ import {
   updateProject,
   uploadProjectCover,
 } from '../api/project';
+import { createNarrationTask } from '../api/narration';
 import {
   downloadTemplateCover,
   favoriteTemplate,
@@ -61,6 +62,7 @@ const route = useRoute();
 const router = useRouter();
 const GLOBAL_TIMELINE_VISIBLE = true;
 const PROJECT_COPY_RECOVERY_STORAGE_KEY = 'aicut-pending-project-copy';
+const NARRATION_TASK_STORAGE_KEY = 'aicut-narration-task-db-ids';
 
 // 模板列表、收藏列表及请求状态。
 const categories = ref([]);
@@ -115,6 +117,8 @@ let activeTemplateDemoErrorRetryCount = 0;
 let pendingModalPreviewSeekTime = null;
 const activeProjectDir = ref('');
 const activeBackendProjectId = ref('');
+let activeNarrationTaskProjectId = '';
+let activeNarrationTaskDbId = '';
 const activeProjectExported = ref(false);
 const activeProjectHasPaid = ref(false);
 const projectCopying = ref(false);
@@ -1816,6 +1820,105 @@ function normalizeBackendId(value) {
   return Number.isFinite(numericValue) ? numericValue : value;
 }
 
+function hasBackendId(value) {
+  return value !== undefined && value !== null && String(value).trim() !== '';
+}
+
+function readNarrationTaskDbId(projectId) {
+  if (!hasBackendId(projectId)) return '';
+
+  try {
+    const stored = JSON.parse(
+      localStorage.getItem(NARRATION_TASK_STORAGE_KEY) || '{}',
+    );
+    if (!stored || typeof stored !== 'object' || Array.isArray(stored)) {
+      return '';
+    }
+    const taskDbId = stored[String(projectId)];
+    return hasBackendId(taskDbId) ? taskDbId : '';
+  } catch (error) {
+    console.error('[narration-task] local state read failed:', error);
+    return '';
+  }
+}
+
+function saveNarrationTaskDbId(projectId, taskDbId) {
+  let stored = {};
+  try {
+    const parsed = JSON.parse(
+      localStorage.getItem(NARRATION_TASK_STORAGE_KEY) || '{}',
+    );
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      stored = parsed;
+    }
+  } catch (error) {
+    console.warn('[narration-task] resetting invalid local state:', error);
+  }
+
+  stored[String(projectId)] = taskDbId;
+  localStorage.setItem(NARRATION_TASK_STORAGE_KEY, JSON.stringify(stored));
+}
+
+async function ensureNarrationTask(projectId, userId) {
+  if (!hasBackendId(projectId) || !hasBackendId(userId)) {
+    systemMessage.error('工程或用户信息不完整，无法创建旁白任务');
+    return false;
+  }
+
+  const normalizedProjectId = String(projectId);
+  const inMemoryTaskDbId =
+    activeNarrationTaskProjectId === normalizedProjectId
+      ? activeNarrationTaskDbId
+      : '';
+  const storedTaskDbId = readNarrationTaskDbId(projectId);
+  const existingTaskDbId = inMemoryTaskDbId || storedTaskDbId;
+
+  if (hasBackendId(existingTaskDbId)) {
+    try {
+      saveNarrationTaskDbId(projectId, existingTaskDbId);
+      activeNarrationTaskProjectId = normalizedProjectId;
+      activeNarrationTaskDbId = existingTaskDbId;
+      return true;
+    } catch (error) {
+      console.error('[narration-task] local state save failed:', error);
+      systemMessage.error('旁白任务信息保存到本地失败');
+      return false;
+    }
+  }
+
+  try {
+    console.log('[narration-task] creating', {
+      renterId: '-1',
+      userId,
+      projectId,
+    });
+    const response = await createNarrationTask({
+      renterId: '-1',
+      userId: normalizeBackendId(userId),
+      projectId: normalizeBackendId(projectId),
+    });
+    if (response?.code !== undefined && Number(response.code) !== 0) {
+      throw new Error(response?.msg || '旁白任务创建失败');
+    }
+
+    const payload = getResponsePayload(response) || {};
+    const taskDbId = payload.taskDbId;
+    if (!hasBackendId(taskDbId)) {
+      throw new Error('旁白任务创建成功，但未返回 taskDbId');
+    }
+
+    activeNarrationTaskProjectId = normalizedProjectId;
+    activeNarrationTaskDbId = taskDbId;
+    saveNarrationTaskDbId(projectId, taskDbId);
+    console.log('[narration-task] created', { projectId, taskDbId });
+    return true;
+  } catch (error) {
+    console.error('[narration-task] create failed:', error);
+    systemMessage.error(error?.message || '旁白任务创建失败');
+    return false;
+  }
+}
+
 function readPendingProjectCopy(sourceProjectId, templateId) {
   try {
     const pending =
@@ -1927,7 +2030,10 @@ function flushPendingProjectTemplateUpdate() {
 
 async function createBackendProjectIfNeeded() {
   if (activeBackendProjectId.value) {
-    return true;
+    return ensureNarrationTask(
+      activeBackendProjectId.value,
+      getStoredUserId(),
+    );
   }
 
   const renterId = getStoredTenantId();
@@ -1969,7 +2075,7 @@ async function createBackendProjectIfNeeded() {
     console.log('[project] backend project created', {
       projectId: activeBackendProjectId.value,
     });
-    return true;
+    return ensureNarrationTask(activeBackendProjectId.value, userId);
   } catch (error) {
     console.error('[project] backend project create failed:', error);
     systemMessage.error(error?.message || '工程创建失败');
@@ -8810,7 +8916,7 @@ onBeforeUnmount(() => {
                       </div>
                     </Teleport>
 
-                    <div class="editor-track-row">
+                    <div v-if="false" class="editor-track-row">
                       <div class="editor-track-label">
                         <AppIcon name="subtitles" :size="15" />
                         <span>字幕</span>
@@ -9859,7 +9965,7 @@ onBeforeUnmount(() => {
 .audio-timeline-ruler .editor-timeline-playhead .timeline-playhead-line {
   top: 8px;
   bottom: auto;
-  height: 129px;
+  height: 92px;
 }
 
 .editor-track-row {

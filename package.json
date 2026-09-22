@@ -14,7 +14,7 @@
     "prebuild:dmg": "npm run build:dylibs",
     "build:dmg": "tauri build --config src-tauri/tauri.dmg.conf.json --target aarch64-apple-darwin --bundles dmg",
     "prebuild:mas:app": "npm run build:dylibs",
-    "build:win": "tauri build --config src-tauri/tauri.windows.conf.json",
+    "build:win": "tauri build --config src-tauri/tauri.windows.conf.json --bundles nsis",
     "build:mas:app": "tauri build --config src-tauri/tauri.appstore.conf.json --target aarch64-apple-darwin --bundles app",
     "build:mas:pkg": "npm run build:mas:app && node scripts/package-mas-pkg.mjs"
   },

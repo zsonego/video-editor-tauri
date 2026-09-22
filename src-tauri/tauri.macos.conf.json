@@ -3,6 +3,7 @@
     "targets": [
       "dmg"
     ],
+    "createUpdaterArtifacts": true,
     "resources": {
       "libs/macos/share/": "share/"
     },

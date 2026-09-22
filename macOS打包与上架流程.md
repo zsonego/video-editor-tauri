@@ -72,7 +72,7 @@ Mac App Store 的 `.pkg` 流程还需要 Installer 证书。这个证书名称�
 DMG 使用：
 
 ```text
-src-tauri/tauri.macos.conf.json
+src-tauri/tauri.dmg.conf.json
 ```
 
 当前关键配置：
@@ -81,8 +81,9 @@ src-tauri/tauri.macos.conf.json
 {
   "bundle": {
     "targets": ["dmg"],
+    "createUpdaterArtifacts": true,
     "macOS": {
-      "frameworks": ["libs/macos/libcomposer.dylib"],
+      "frameworks": ["libs/macos-bundle/libcomposer.dylib"],
       "signingIdentity": "Developer ID Application: Loogear Co., Ltd. (PMBZKYYRRP)",
       "hardenedRuntime": true
     }
@@ -101,7 +102,7 @@ npm run build:dmg
 等价于：
 
 ```bash
-tauri build --config src-tauri/tauri.macos.conf.json --target aarch64-apple-darwin --bundles dmg
+tauri build --config src-tauri/tauri.dmg.conf.json --target aarch64-apple-darwin --bundles dmg
 ```
 
 ### 2.3 输出位置
@@ -111,6 +112,15 @@ tauri build --config src-tauri/tauri.macos.conf.json --target aarch64-apple-darw
 ```text
 src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/
 ```
+
+启用更新签名并设置 `TAURI_SIGNING_PRIVATE_KEY` 后，还会在 `bundle/macos/` 下生成供 Tauri Updater 使用的：
+
+```text
+*.app.tar.gz
+*.app.tar.gz.sig
+```
+
+DMG 用于用户手动安装；自动更新接口应返回 `app.tar.gz` 的下载地址，以及对应 `app.tar.gz.sig` 的完整文本内容。
 
 ### 2.4 验证签名
 

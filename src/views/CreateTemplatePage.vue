@@ -5071,7 +5071,7 @@ onBeforeUnmount(() => {
             </p>
           </section>
 
-          <section class="drawer-section">
+          <section v-if="false" class="drawer-section">
             <div class="drawer-section-title with-action">
               <div>
                 <span class="step-number">04</span>

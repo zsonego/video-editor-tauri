@@ -72,6 +72,14 @@ function handleTokenInvalid(path, data, status) {
   return true;
 }
 
+function createRequestError(message, code) {
+  const error = new Error(message);
+  if (code !== undefined && code !== null && code !== '') {
+    error.code = code;
+  }
+  return error;
+}
+
 export async function request(path, options = {}) {
   const {
     method = 'POST',
@@ -98,7 +106,10 @@ export async function request(path, options = {}) {
     });
 
     if (handleTokenInvalid(path, response.data, response.status)) {
-      throw new Error(SESSION_EXPIRED_MESSAGE);
+      throw createRequestError(
+        SESSION_EXPIRED_MESSAGE,
+        response.data?.code ?? response.status,
+      );
     }
 
     return response.data;
@@ -106,7 +117,10 @@ export async function request(path, options = {}) {
     const responseData = error.response?.data;
 
     if (handleTokenInvalid(path, responseData, error.response?.status)) {
-      throw new Error(SESSION_EXPIRED_MESSAGE);
+      throw createRequestError(
+        SESSION_EXPIRED_MESSAGE,
+        responseData?.code ?? error.response?.status,
+      );
     }
 
     const message =
@@ -116,6 +130,9 @@ export async function request(path, options = {}) {
       error.message ||
       'Request failed';
 
-    throw new Error(message);
+    throw createRequestError(
+      message,
+      responseData?.code ?? error.response?.status ?? error.code,
+    );
   }
 }

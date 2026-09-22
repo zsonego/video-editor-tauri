@@ -1347,7 +1347,7 @@ defineExpose({
                 </span>
               </label>
 
-              <label v-if="false" class="property-row one-click-beauty-row">
+              <label class="property-row one-click-beauty-row">
                 <span class="property-label">一键美颜</span>
                 <span class="checkbox-control">
                   <input

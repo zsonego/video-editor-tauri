@@ -1093,6 +1093,7 @@ type ComposerState = Arc<Mutex<ComposerRuntime>>;
 
 struct ComposerRuntime {
     init_error: Option<String>,
+    config_json: Option<String>,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     _library: Option<Library>,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -1112,11 +1113,15 @@ struct ComposerRuntime {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     beauty_get_last_error: Option<ComposerBeautyGetLastErrorFn>,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
+    set_config: Option<ComposerSetConfigFn>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     initialized: bool,
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 type ComposerInitFn = unsafe extern "C" fn(*const c_char) -> c_int;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+type ComposerSetConfigFn = unsafe extern "C" fn(*const c_char) -> c_int;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 type ComposerCleanupFn = unsafe extern "C" fn();
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -1280,6 +1285,7 @@ impl ComposerRuntime {
     fn disabled(error: String) -> Self {
         Self {
             init_error: Some(error),
+            config_json: None,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             _library: None,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -1298,6 +1304,8 @@ impl ComposerRuntime {
             beauty_process_file: None,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             beauty_get_last_error: None,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            set_config: None,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             initialized: false,
         }
@@ -1483,9 +1491,25 @@ impl ComposerRuntime {
                 return Err(composer_error_message(init_result));
             }
             app_log_info("[composer] composer_init success");
+            app_log_info("[composer] resolving composer_set_config");
+            let set_config: Option<ComposerSetConfigFn> = unsafe {
+                match library.get(b"composer_set_config\0") {
+                    Ok(symbol) => {
+                        app_log_info("[composer] composer_set_config resolved");
+                        Some(*symbol)
+                    }
+                    Err(error) => {
+                        app_log_info(format!(
+                            "[composer] composer_set_config unavailable; configuration will remain cached: {error}"
+                        ));
+                        None
+                    }
+                }
+            };
 
             Ok(Self {
                 init_error: None,
+                config_json: None,
                 _library: Some(library),
                 compose,
                 compose_with_options,
@@ -1495,6 +1519,7 @@ impl ComposerRuntime {
                 beauty_process_frame,
                 beauty_process_file,
                 beauty_get_last_error,
+                set_config,
                 initialized: true,
             })
         }
@@ -1504,7 +1529,52 @@ impl ComposerRuntime {
             app_log_info("[composer] runtime is disabled on this platform");
             Ok(Self {
                 init_error: Some("Composer 动态库当前只支持 macOS 和 Windows".to_string()),
+                config_json: None,
             })
+        }
+    }
+
+    fn set_config_json(&mut self, config_json: String) -> Result<bool, String> {
+        self.config_json = Some(config_json);
+        self.apply_cached_config()
+    }
+
+    fn apply_cached_config(&self) -> Result<bool, String> {
+        let Some(config_json) = self.config_json.as_deref() else {
+            return Ok(false);
+        };
+
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            if !self.initialized || self.init_error.is_some() {
+                app_log_info("[composer] configuration cached until the runtime is initialized");
+                return Ok(false);
+            }
+
+            let Some(set_config) = self.set_config else {
+                app_log_info(
+                    "[composer] configuration cached because composer_set_config is unavailable",
+                );
+                return Ok(false);
+            };
+            let config_json = CString::new(config_json)
+                .map_err(|_| "Composer 配置 JSON 包含非法字符".to_string())?;
+            app_log_info("[composer] calling composer_set_config");
+            let result = unsafe { set_config(config_json.as_ptr()) };
+            if result != 0 {
+                let error = format!("Composer 配置设置失败，错误码 {result}");
+                app_log_error(format!("[composer] composer_set_config failed: {error}"));
+                return Err(error);
+            }
+            app_log_info("[composer] composer_set_config success");
+            return Ok(true);
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = config_json;
+            app_log_info("[composer] configuration cached on an unsupported platform");
+            Ok(false)
         }
     }
 
@@ -5119,7 +5189,7 @@ fn composer_state_is_available(composer: &ComposerState) -> Result<bool, String>
 
 #[cfg(target_os = "windows")]
 fn reinitialize_composer(composer: &ComposerState) -> Result<(), String> {
-    let new_runtime = ComposerRuntime::initialize();
+    let mut new_runtime = ComposerRuntime::initialize();
     if !new_runtime.is_available() {
         return Err(new_runtime
             .init_error
@@ -5130,9 +5200,79 @@ fn reinitialize_composer(composer: &ComposerState) -> Result<(), String> {
     let mut runtime = composer
         .lock()
         .map_err(|error| format!("无法更新 Composer 状态：{error}"))?;
+    new_runtime.config_json = runtime.config_json.clone();
     runtime.cleanup();
+    if let Err(error) = new_runtime.apply_cached_config() {
+        app_log_error(format!(
+            "[composer] failed to reapply cached configuration after initialization: {error}"
+        ));
+    }
     *runtime = new_runtime;
     Ok(())
+}
+
+#[tauri::command]
+fn set_composer_config(
+    composer: State<'_, ComposerState>,
+    config_json: String,
+) -> Result<bool, String> {
+    let mut runtime = match composer.lock() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let error = format!("无法更新 Composer 配置：{error}");
+            app_log_error(format!(
+                "[composer] composer_set_config command failed: {error}"
+            ));
+            return Err(error);
+        }
+    };
+    match runtime.set_config_json(config_json) {
+        Ok(true) => Ok(true),
+        Ok(false) => {
+            app_log_info(
+                "[composer] composer_set_config was not called; configuration remains cached",
+            );
+            Ok(false)
+        }
+        Err(error) => {
+            app_log_error(format!(
+                "[composer] composer_set_config command failed: {error}"
+            ));
+            Err(error)
+        }
+    }
+}
+
+#[tauri::command]
+fn log_beauty_age_request(success: bool, code: String, rows_count: usize, message: String) {
+    let sanitize = |value: &str| {
+        value
+            .chars()
+            .map(|character| match character {
+                '\r' | '\n' => ' ',
+                value => value,
+            })
+            .take(500)
+            .collect::<String>()
+    };
+    let code = sanitize(code.trim());
+    let message = sanitize(message.trim());
+    if success {
+        app_log_info(format!(
+            "[beauty-config] GET /aicut/beauty-age/list success code={} rows={rows_count}",
+            if code.is_empty() { "unknown" } else { &code }
+        ));
+    } else {
+        app_log_error(format!(
+            "[beauty-config] GET /aicut/beauty-age/list failed code={} error={}",
+            if code.is_empty() { "unknown" } else { &code },
+            if message.is_empty() {
+                "unknown"
+            } else {
+                &message
+            }
+        ));
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -8314,6 +8454,8 @@ pub fn run() {
             start_pr_bridge,
             stop_pr_bridge,
             take_pr_template_exports,
+            log_beauty_age_request,
+            set_composer_config,
             is_windows_runtime_ready,
             prepare_windows_runtime,
             get_cached_template_assets,

@@ -3,6 +3,7 @@
     "targets": [
       "dmg"
     ],
+    "createUpdaterArtifacts": true,
     "resources": {
       "infoplist/": "",
       "libs/macos/share/": "share/",
