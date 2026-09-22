@@ -1,5 +1,8 @@
 {
   "productName": "aicut",
+  "build": {
+    "beforeBuildCommand": "node scripts/sync-windows-native.mjs release && pnpm build"
+  },
   "bundle": {
     "resources": {
       "libs/windows/": "",

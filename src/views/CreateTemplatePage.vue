@@ -56,6 +56,7 @@ import {
   canUseTemplateFactory,
   clearCurrentPermissions,
 } from '../utils/permissions';
+import { clearStoredUploadBuckets } from '../utils/uploadBuckets';
 import lutManifest from '../../src-tauri/resources/luts/luts.json';
 
 defineOptions({ name: 'CreateTemplatePage' });
@@ -92,6 +93,7 @@ function openWorkspaceLibrary() {
 function handleAccountLogout() {
   localStorage.removeItem('token');
   localStorage.removeItem('userInfo');
+  clearStoredUploadBuckets();
   clearCurrentPermissions();
   router.replace('/login');
 }

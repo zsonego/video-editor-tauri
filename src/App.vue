@@ -17,6 +17,10 @@ import {
   clearCurrentPermissions,
   setCurrentPermissions,
 } from './utils/permissions';
+import {
+  clearStoredUploadBuckets,
+  refreshStoredUploadBuckets,
+} from './utils/uploadBuckets';
 
 const router = useRouter();
 const appBootLoading = ref(false);
@@ -52,6 +56,7 @@ function getStoredUserIdentity() {
 async function refreshStartupPermissions() {
   if (!localStorage.getItem('token')) {
     clearCurrentPermissions();
+    clearStoredUploadBuckets();
     return;
   }
 
@@ -65,6 +70,7 @@ async function refreshStartupPermissions() {
       ? response.permissions
       : response?.data?.permissions;
     setCurrentPermissions(permissions);
+    await refreshStoredUploadBuckets();
   } catch (error) {
     console.warn('[permissions] startup refresh failed:', error);
   }
@@ -198,6 +204,7 @@ function handleLoginSuccess() {
 function handleLogout() {
   localStorage.removeItem('token');
   localStorage.removeItem('userInfo');
+  clearStoredUploadBuckets();
   clearCurrentPermissions();
   router.replace('/login');
 }

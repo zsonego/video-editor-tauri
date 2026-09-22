@@ -21,6 +21,10 @@ const props = defineProps({
   projectReadOnly: { type: Boolean, default: false },
   editAgainLoading: { type: Boolean, default: false },
   materialResetLoading: { type: Boolean, default: false },
+  onlineSource: { type: Boolean, default: false },
+  sourceExpiresAt: { type: Number, default: 0 },
+  downloadAvailable: { type: Boolean, default: false },
+  downloadLoading: { type: Boolean, default: false },
 });
 
 const emit = defineEmits([
@@ -35,7 +39,10 @@ const emit = defineEmits([
   'material-reset-request',
   'edit-again-request',
   'layout-change',
+  'source-refresh-request',
+  'download-request',
 ]);
+const ONLINE_SOURCE_REFRESH_MARGIN_MS = 60 * 1000;
 
 const CANVAS_WIDTH = 960;
 const CANVAS_HEIGHT = 540;
@@ -671,11 +678,25 @@ async function togglePlayback() {
   }
   clearBeautyPreview();
   try {
-    if (videoElement.paused) await videoElement.play();
+    if (videoElement.paused) await play();
     else videoElement.pause();
   } catch {
     errorMessage.value = '浏览器阻止了视频播放，请再次点击播放。';
   }
+}
+
+async function play() {
+  if (!videoElement || !isReady.value) return false;
+  if (
+    props.onlineSource &&
+    (!props.sourceExpiresAt ||
+      props.sourceExpiresAt - ONLINE_SOURCE_REFRESH_MARGIN_MS <= Date.now())
+  ) {
+    emit('source-refresh-request');
+    return false;
+  }
+  await videoElement.play();
+  return true;
 }
 
 function pause() {
@@ -855,6 +876,7 @@ defineExpose({
   getCurrentTime,
   getTransform,
   pause,
+  play,
   resetBeauty,
   restoreProperties,
   resetRotation,
@@ -880,6 +902,20 @@ defineExpose({
       <div class="canvas-column">
         <div class="canvas-shell" :class="{ empty: !isReady }">
           <canvas ref="canvasElement" />
+          <button
+            v-if="downloadAvailable"
+            class="online-video-download-button"
+            type="button"
+            :disabled="downloadLoading"
+            :aria-label="downloadLoading ? '正在下载' : '下载当前视频'"
+            :title="downloadLoading ? '正在下载' : '下载当前视频'"
+            @click.stop="emit('download-request')"
+          >
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+              <path v-if="!downloadLoading" d="M12 3v12m0 0 5-5m-5 5-5-5M5 20h14" />
+              <path v-else class="online-video-download-spinner" d="M20 12a8 8 0 1 1-2.34-5.66" />
+            </svg>
+          </button>
           <img
             v-if="beautyPreviewSource"
             class="beauty-preview-media"
@@ -961,8 +997,8 @@ defineExpose({
           <button
             class="material-reset-button"
             type="button"
-            :disabled="materialResetLoading || projectReadOnly"
-            @click="materialResetConfirmVisible = true"
+            :disabled="materialResetLoading || projectReadOnly || propertiesLocked"
+            @click="!propertiesLocked && (materialResetConfirmVisible = true)"
           >
             {{ materialResetLoading ? '重置中…' : '素材重置' }}
           </button>
@@ -1508,6 +1544,54 @@ defineExpose({
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 10px;
   background: #000000;
+}
+
+.online-video-download-button {
+  position: absolute;
+  z-index: 8;
+  top: 14px;
+  right: 14px;
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgb(255 255 255 / 18%);
+  border-radius: 10px;
+  color: white;
+  background: rgb(12 15 22 / 78%);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 28%);
+  backdrop-filter: blur(10px);
+  cursor: pointer;
+}
+
+.online-video-download-button:hover:not(:disabled) {
+  background: rgb(21 101 255 / 88%);
+}
+
+.online-video-download-button:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+
+.online-video-download-button svg {
+  width: 21px;
+  height: 21px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.online-video-download-spinner {
+  transform-origin: center;
+  animation: online-video-download-spin 0.8s linear infinite;
+}
+
+@keyframes online-video-download-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .canvas-shell :deep(.canvas-container) {

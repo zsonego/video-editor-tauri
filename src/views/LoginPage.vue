@@ -7,6 +7,10 @@ import {
   clearCurrentPermissions,
   setCurrentPermissions,
 } from '../utils/permissions';
+import {
+  clearStoredUploadBuckets,
+  refreshStoredUploadBuckets,
+} from '../utils/uploadBuckets';
 import backgroundVideo from '../assets/background.mp4';
 import boxImage from '../assets/box.png';
 import logoImage from '../assets/logo1.png';
@@ -177,6 +181,7 @@ async function fetchLoginUserInfo(identity) {
 }
 
 function saveLoginToken(token) {
+  clearStoredUploadBuckets();
   localStorage.setItem('token', token);
 }
 
@@ -205,7 +210,8 @@ function resetForcePasswordForm() {
   forcePasswordForm.confirmPassword = '';
 }
 
-function finishLogin(loginResponse, userInfo, identity, backendMessage = '') {
+async function finishLogin(loginResponse, userInfo, identity, backendMessage = '') {
+  await refreshStoredUploadBuckets();
   saveUserInfo(userInfo, identity);
   systemMessage.success(backendMessage || '登录成功');
   tenantDialogVisible.value = false;
@@ -396,14 +402,7 @@ async function submitLogin(extra = {}) {
         return;
       }
 
-      saveUserInfo(userInfo, identity);
-      systemMessage.success(backendMessage || '登录成功');
-      tenantDialogVisible.value = false;
-      emit('login', {
-        login: response,
-        userInfo,
-        identity,
-      });
+      await finishLogin(response, userInfo, identity, backendMessage);
       return;
     }
 
@@ -427,6 +426,8 @@ async function submitLogin(extra = {}) {
     systemMessage.error(backendMessage || '登录失败');
   } catch (error) {
     localStorage.removeItem('token');
+    localStorage.removeItem('userInfo');
+    clearStoredUploadBuckets();
     clearCurrentPermissions();
     systemMessage.error(error?.message || '登录请求失败');
   } finally {
@@ -493,7 +494,7 @@ async function submitForcePasswordReset() {
     };
     const refreshedUserInfo = await fetchLoginUserInfo(nextIdentity);
 
-    finishLogin(
+    await finishLogin(
       context.loginResponse,
       refreshedUserInfo,
       nextIdentity,

@@ -1,4 +1,5 @@
 import { request } from "./request";
+import { getStoredUploadBucket } from "../utils/uploadBuckets";
 
 export function createTemplateDraft(renterId = "-1") {
   const query = new URLSearchParams({
@@ -23,13 +24,6 @@ export function getTemplateDetail(data = {}) {
   return request("/api/template/detail", { data });
 }
 
-export function getTemplateBosPresignedUrls(templateId) {
-  return request("/api/aicut/file/bos/presigned-urls", {
-    method: "GET",
-    data: { templateId },
-  });
-}
-
 export function favoriteTemplate(data = {}) {
   return request("/api/template/favorite", { data });
 }
@@ -38,11 +32,16 @@ export function getFavoriteTemplates(data = {}) {
   return request("/api/template/favorite/list", { data });
 }
 
-export function downloadTemplateCover(templateId) {
+export async function downloadTemplateCover(templateId) {
+  const bucket = getStoredUploadBucket("template-bucket");
+  if (!bucket) {
+    throw new Error("模板桶配置缺失，请重新登录");
+  }
+
   return request("/aicut/file/download", {
     method: "GET",
     data: {
-      bucket: "template",
+      bucket,
       path: `${templateId}/cover.png`,
       thumbnail: true,
     },

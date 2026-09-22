@@ -34,13 +34,15 @@ import {
   downloadTemplateCover,
   favoriteTemplate,
   getFavoriteTemplates,
-  getTemplateBosPresignedUrls,
   getTemplateCategories,
   getTemplateDetail,
   getTemplates,
 } from '../api/template';
+import { getBosDownloadUrl } from '../api/file';
+import { encodeBase64Url } from '../config/windowsRuntime';
 import { systemMessage } from '../utils/message';
 import { canUseTemplateFactory } from '../utils/permissions';
+import { getStoredUploadBucket } from '../utils/uploadBuckets';
 import dingAudio from '../assets/ding.mp3';
 import hotImage from '../assets/hot.png';
 import logoImage from '../assets/logo.png';
@@ -104,6 +106,13 @@ const activeTemplateExportCredit = ref(0);
 const activeTemplateLocalInfo = ref(null);
 const originalTemplateXmlContent = ref('');
 const activeTemplateDemoSource = ref('');
+const templateOnlineUrlCache = new Map();
+const templateOnlineUrlRequests = new Map();
+const TEMPLATE_ONLINE_CACHE_MODE = 'row-online';
+const TEMPLATE_ONLINE_URL_REFRESH_MARGIN_MS = 60 * 1000;
+let activeTemplateDemoRequestId = 0;
+let activeTemplateDemoErrorRetryCount = 0;
+let pendingModalPreviewSeekTime = null;
 const activeProjectDir = ref('');
 const activeBackendProjectId = ref('');
 const activeProjectExported = ref(false);
@@ -402,6 +411,8 @@ const projectPreviewProgress = ref(0);
 const projectPreviewStatus = ref('正在准备预览...');
 const projectPreviewSource = ref('');
 const defaultTemplateExportConfirmVisible = ref(false);
+const pendingDefaultTemplateAction = ref('');
+const pendingDefaultTemplateTasks = ref([]);
 const importOverwriteConfirmVisible = ref(false);
 const pendingImportSegment = ref(null);
 const importRepeatConfirmVisible = ref(false);
@@ -523,6 +534,13 @@ const modalPreviewProgressDragging = ref(false);
 const selectedVideoDuration = ref('00:00');
 const selectedVideoSource = ref('');
 const selectedVideoPath = ref('');
+const selectedVideoOnlineOnly = ref(false);
+const selectedVideoSourceExpiresAt = ref(0);
+const selectedVideoDownloadLoading = ref(false);
+const templateAssetDownloadRunning = ref(false);
+const templateAssetPreflightRunning = ref(false);
+let pendingOnlineAssetAutoplayKey = '';
+const onlineAssetErrorRetries = new Set();
 const beautyFramePreviewLoading = ref(false);
 const beautyVideoPreviewLoading = ref(false);
 const beautyVideoPreviewActive = ref(false);
@@ -1026,9 +1044,22 @@ const selectedVideoGeneratePath = computed(() =>
   ),
 );
 const selectedVideoPropertiesLocked = computed(
-  () => activeProjectHasPaid.value || Boolean(selectedVideoGeneratePath.value),
+  () =>
+    activeProjectHasPaid.value ||
+    selectedVideoOnlineOnly.value ||
+    Boolean(selectedVideoGeneratePath.value),
 );
 const activeProjectReadOnly = computed(() => activeProjectHasPaid.value);
+const defaultTemplateConfirmTitle = computed(() =>
+  pendingDefaultTemplateAction.value === 'preview' ? '确认预览' : '确认导出',
+);
+const defaultTemplateConfirmMessage = computed(() => {
+  const actionLabel =
+    pendingDefaultTemplateAction.value === 'preview' ? '预览' : '导出';
+  return pendingDefaultTemplateTasks.value.length > 0
+    ? `当前工程存在未替换的默认模板视频，确定后将先下载资源并继续${actionLabel}。`
+    : `当前工程存在未替换的默认模板视频，是否${actionLabel}？`;
+});
 
 // 页面级导航和主视图切换。
 function statusMeta(status) {
@@ -1047,7 +1078,6 @@ function statusMeta(status) {
 
 async function goHome() {
   await flushPendingAssetPropertyUpdates();
-  enqueueCurrentDirtyAssetVideo();
   flushPendingProjectTemplateUpdate();
   invalidateBeautyPreview();
   resetDraftBatchDelete();
@@ -1075,6 +1105,8 @@ async function goHome() {
   activeTemplateLocalInfo.value = null;
   originalTemplateXmlContent.value = '';
   activeTemplateSegments.value = [];
+  activeTemplateDemoRequestId += 1;
+  pendingModalPreviewSeekTime = null;
   activeTemplateDemoSource.value = '';
   activeProjectDir.value = '';
   activeBackendProjectId.value = '';
@@ -1082,6 +1114,11 @@ async function goHome() {
   editingFromDraftLibrary.value = false;
   selectedVideoSource.value = '';
   selectedVideoPath.value = '';
+  selectedVideoOnlineOnly.value = false;
+  selectedVideoSourceExpiresAt.value = 0;
+  selectedVideoDownloadLoading.value = false;
+  pendingOnlineAssetAutoplayKey = '';
+  onlineAssetErrorRetries.clear();
 
   resetModalPreviewVideo();
   resetMainPlayer();
@@ -1112,6 +1149,8 @@ function toggleSidebar(show) {
 }
 
 function openPreview(title, subtitle) {
+  activeTemplateDemoRequestId += 1;
+  pendingModalPreviewSeekTime = null;
   showFinishedControls.value = false;
   activeTemplateId.value = '';
   activeTemplateExportCredit.value = 0;
@@ -1156,7 +1195,20 @@ function enterTemplatePreview(topic, templateId, localInfo) {
     : 0;
   activeTemplateLocalInfo.value = localInfo;
   originalTemplateXmlContent.value = localInfo.xmlContent || '';
-  activeTemplateDemoSource.value = resolveTemplateVideoSource(demoPath);
+  activeTemplateDemoErrorRetryCount = 0;
+  pendingModalPreviewSeekTime = null;
+  if (localInfo.cacheMode === TEMPLATE_ONLINE_CACHE_MODE) {
+    activeTemplateDemoSource.value = '';
+    void refreshActiveTemplateDemoSource(templateId, localInfo).catch(
+      (error) => {
+        console.error('[template-preview] demo URL fetch failed:', error);
+        systemMessage.error(error?.message || '模板预览视频地址获取失败');
+      },
+    );
+  } else {
+    activeTemplateDemoRequestId += 1;
+    activeTemplateDemoSource.value = resolveTemplateVideoSource(demoPath);
+  }
   activeProjectDir.value = '';
   activeBackendProjectId.value = '';
   activeProjectExported.value = false;
@@ -1169,20 +1221,175 @@ function isSuccessfulBosPresignedUrlResponse(response) {
   return [0, 200].includes(Number(response.code));
 }
 
-async function getBosTemplateDownloadUrls(templateId) {
-  const response = await getTemplateBosPresignedUrls(templateId);
+function getTemplateBosObjectPath(templateBucket, templateId, fileName) {
+  return `${templateBucket}/${templateId}/${fileName}`;
+}
+
+async function requestBosObjectDownloadUrl(objectPath) {
+  const response = await getBosDownloadUrl(encodeBase64Url(objectPath));
   if (!isSuccessfulBosPresignedUrlResponse(response)) {
-    throw new Error(response?.msg || '模板下载地址获取失败');
+    throw new Error(response?.msg || '文件下载地址获取失败');
   }
 
   const payload = getResponsePayload(response) || {};
-  const xmlUrl = String(payload.xmlUrl || '').trim();
-  const assetsUrl = String(payload.assetsUrl || '').trim();
-  if (!xmlUrl || !assetsUrl) {
-    throw new Error('模板下载地址不完整');
+  const url = String(payload.url || '').trim();
+  const expiresAt = Date.parse(String(payload.expiration || '').trim());
+  if (!url) {
+    throw new Error('文件下载接口未返回地址');
+  }
+  if (!Number.isFinite(expiresAt)) {
+    throw new Error('文件下载接口未返回有效过期时间');
   }
 
-  return { xmlUrl, assetsUrl };
+  return { url, expiresAt };
+}
+
+function isTemplateOnlineUrlFresh(entry) {
+  return (
+    Boolean(entry?.url) &&
+    Number(entry?.expiresAt) - TEMPLATE_ONLINE_URL_REFRESH_MARGIN_MS > Date.now()
+  );
+}
+
+async function getTemplateOnlineUrl(objectPath, { force = false } = {}) {
+  const cached = templateOnlineUrlCache.get(objectPath);
+  if (!force && isTemplateOnlineUrlFresh(cached)) {
+    return cached;
+  }
+
+  const pending = templateOnlineUrlRequests.get(objectPath);
+  if (pending) return pending;
+
+  const request = requestBosObjectDownloadUrl(objectPath)
+    .then((entry) => {
+      templateOnlineUrlCache.set(objectPath, entry);
+      return entry;
+    })
+    .finally(() => {
+      templateOnlineUrlRequests.delete(objectPath);
+    });
+  templateOnlineUrlRequests.set(objectPath, request);
+  return request;
+}
+
+function findTemplateVideoByKey(videoKey) {
+  for (const segment of importSegments.value) {
+    const video = segment.videos.find(
+      (candidate) => (candidate.id || candidate.name) === videoKey,
+    );
+    if (video) return video;
+  }
+  return null;
+}
+
+async function ensureTemplateAssetOnlineSource(
+  video,
+  { force = false, autoplay = false } = {},
+) {
+  if (!video?.onlineOnly || !video.remoteObjectPath) return false;
+  const videoKey = video.id || video.name;
+  const entry = await getTemplateOnlineUrl(video.remoteObjectPath, { force });
+  if (!video.onlineOnly) return false;
+
+  video.source = entry.url;
+  video.expiresAt = entry.expiresAt;
+  if (selectedVideoKey.value !== videoKey) return true;
+
+  const sourceChanged = selectedVideoSource.value !== entry.url;
+  if (autoplay && sourceChanged) pendingOnlineAssetAutoplayKey = videoKey;
+  selectedVideoSourceExpiresAt.value = entry.expiresAt;
+  selectedVideoSource.value = entry.url;
+  if (autoplay && !sourceChanged) {
+    await nextTick();
+    await videoTransformerRef.value?.play?.();
+  }
+  return true;
+}
+
+async function refreshSelectedOnlineAssetSource({ autoplay = false } = {}) {
+  const video = findTemplateVideoByKey(selectedVideoKey.value);
+  if (!video?.onlineOnly) return false;
+  try {
+    return await ensureTemplateAssetOnlineSource(video, {
+      force: true,
+      autoplay,
+    });
+  } catch (error) {
+    pendingOnlineAssetAutoplayKey = '';
+    systemMessage.error(error?.message || '在线视频地址获取失败');
+    return false;
+  }
+}
+
+async function refreshActiveTemplateDemoSource(
+  templateId,
+  localInfo = activeTemplateLocalInfo.value,
+  { force = false, preserveTime = false } = {},
+) {
+  if (localInfo?.cacheMode !== TEMPLATE_ONLINE_CACHE_MODE) return false;
+
+  const templateBucket = String(
+    localInfo.templateBucket || getStoredUploadBucket('template-bucket'),
+  ).trim();
+  if (!templateBucket) {
+    throw new Error('模板桶配置缺失，请重新登录');
+  }
+
+  const objectPath = getTemplateBosObjectPath(
+    templateBucket,
+    templateId,
+    'template.mp4',
+  );
+  const requestId = ++activeTemplateDemoRequestId;
+  if (preserveTime) {
+    const currentTime = Number(modalVideoRef.value?.currentTime);
+    pendingModalPreviewSeekTime = Number.isFinite(currentTime)
+      ? Math.max(0, currentTime)
+      : null;
+  }
+
+  let entry;
+  try {
+    entry = await getTemplateOnlineUrl(objectPath, { force });
+  } catch (error) {
+    if (requestId === activeTemplateDemoRequestId) {
+      pendingModalPreviewSeekTime = null;
+    }
+    throw error;
+  }
+  if (
+    requestId !== activeTemplateDemoRequestId ||
+    String(activeTemplateId.value) !== String(templateId) ||
+    activeTemplateLocalInfo.value?.cacheMode !== TEMPLATE_ONLINE_CACHE_MODE
+  ) {
+    if (requestId === activeTemplateDemoRequestId) {
+      pendingModalPreviewSeekTime = null;
+    }
+    return false;
+  }
+
+  if (!force && activeTemplateDemoSource.value === entry.url) {
+    pendingModalPreviewSeekTime = null;
+    return true;
+  }
+
+  activeTemplateDemoSource.value = entry.url;
+  await nextTick();
+  modalVideoRef.value?.load?.();
+  return true;
+}
+
+async function getBosTemplateDownloadUrls(templateId, templateBucket) {
+  const [xmlEntry, assetsEntry] = await Promise.all([
+    requestBosObjectDownloadUrl(
+      getTemplateBosObjectPath(templateBucket, templateId, 'template.xml'),
+    ),
+    requestBosObjectDownloadUrl(
+      getTemplateBosObjectPath(templateBucket, templateId, 'assets-row.zip'),
+    ),
+  ]);
+
+  return { xmlUrl: xmlEntry.url, assetsUrl: assetsEntry.url };
 }
 
 function isBosPresignedUrlExpiredError(error) {
@@ -1193,6 +1400,7 @@ function isBosPresignedUrlExpiredError(error) {
 async function prepareTemplateAssetsWithBosUrls({
   templateId,
   templateVersion,
+  templateBucket,
   downloadId,
 }) {
   let lastError = null;
@@ -1209,7 +1417,10 @@ async function prepareTemplateAssetsWithBosUrls({
       attempt === 0
         ? '正在获取模板下载地址...'
         : '下载地址已失效，正在刷新后续传...';
-    const { xmlUrl, assetsUrl } = await getBosTemplateDownloadUrls(templateId);
+    const { xmlUrl, assetsUrl } = await getBosTemplateDownloadUrls(
+      templateId,
+      templateBucket,
+    );
     if (
       templateDownloadCancelRequested.value ||
       canceledTemplateDownloadIds.has(downloadId)
@@ -1221,6 +1432,7 @@ async function prepareTemplateAssetsWithBosUrls({
       return await invoke('prepare_template_assets', {
         templateId,
         templateVersion,
+        templateBucket,
         templateFileUrl: xmlUrl,
         materialPackageUrl: assetsUrl,
         downloadId,
@@ -1277,10 +1489,15 @@ async function openTemplatePreview(topic) {
     }
     const detail = getResponsePayload(detailResponse) || {};
     const templateVersion = String(detail.version ?? '');
+    const templateBucket = getStoredUploadBucket('template-bucket');
+    if (!templateBucket) {
+      throw new Error('模板桶配置缺失，请重新登录');
+    }
 
     const cachedInfo = await invoke('get_cached_template_assets', {
       templateId: localTemplateId,
       templateVersion,
+      templateBucket,
     });
     if (cachedInfo) {
       enterTemplatePreview(topic, localTemplateId, cachedInfo);
@@ -1317,6 +1534,7 @@ async function openTemplatePreview(topic) {
     const localInfo = await prepareTemplateAssetsWithBosUrls({
       templateId: localTemplateId,
       templateVersion,
+      templateBucket,
       downloadId,
     });
     if (canceledTemplateDownloadIds.has(downloadId)) {
@@ -1903,7 +2121,9 @@ function hasImportedVideoInSegment(segment) {
 function hasDefaultTemplateVideos() {
   return importSegments.value.some((segment) =>
     segment.videos.some(
-      (video) => Boolean(video?.localPath) && !isProjectImportedVideo(video),
+      (video) =>
+        (Boolean(video?.localPath) || Boolean(video?.onlineOnly)) &&
+        !isProjectImportedVideo(video),
     ),
   );
 }
@@ -2427,7 +2647,7 @@ async function confirmAdaptiveDurationAction() {
   if (action === 'preview') {
     await startSidebarVideoPreview();
   } else if (action === 'export') {
-    await continueExportConfirmation();
+    await selectExportFile();
   }
 }
 
@@ -2484,21 +2704,42 @@ async function createTemplateAssetVideo(asset, index) {
     !hasExistenceSnapshot || existingAssetIds.includes(String(asset.id || ''));
   const localPath = exists ? resolveTemplateAssetPath(asset.filepath) : '';
   const source = exists ? resolveTemplateVideoSource(asset.filepath) : '';
+  const fileName = getFileNameFromPath(asset.filepath);
+  const onlineOnly =
+    activeTemplateLocalInfo.value?.cacheMode === TEMPLATE_ONLINE_CACHE_MODE &&
+    !exists;
+  const templateBucket = String(
+    activeTemplateLocalInfo.value?.templateBucket ||
+      getStoredUploadBucket('template-bucket'),
+  ).trim();
+  const remoteObjectPath =
+    onlineOnly && templateBucket
+      ? getTemplateBosObjectPath(
+          templateBucket,
+          activeTemplateId.value,
+          fileName,
+        )
+      : '';
   const metadata = source
     ? await getVideoMetadata(source)
     : { durationSeconds: 0, duration: '--' };
 
   return {
     id: `template-${asset.id || index}-${asset.filepath || index}`,
-    name: exists
-      ? getDisplayVideoName(asset.filepath) || `素材 ${index + 1}`
-      : `待导入视频 ${index + 1}`,
+    name:
+      getDisplayVideoName(asset.filepath) ||
+      (exists ? `素材 ${index + 1}` : `待导入视频 ${index + 1}`),
     duration: metadata.duration,
     durationSeconds: metadata.durationSeconds,
     source,
     localPath,
     assetId: asset.id || '',
     missing: !exists,
+    onlineOnly,
+    remoteFileName: onlineOnly ? fileName : '',
+    remoteObjectPath,
+    expiresAt: 0,
+    downloadLoading: false,
   };
 }
 
@@ -2547,6 +2788,11 @@ function clearProjectEditingState() {
   selectedVideoAssetId.value = '';
   selectedVideoSource.value = '';
   selectedVideoPath.value = '';
+  selectedVideoOnlineOnly.value = false;
+  selectedVideoSourceExpiresAt.value = 0;
+  selectedVideoDownloadLoading.value = false;
+  pendingOnlineAssetAutoplayKey = '';
+  onlineAssetErrorRetries.clear();
   selectedVideoDuration.value = '00:00';
   selectedStyleName.value = '';
   subtitleText.value = defaultSubtitleText;
@@ -3251,6 +3497,10 @@ function selectVideoForTimeline(video, styleName = '') {
   selectedVideoDuration.value = videoInfo.duration || '00:00';
   selectedVideoSource.value = videoInfo.source || '';
   selectedVideoPath.value = videoInfo.localPath || '';
+  selectedVideoOnlineOnly.value = Boolean(videoInfo.onlineOnly);
+  selectedVideoSourceExpiresAt.value = Number(videoInfo.expiresAt) || 0;
+  selectedVideoDownloadLoading.value = Boolean(videoInfo.downloadLoading);
+  pendingOnlineAssetAutoplayKey = '';
   playerCurrentTime.value = 0;
   timelinePlayheadTime.value = 0;
   timelinePreviewSeeking.value = false;
@@ -3276,6 +3526,10 @@ function selectVideoForTimeline(video, styleName = '') {
     );
     syncPlayheadToTimelineStart();
     playerCurrentTime.value = timelinePlayheadTime.value;
+  } else {
+    timeline.totalDuration = 1;
+    timeline.selectedDuration = 1;
+    timeline.startTime = 0;
   }
   selectedVideoAssetId.value = videoInfo.assetId || '';
   logTemplateAssetDurationMatch(videoInfo);
@@ -3289,6 +3543,13 @@ function selectVideoForTimeline(video, styleName = '') {
       preservePreviewSeeking: true,
     });
   });
+  if (videoInfo.onlineOnly) {
+    void ensureTemplateAssetOnlineSource(videoInfo).catch((error) => {
+      if (selectedVideoKey.value === nextVideoKey) {
+        systemMessage.error(error?.message || '在线视频地址获取失败');
+      }
+    });
+  }
   timelinePulse.value = true;
   window.setTimeout(() => {
     timelinePulse.value = false;
@@ -3318,11 +3579,30 @@ function updateTransformerVideoControls(state = {}) {
   }
 }
 
-async function handleTransformerVideoLoaded() {
+async function handleTransformerVideoLoaded(payload = {}) {
+  const loadedDuration = Number(payload.duration) || 0;
+  const selectedVideo = findTemplateVideoByKey(selectedVideoKey.value);
+  if (selectedVideo?.onlineOnly && loadedDuration > 0) {
+    selectedVideo.durationSeconds = loadedDuration;
+    selectedVideo.duration = formatPlayerTime(loadedDuration);
+    selectedVideoDuration.value = selectedVideo.duration;
+    timeline.totalDuration = Math.max(1, loadedDuration);
+    timeline.selectedDuration = Math.min(
+      timeline.totalDuration,
+      getTimelineSelectionDuration(selectedVideo, loadedDuration),
+    );
+    timeline.startTime = clampTimelineStart(timeline.startTime);
+    onlineAssetErrorRetries.delete(selectedVideoKey.value);
+  }
   const targetTime = Math.max(0, Number(timelinePlayheadTime.value) || 0);
   videoTransformerRef.value?.seekTo?.(targetTime);
   pendingMainVideoSeekTime = null;
   timelinePreviewSeeking.value = false;
+
+  if (pendingOnlineAssetAutoplayKey === selectedVideoKey.value) {
+    pendingOnlineAssetAutoplayKey = '';
+    await videoTransformerRef.value?.play?.();
+  }
 
   const generatePath = selectedVideoGeneratePath.value;
   if (!generatePath) return;
@@ -3655,6 +3935,13 @@ async function waitForAssetVideoPreprocessQueueToSettle() {
   }
 }
 
+async function processCurrentDirtyAssetVideoBeforeCompose() {
+  await flushSelectedVideoOffsetPersist();
+  await flushPendingAssetPropertyUpdates();
+  enqueueCurrentDirtyAssetVideo();
+  await waitForAssetVideoPreprocessQueueToSettle();
+}
+
 function cancelAllAssetVideoPreprocessTasks() {
   assetVideoPreprocessEpoch += 1;
   assetVideoPreprocessQueue.splice(0);
@@ -3910,7 +4197,7 @@ function scheduleBeautyPreview(values, delay = BEAUTY_PREVIEW_DEBOUNCE_MS) {
 }
 
 async function handleBeautyPreviewRequest(values) {
-  if (activeProjectReadOnly.value) return;
+  if (selectedVideoPropertiesLocked.value) return;
   if (beautyVideoPreviewLoading.value) return;
   if (!selectedVideoPath.value) {
     systemMessage.error('当前视频没有可用的本地文件路径');
@@ -3936,12 +4223,49 @@ async function handleBeautyPreviewRequest(values) {
   enqueueManualAssetVideoPreview(task);
 }
 
+async function continueDefaultTemplateAction(action) {
+  refreshInvalidDurationVideoState();
+  if (requestAdaptiveDurationConfirmation(action)) return;
+  if (action === 'preview') {
+    await startSidebarVideoPreview();
+  } else if (action === 'export') {
+    await selectExportFile();
+  }
+}
+
+async function prepareDefaultTemplateAction(action) {
+  if (templateAssetPreflightRunning.value) return;
+  templateAssetPreflightRunning.value = true;
+  let tasks;
+  try {
+    tasks = await collectMissingTemplateVideoTasks();
+  } catch (error) {
+    systemMessage.error(error?.message || '检查模板视频失败');
+    return;
+  } finally {
+    templateAssetPreflightRunning.value = false;
+  }
+
+  const shouldConfirm =
+    tasks.length > 0 || (action === 'export' && hasDefaultTemplateVideos());
+  if (!shouldConfirm) {
+    await continueDefaultTemplateAction(action);
+    return;
+  }
+
+  pendingDefaultTemplateAction.value = action;
+  pendingDefaultTemplateTasks.value = tasks;
+  defaultTemplateExportConfirmVisible.value = true;
+}
+
 async function handleSidebarVideoPreview() {
   if (
     projectPreviewRunning.value ||
     exportRunning.value ||
     exportPreparing.value ||
-    assetVideoPreprocessBusy.value
+    assetVideoPreprocessBusy.value ||
+    templateAssetDownloadRunning.value ||
+    templateAssetPreflightRunning.value
   ) {
     return;
   }
@@ -3949,10 +4273,7 @@ async function handleSidebarVideoPreview() {
     systemMessage.error('请先开始编辑');
     return;
   }
-  refreshInvalidDurationVideoState();
-  if (requestAdaptiveDurationConfirmation('preview')) return;
-
-  await startSidebarVideoPreview();
+  await prepareDefaultTemplateAction('preview');
 }
 
 async function startSidebarVideoPreview() {
@@ -3972,8 +4293,7 @@ async function startSidebarVideoPreview() {
   const previewId = `composer-preview-${Date.now()}`;
 
   try {
-    await flushSelectedVideoOffsetPersist();
-    await flushPendingAssetPropertyUpdates();
+    await processCurrentDirtyAssetVideoBeforeCompose();
 
     projectPreviewProgressUnlisten?.();
     projectPreviewProgressUnlisten = await listen(
@@ -4095,7 +4415,7 @@ async function handleApplyGeneratedVideo(values) {
 }
 
 async function handleMaterialResetRequest() {
-  if (materialResetting.value || activeProjectReadOnly.value) return;
+  if (materialResetting.value || selectedVideoPropertiesLocked.value) return;
   const projectDir = activeProjectDir.value;
   const assetId = selectedVideoAssetId.value;
   if (!projectDir || !assetId) {
@@ -4360,6 +4680,7 @@ async function initializeProjectAssetOffsets() {
 
   for (const segment of importSegments.value) {
     for (const video of segment.videos) {
+      if (video.onlineOnly) continue;
       const assetId = String(video.assetId || '').trim();
       if (!assetId || initializedAssetIds.has(assetId)) continue;
 
@@ -4375,6 +4696,7 @@ async function initializeProjectAssetProperties() {
 
   for (const segment of importSegments.value) {
     for (const video of segment.videos) {
+      if (video.onlineOnly) continue;
       const assetId = String(video.assetId || '').trim();
       if (!assetId || initializedAssetIds.has(assetId)) continue;
 
@@ -4517,13 +4839,20 @@ function handleMainVideoLoadedData() {
 }
 
 function handleModalVideoLoadedMetadata() {
+  activeTemplateDemoErrorRetryCount = 0;
+  const targetTime = pendingModalPreviewSeekTime ?? 0;
+  pendingModalPreviewSeekTime = null;
   updateModalPreviewControls();
-  revealPausedVideoFrame(modalVideoRef.value, 0, updateModalPreviewControls);
+  revealPausedVideoFrame(
+    modalVideoRef.value,
+    targetTime,
+    updateModalPreviewControls,
+  );
 }
 
 // 将用户调整后的素材偏移写回工程 XML。
 async function persistSelectedVideoOffset(assetId, offsetMs) {
-  if (activeProjectReadOnly.value) return;
+  if (selectedVideoPropertiesLocked.value) return;
   if (!activeProjectDir.value || !assetId) return;
 
   try {
@@ -4546,7 +4875,7 @@ async function persistSelectedVideoOffset(assetId, offsetMs) {
 }
 
 function scheduleSelectedVideoOffsetPersist() {
-  if (activeProjectReadOnly.value) return;
+  if (selectedVideoPropertiesLocked.value) return;
   if (offsetPersistTimer) {
     window.clearTimeout(offsetPersistTimer);
   }
@@ -4562,7 +4891,7 @@ function scheduleSelectedVideoOffsetPersist() {
 }
 
 async function flushSelectedVideoOffsetPersist() {
-  if (activeProjectReadOnly.value) return;
+  if (selectedVideoPropertiesLocked.value) return;
   if (offsetPersistTimer) {
     window.clearTimeout(offsetPersistTimer);
     offsetPersistTimer = null;
@@ -4680,7 +5009,7 @@ async function applySubtitleChange() {
 
 // 拖动选区时限制其始终落在时间线有效范围内。
 function startTimelineDrag(event) {
-  if (beautyVideoPreviewActive.value || activeProjectReadOnly.value) return;
+  if (beautyVideoPreviewActive.value || selectedVideoPropertiesLocked.value) return;
   const track = timelineTrackRef.value;
   if (!track) return;
 
@@ -4734,7 +5063,6 @@ function startTimelineDrag(event) {
 function showDraftLibrary() {
   if (draftLibraryVisible.value) return;
 
-  enqueueCurrentDirtyAssetVideo();
   resetDraftTitleEdit();
   finishedLibraryVisible.value = false;
   draftLibraryVisible.value = true;
@@ -4970,8 +5298,13 @@ async function activateDraftProjectWorkspace(
     assetsDir: workspace.assetsDir || '',
     xmlContent: templateXml,
     existingAssetIds: workspace.existingAssetIds || [],
+    cacheMode: workspace.cacheMode || '',
+    templateBucket:
+      workspace.templateBucket || getStoredUploadBucket('template-bucket'),
   };
   activeTemplateSegments.value = parseTemplateSegments(templateXml);
+  activeTemplateDemoRequestId += 1;
+  pendingModalPreviewSeekTime = null;
   activeTemplateDemoSource.value = resolveTemplateVideoSource(
     parseTemplateDemoPath(templateXml),
   );
@@ -5423,7 +5756,9 @@ async function showExportConfirmation() {
   if (
     exportRunning.value ||
     exportPreparing.value ||
-    assetVideoPreprocessBusy.value
+    assetVideoPreprocessBusy.value ||
+    templateAssetDownloadRunning.value ||
+    templateAssetPreflightRunning.value
   ) return;
   if (!canExport.value) {
     console.warn(
@@ -5442,29 +5777,34 @@ async function showExportConfirmation() {
     systemMessage.error('模板文件不存在');
     return;
   }
-  refreshInvalidDurationVideoState();
-  if (requestAdaptiveDurationConfirmation('export')) return;
-
-  await continueExportConfirmation();
+  await prepareDefaultTemplateAction('export');
 }
 
 async function continueExportConfirmation() {
-  if (hasDefaultTemplateVideos()) {
-    defaultTemplateExportConfirmVisible.value = true;
-    return;
-  }
-
-  await selectExportFile();
+  await prepareDefaultTemplateAction('export');
 }
 
 function cancelDefaultTemplateExport() {
   defaultTemplateExportConfirmVisible.value = false;
+  pendingDefaultTemplateAction.value = '';
+  pendingDefaultTemplateTasks.value = [];
 }
 
 async function confirmDefaultTemplateExport() {
   void unlockExportFinishedSound();
+  const action = pendingDefaultTemplateAction.value || 'export';
+  const tasks = pendingDefaultTemplateTasks.value;
   defaultTemplateExportConfirmVisible.value = false;
-  await selectExportFile();
+  pendingDefaultTemplateAction.value = '';
+  pendingDefaultTemplateTasks.value = [];
+  if (tasks.length > 0) {
+    const downloaded = await runTemplateAssetDownloads(
+      tasks,
+      action === 'preview' ? '整片预览所需资源' : '导出所需资源',
+    );
+    if (!downloaded) return;
+  }
+  await continueDefaultTemplateAction(action);
 }
 
 function getDefaultExportFileName() {
@@ -5528,8 +5868,7 @@ async function selectExportFile() {
       throw new Error('当前工程信息不完整，无法导出');
     }
 
-    await flushSelectedVideoOffsetPersist();
-    await flushPendingAssetPropertyUpdates();
+    await processCurrentDirtyAssetVideoBeforeCompose();
     const projectSynced = await flushPendingProjectTemplateUpdate();
     if (!projectSynced) {
       throw new Error('工程信息同步失败，请稍后重试导出');
@@ -5907,10 +6246,56 @@ function updateModalPreviewControls() {
   modalPaused.value = video.paused;
 }
 
-function toggleModalPreviewPlayback() {
-  const video = modalVideoRef.value;
+function waitForModalVideoMetadata(video) {
+  if (!video || video.readyState >= 1) return Promise.resolve();
+
+  return new Promise((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => {
+      cleanup();
+      reject(new Error('模板预览视频加载超时'));
+    }, 15000);
+    const cleanup = () => {
+      window.clearTimeout(timeoutId);
+      video.removeEventListener('loadedmetadata', handleLoadedMetadata);
+      video.removeEventListener('error', handleError);
+    };
+    const handleLoadedMetadata = () => {
+      cleanup();
+      resolve();
+    };
+    const handleError = () => {
+      cleanup();
+      reject(new Error('模板预览视频加载失败'));
+    };
+
+    video.addEventListener('loadedmetadata', handleLoadedMetadata, {
+      once: true,
+    });
+    video.addEventListener('error', handleError, { once: true });
+  });
+}
+
+async function toggleModalPreviewPlayback() {
+  let video = modalVideoRef.value;
   if (!video) return;
   if (video.paused) {
+    if (activeTemplateLocalInfo.value?.cacheMode === TEMPLATE_ONLINE_CACHE_MODE) {
+      try {
+        const ready = await refreshActiveTemplateDemoSource(
+          activeTemplateId.value,
+          activeTemplateLocalInfo.value,
+          { preserveTime: true },
+        );
+        if (!ready) return;
+        video = modalVideoRef.value;
+        if (!video) return;
+        await waitForModalVideoMetadata(video);
+      } catch (error) {
+        console.error('[template-preview] demo URL refresh failed:', error);
+        systemMessage.error(error?.message || '模板预览视频地址刷新失败');
+        return;
+      }
+    }
     video.play().catch(() => {
       modalPaused.value = true;
     });
@@ -5918,6 +6303,341 @@ function toggleModalPreviewPlayback() {
     video.pause();
   }
   updateModalPreviewControls();
+}
+
+async function handleModalVideoError() {
+  if (
+    activeTemplateLocalInfo.value?.cacheMode !== TEMPLATE_ONLINE_CACHE_MODE ||
+    activeTemplateDemoErrorRetryCount >= 1
+  ) {
+    return;
+  }
+
+  activeTemplateDemoErrorRetryCount += 1;
+  try {
+    await refreshActiveTemplateDemoSource(
+      activeTemplateId.value,
+      activeTemplateLocalInfo.value,
+      { force: true, preserveTime: true },
+    );
+  } catch (error) {
+    console.error('[template-preview] demo URL recovery failed:', error);
+    systemMessage.error(error?.message || '模板预览视频加载失败，请重试');
+  }
+}
+
+async function handleTransformerSourceRefreshRequest() {
+  await refreshSelectedOnlineAssetSource({ autoplay: true });
+}
+
+function handleTransformerError(message) {
+  if (
+    selectedVideoOnlineOnly.value &&
+    !onlineAssetErrorRetries.has(selectedVideoKey.value)
+  ) {
+    onlineAssetErrorRetries.add(selectedVideoKey.value);
+    void refreshSelectedOnlineAssetSource();
+    return;
+  }
+  systemMessage.error(message);
+}
+
+function isSupportedTemplateVideoFile(fileName) {
+  return /\.(mp4|mov|m4v|avi|mkv|webm)$/i.test(String(fileName || ''));
+}
+
+function getTemplateAssetRemoteInfo(fileName) {
+  const normalizedFileName = getFileNameFromPath(fileName);
+  const templateBucket = String(
+    activeTemplateLocalInfo.value?.templateBucket ||
+      getStoredUploadBucket('template-bucket'),
+  ).trim();
+  if (!templateBucket || !activeTemplateId.value || !normalizedFileName) {
+    return null;
+  }
+  return {
+    fileName: normalizedFileName,
+    objectPath: getTemplateBosObjectPath(
+      templateBucket,
+      activeTemplateId.value,
+      normalizedFileName,
+    ),
+  };
+}
+
+async function markTemplateAssetDownloaded(fileName, localPath) {
+  const normalizedName = String(fileName || '').toLowerCase();
+  const source = convertFileSrc(localPath);
+  const metadata = await getVideoMetadata(source);
+  const downloadedAssetIds = [];
+
+  for (const segment of importSegments.value) {
+    for (const video of segment.videos) {
+      if (String(video.remoteFileName || '').toLowerCase() !== normalizedName) {
+        continue;
+      }
+      video.source = source;
+      video.localPath = localPath;
+      video.duration = metadata.duration;
+      video.durationSeconds = metadata.durationSeconds;
+      video.missing = false;
+      video.onlineOnly = false;
+      video.expiresAt = 0;
+      video.downloadLoading = false;
+      if (video.assetId) downloadedAssetIds.push(String(video.assetId));
+      if (video.assetId && metadata.durationSeconds > 0) {
+        await initializeVideoDefaultOffset(video);
+      }
+    }
+  }
+
+  if (activeTemplateLocalInfo.value && downloadedAssetIds.length > 0) {
+    const existingAssetIds = new Set(
+      activeTemplateLocalInfo.value.existingAssetIds || [],
+    );
+    downloadedAssetIds.forEach((assetId) => existingAssetIds.add(assetId));
+    activeTemplateLocalInfo.value = {
+      ...activeTemplateLocalInfo.value,
+      existingAssetIds: [...existingAssetIds],
+    };
+  }
+
+  const selectedVideo = findTemplateVideoByKey(selectedVideoKey.value);
+  if (
+    selectedVideo &&
+    String(selectedVideo.remoteFileName || '').toLowerCase() === normalizedName
+  ) {
+    const duration = Math.max(1, Number(metadata.durationSeconds) || 1);
+    const selectionDuration = Math.min(
+      duration,
+      getTimelineSelectionDuration(selectedVideo, duration),
+    );
+    const cachedState = getVideoTimelineState(selectedVideo.id || selectedVideo.name);
+    const centeredStartTime = Math.max(0, (duration - selectionDuration) / 2);
+    timeline.totalDuration = duration;
+    timeline.selectedDuration = selectionDuration;
+    timeline.startTime = clampTimelineStart(
+      Number.isFinite(cachedState?.startTime)
+        ? cachedState.startTime
+        : centeredStartTime,
+    );
+    videoTimelineStateCache[selectedVideo.id || selectedVideo.name] = {
+      startTime: timeline.startTime,
+    };
+    syncPlayheadToTimelineStart();
+    playerCurrentTime.value = timelinePlayheadTime.value;
+    playerProgress.value = duration
+      ? (timelinePlayheadTime.value / duration) * 100
+      : 0;
+    pendingMainVideoSeekTime = timelinePlayheadTime.value;
+    timelinePreviewSeeking.value = true;
+    selectedVideoOnlineOnly.value = false;
+    selectedVideoSourceExpiresAt.value = 0;
+    selectedVideoDownloadLoading.value = false;
+    selectedVideoPath.value = localPath;
+    selectedVideoDuration.value = metadata.duration;
+    selectedVideoSource.value = source;
+  }
+}
+
+function collectTemplateVideoFileNames() {
+  const fileNames = new Map();
+  for (const segment of importSegments.value) {
+    for (const video of segment.videos) {
+      if (!video?.onlineOnly || !video.remoteFileName) continue;
+      fileNames.set(video.remoteFileName.toLowerCase(), video.remoteFileName);
+    }
+  }
+
+  const xmlContent = getActiveTemplateXmlContent();
+  if (xmlContent) {
+    const xml = new DOMParser().parseFromString(xmlContent, 'text/xml');
+    if (!xml.querySelector('parsererror')) {
+      Array.from(xml.querySelectorAll('filepath')).forEach((element) => {
+        const rawPath = String(element.textContent || '').trim();
+        const fileName = getFileNameFromPath(rawPath);
+        if (
+          rawPath &&
+          !/^(?:https?:|file:|asset:)/i.test(rawPath) &&
+          isSupportedTemplateVideoFile(fileName)
+        ) {
+          fileNames.set(fileName.toLowerCase(), fileName);
+        }
+      });
+    }
+  }
+  return [...fileNames.values()];
+}
+
+async function collectMissingTemplateVideoTasks() {
+  if (
+    activeTemplateLocalInfo.value?.cacheMode !== TEMPLATE_ONLINE_CACHE_MODE ||
+    !activeTemplateId.value
+  ) {
+    return [];
+  }
+
+  const fileNames = collectTemplateVideoFileNames();
+  if (fileNames.length === 0) return [];
+  const statuses = await invoke('inspect_template_video_files', {
+    templateId: activeTemplateId.value,
+    fileNames,
+  });
+  const tasks = [];
+  for (const status of statuses || []) {
+    if (status.exists) {
+      await markTemplateAssetDownloaded(status.fileName, status.localPath);
+      continue;
+    }
+    const remote = getTemplateAssetRemoteInfo(status.fileName);
+    if (remote) tasks.push(remote);
+  }
+  return tasks;
+}
+
+async function invokeTemplateAssetDownload(task, downloadId) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      if (
+        templateDownloadCancelRequested.value ||
+        canceledTemplateDownloadIds.has(downloadId)
+      ) {
+        throw new Error('Download canceled');
+      }
+      const entry = await getTemplateOnlineUrl(task.objectPath, {
+        force: attempt > 0,
+      });
+      if (
+        templateDownloadCancelRequested.value ||
+        canceledTemplateDownloadIds.has(downloadId)
+      ) {
+        throw new Error('Download canceled');
+      }
+      return await invoke('download_template_asset', {
+        templateId: activeTemplateId.value,
+        fileName: task.fileName,
+        objectPath: task.objectPath,
+        downloadUrl: entry.url,
+        downloadId,
+      });
+    } catch (error) {
+      lastError = error;
+      if (attempt === 0 && isBosPresignedUrlExpiredError(error)) continue;
+      throw error;
+    }
+  }
+  throw lastError || new Error('模板视频下载失败');
+}
+
+async function runTemplateAssetDownloads(tasks, title = '') {
+  const uniqueTasks = [...new Map(
+    (tasks || []).map((task) => [task.objectPath, task]),
+  ).values()];
+  if (uniqueTasks.length === 0) return true;
+  if (templateAssetDownloadRunning.value) return false;
+
+  const downloadId = `template-assets-${activeTemplateId.value}-${Date.now()}`;
+  templateAssetDownloadRunning.value = true;
+  templateDownloadCanceling.value = false;
+  templateDownloadCancelRequested.value = false;
+  templateDownloadTitle.value = title || activeTemplateName.value;
+  templateDownloadStatus.value = '正在准备下载模板视频...';
+  templateDownloadProgress.value = 0;
+  templateDownloadDownloadedBytes.value = 0;
+  templateDownloadTotalBytes.value = 0;
+  templateDownloadVisible.value = true;
+  activeDownloadId.value = downloadId;
+  let unlistenProgress = null;
+  let activeTaskIndex = 0;
+
+  try {
+    unlistenProgress = await listen('template-download-progress', (event) => {
+      const payload = event.payload || {};
+      if (payload.downloadId !== downloadId) return;
+      const currentProgress = Number(payload.progress) || 0;
+      templateDownloadDownloadedBytes.value = Number(payload.downloadedBytes) || 0;
+      templateDownloadTotalBytes.value = Number(payload.totalBytes) || 0;
+      templateDownloadStatus.value = payload.status || templateDownloadStatus.value;
+      templateDownloadProgress.value = Math.round(
+        ((activeTaskIndex + currentProgress / 100) / uniqueTasks.length) * 100,
+      );
+    });
+
+    for (let index = 0; index < uniqueTasks.length; index += 1) {
+      activeTaskIndex = index;
+      if (
+        templateDownloadCancelRequested.value ||
+        canceledTemplateDownloadIds.has(downloadId)
+      ) {
+        throw new Error('Download canceled');
+      }
+      const task = uniqueTasks[index];
+      const matchingVideos = importSegments.value.flatMap((segment) =>
+        segment.videos.filter(
+          (video) =>
+            String(video.remoteFileName || '').toLowerCase() ===
+            task.fileName.toLowerCase(),
+        ),
+      );
+      matchingVideos.forEach((video) => {
+        video.downloadLoading = true;
+      });
+      if (selectedVideoKey.value && matchingVideos.some(
+        (video) => (video.id || video.name) === selectedVideoKey.value,
+      )) {
+        selectedVideoDownloadLoading.value = true;
+      }
+      templateDownloadStatus.value = `正在下载 ${task.fileName}（${index + 1}/${uniqueTasks.length}）`;
+      templateDownloadProgress.value = Math.round(
+        (index / uniqueTasks.length) * 100,
+      );
+      try {
+        const result = await invokeTemplateAssetDownload(task, downloadId);
+        await markTemplateAssetDownloaded(result.fileName, result.localPath);
+      } finally {
+        matchingVideos.forEach((video) => {
+          video.downloadLoading = false;
+        });
+      }
+      templateDownloadProgress.value = Math.round(
+        ((index + 1) / uniqueTasks.length) * 100,
+      );
+    }
+    return true;
+  } catch (error) {
+    const message = error?.message || String(error || '');
+    if (!/canceled|取消/i.test(message)) {
+      systemMessage.error(message || '模板视频下载失败');
+    }
+    return false;
+  } finally {
+    unlistenProgress?.();
+    canceledTemplateDownloadIds.delete(downloadId);
+    if (activeDownloadId.value === downloadId) {
+      activeDownloadId.value = '';
+      templateDownloadVisible.value = false;
+      templateDownloadCanceling.value = false;
+      templateDownloadCancelRequested.value = false;
+      templateDownloadStatus.value = '';
+      templateDownloadProgress.value = 0;
+      templateDownloadDownloadedBytes.value = 0;
+      templateDownloadTotalBytes.value = 0;
+    }
+    selectedVideoDownloadLoading.value = false;
+    templateAssetDownloadRunning.value = false;
+  }
+}
+
+async function downloadSelectedOnlineVideo() {
+  const video = findTemplateVideoByKey(selectedVideoKey.value);
+  if (!video?.onlineOnly || video.downloadLoading) return;
+  const remote = getTemplateAssetRemoteInfo(video.remoteFileName);
+  if (!remote) {
+    systemMessage.error('模板桶或视频路径不完整');
+    return;
+  }
+  await runTemplateAssetDownloads([remote], video.name);
 }
 
 function seekModalPreviewBy(seconds) {
@@ -6726,6 +7446,9 @@ onMounted(() => {
 
 // 离开页面时释放全局监听、定时器和本地视频 URL。
 onBeforeUnmount(() => {
+  activeTemplateDemoRequestId += 1;
+  templateOnlineUrlCache.clear();
+  templateOnlineUrlRequests.clear();
   void flushPendingAssetPropertyUpdates();
   cancelAllAssetVideoPreprocessTasks();
   invalidateBeautyPreview();
@@ -7553,6 +8276,10 @@ onBeforeUnmount(() => {
                 :project-read-only="activeProjectReadOnly"
                 :edit-again-loading="projectCopying"
                 :material-reset-loading="materialResetting"
+                :online-source="selectedVideoOnlineOnly"
+                :source-expires-at="selectedVideoSourceExpiresAt"
+                :download-available="selectedVideoOnlineOnly"
+                :download-loading="selectedVideoDownloadLoading"
                 @change="handleTimelineVideoTransformChange"
                 @video-loaded="handleTransformerVideoLoaded"
                 @playback-change="updateTransformerVideoControls"
@@ -7563,13 +8290,20 @@ onBeforeUnmount(() => {
                 @material-reset-request="handleMaterialResetRequest"
                 @edit-again-request="handleEditPaidProjectAgain"
                 @layout-change="schedulePlayerResize"
-                @error="systemMessage.error($event)"
+                @source-refresh-request="handleTransformerSourceRefreshRequest"
+                @download-request="downloadSelectedOnlineVideo"
+                @error="handleTransformerError"
               >
                 <template #timeline>
                   <div
                     class="timeline-settings-track"
-                    :class="{ 'is-disabled': beautyVideoPreviewActive }"
-                    :aria-disabled="beautyVideoPreviewActive"
+                    :class="{
+                      'is-disabled':
+                        beautyVideoPreviewActive || selectedVideoPropertiesLocked,
+                    }"
+                    :aria-disabled="
+                      beautyVideoPreviewActive || selectedVideoPropertiesLocked
+                    "
                   >
                     <div class="track-title flex items-center gap-2">
                       {{ selectedStyleName }}
@@ -8200,6 +8934,7 @@ onBeforeUnmount(() => {
                     @play="updateModalPreviewControls"
                     @pause="updateModalPreviewControls"
                     @ended="updateModalPreviewControls"
+                    @error="handleModalVideoError"
                   >
                     <source
                       v-if="activeTemplateDemoSource"
@@ -8536,9 +9271,11 @@ onBeforeUnmount(() => {
                   />
                 </div>
                 <div>
-                  <h3 class="text-xl font-black text-white mb-2">确认导出</h3>
+                  <h3 class="text-xl font-black text-white mb-2">
+                    {{ defaultTemplateConfirmTitle }}
+                  </h3>
                   <p class="text-on-surface-variant text-sm">
-                    当前工程存在未替换的默认模板视频，是否导出？
+                    {{ defaultTemplateConfirmMessage }}
                   </p>
                 </div>
                 <div class="flex w-full gap-3">

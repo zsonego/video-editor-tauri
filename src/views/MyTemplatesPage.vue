@@ -12,6 +12,7 @@ import {
   canUseTemplateFactory,
   clearCurrentPermissions,
 } from '../utils/permissions';
+import { clearStoredUploadBuckets } from '../utils/uploadBuckets';
 
 const router = useRouter();
 const templates = ref([]);
@@ -79,6 +80,7 @@ function openProjectLibrary() {
 function handleAccountLogout() {
   localStorage.removeItem('token');
   localStorage.removeItem('userInfo');
+  clearStoredUploadBuckets();
   clearCurrentPermissions();
   router.replace('/login');
 }
