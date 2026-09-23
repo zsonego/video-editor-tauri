@@ -113,36 +113,48 @@ const LANDSCAPE_TEMPLATE_CANVAS = Object.freeze({
   editorHeight: 540,
   orientation: 'landscape',
 });
-const PORTRAIT_TEMPLATE_CANVAS = Object.freeze({
-  width: 1080,
-  height: 1920,
-  editorWidth: 540,
-  editorHeight: 960,
-  orientation: 'portrait',
-});
-
-function parseTemplateCanvas(xmlContent) {
+function parseTemplateResolution(xmlContent) {
   const content = String(xmlContent || '').trim();
-  if (!content) return LANDSCAPE_TEMPLATE_CANVAS;
+  if (!content) return null;
 
   const xml = new DOMParser().parseFromString(content, 'text/xml');
-  if (xml.querySelector('parsererror')) return LANDSCAPE_TEMPLATE_CANVAS;
+  if (xml.querySelector('parsererror')) return null;
 
   const resolution = String(
     xml.querySelector('video > resolution')?.textContent || '',
   ).trim();
   const match = resolution.match(/^(\d+)\s*[xX*×]\s*(\d+)$/);
-  if (!match) return LANDSCAPE_TEMPLATE_CANVAS;
+  if (!match) return null;
 
   const width = Number(match[1]);
   const height = Number(match[2]);
-  return width === 1080 && height === 1920
-    ? PORTRAIT_TEMPLATE_CANVAS
-    : LANDSCAPE_TEMPLATE_CANVAS;
+  if (width <= 0 || height <= 0) return null;
+
+  return { width, height };
+}
+
+function parseTemplateCanvas(xmlContent) {
+  const resolution = parseTemplateResolution(xmlContent);
+  if (!resolution) return LANDSCAPE_TEMPLATE_CANVAS;
+
+  const isPortrait = resolution.height > resolution.width;
+
+  return {
+    width: resolution.width,
+    height: resolution.height,
+    editorWidth: isPortrait ? 540 : 960,
+    editorHeight: isPortrait ? 960 : 540,
+    orientation: isPortrait ? 'portrait' : 'landscape',
+  };
 }
 
 const activeTemplateCanvas = computed(() =>
   parseTemplateCanvas(activeTemplateLocalInfo.value?.xmlContent),
+);
+const activeTemplateResolution = computed(
+  () =>
+    parseTemplateResolution(activeTemplateLocalInfo.value?.xmlContent) ||
+    activeTemplateCanvas.value,
 );
 const originalTemplateXmlContent = ref('');
 const activeTemplateDemoSource = ref('');
@@ -574,6 +586,18 @@ const modalPaused = ref(true);
 const modalProgress = ref(0);
 const modalPlaybackRate = ref(1);
 const modalPreviewProgressDragging = ref(false);
+const modalPreviewVideoSize = ref(null);
+const modalPreviewFrameStyle = computed(() => {
+  const size = modalPreviewVideoSize.value || activeTemplateResolution.value;
+  const width = Math.max(1, Number(size?.width) || 16);
+  const height = Math.max(1, Number(size?.height) || 9);
+  const aspectRatio = width / height;
+
+  return {
+    aspectRatio: `${width} / ${height}`,
+    maxWidth: `${aspectRatio * 70}vh`,
+  };
+});
 const selectedVideoDuration = ref('00:00');
 const selectedVideoSource = ref('');
 const selectedVideoPath = ref('');
@@ -6362,6 +6386,7 @@ function togglePlayerMute() {
 }
 
 function resetModalPreviewVideo() {
+  modalPreviewVideoSize.value = null;
   const video = modalVideoRef.value;
   if (!video) return;
   video.pause();
@@ -9088,33 +9113,56 @@ onBeforeUnmount(() => {
                     />
                   </video>
                   <div
-                    class="absolute inset-0 flex items-center justify-center opacity-0 pointer-events-none transition-opacity duration-200 group-hover:opacity-100 group-hover:pointer-events-auto"
+                    class="relative w-full max-h-[70vh] group cursor-pointer"
+                    :style="modalPreviewFrameStyle"
                   >
-                    <button
-                      class="w-20 h-20 bg-black/45 rounded-full flex items-center justify-center border border-white/20 hover:scale-105 transition-transform shadow-2xl"
-                      @click="toggleModalPreviewPlayback"
+                    <video
+                      :key="activeTemplateDemoSource"
+                      ref="modalVideoRef"
+                      class="w-full h-full object-contain"
+                      playsinline
+                      preload="metadata"
+                      @loadedmetadata="handleModalVideoLoadedMetadata"
+                      @timeupdate="updateModalPreviewControls"
+                      @play="updateModalPreviewControls"
+                      @pause="updateModalPreviewControls"
+                      @ended="updateModalPreviewControls"
                     >
-                      <AppIcon
-                        :name="modalPaused ? 'play_arrow' : 'pause'"
-                        :size="48"
-                        class="text-white"
-                        filled
+                      <source
+                        v-if="activeTemplateDemoSource"
+                        :src="activeTemplateDemoSource"
+                        :type="getVideoSourceType(activeTemplateDemoSource)"
                       />
-                    </button>
-                  </div>
-                  <div
-                    class="modal-preview-progress absolute inset-x-4 bottom-4 cursor-pointer"
-                    :class="{ 'is-dragging': modalPreviewProgressDragging }"
-                    @pointerdown="startModalPreviewProgressDrag"
-                  >
+                    </video>
                     <div
-                      class="finished-progress-fill"
-                      :style="{ width: `${modalProgress}%` }"
-                    ></div>
-                    <span
-                      class="modal-preview-progress-thumb"
-                      :style="{ left: `${modalProgress}%` }"
-                    ></span>
+                      class="absolute inset-0 flex items-center justify-center opacity-0 pointer-events-none transition-opacity duration-200 group-hover:opacity-100 group-hover:pointer-events-auto"
+                    >
+                      <button
+                        class="w-20 h-20 bg-black/45 rounded-full flex items-center justify-center border border-white/20 hover:scale-105 transition-transform shadow-2xl"
+                        @click="toggleModalPreviewPlayback"
+                      >
+                        <AppIcon
+                          :name="modalPaused ? 'play_arrow' : 'pause'"
+                          :size="48"
+                          class="text-white"
+                          filled
+                        />
+                      </button>
+                    </div>
+                    <div
+                      class="modal-preview-progress absolute inset-x-4 bottom-4 cursor-pointer"
+                      :class="{ 'is-dragging': modalPreviewProgressDragging }"
+                      @pointerdown="startModalPreviewProgressDrag"
+                    >
+                      <div
+                        class="finished-progress-fill"
+                        :style="{ width: `${modalProgress}%` }"
+                      ></div>
+                      <span
+                        class="modal-preview-progress-thumb"
+                        :style="{ left: `${modalProgress}%` }"
+                      ></span>
+                    </div>
                   </div>
                 </div>
                 <div
