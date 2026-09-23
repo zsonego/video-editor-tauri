@@ -106,6 +106,44 @@ const activeDownloadId = ref('');
 const activeTemplateId = ref('');
 const activeTemplateExportCredit = ref(0);
 const activeTemplateLocalInfo = ref(null);
+const LANDSCAPE_TEMPLATE_CANVAS = Object.freeze({
+  width: 1920,
+  height: 1080,
+  editorWidth: 960,
+  editorHeight: 540,
+  orientation: 'landscape',
+});
+const PORTRAIT_TEMPLATE_CANVAS = Object.freeze({
+  width: 1080,
+  height: 1920,
+  editorWidth: 540,
+  editorHeight: 960,
+  orientation: 'portrait',
+});
+
+function parseTemplateCanvas(xmlContent) {
+  const content = String(xmlContent || '').trim();
+  if (!content) return LANDSCAPE_TEMPLATE_CANVAS;
+
+  const xml = new DOMParser().parseFromString(content, 'text/xml');
+  if (xml.querySelector('parsererror')) return LANDSCAPE_TEMPLATE_CANVAS;
+
+  const resolution = String(
+    xml.querySelector('video > resolution')?.textContent || '',
+  ).trim();
+  const match = resolution.match(/^(\d+)\s*[xX*×]\s*(\d+)$/);
+  if (!match) return LANDSCAPE_TEMPLATE_CANVAS;
+
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  return width === 1080 && height === 1920
+    ? PORTRAIT_TEMPLATE_CANVAS
+    : LANDSCAPE_TEMPLATE_CANVAS;
+}
+
+const activeTemplateCanvas = computed(() =>
+  parseTemplateCanvas(activeTemplateLocalInfo.value?.xmlContent),
+);
 const originalTemplateXmlContent = ref('');
 const activeTemplateDemoSource = ref('');
 const templateOnlineUrlCache = new Map();
@@ -262,6 +300,7 @@ function adjustTrackVolume(trackId, change) {
 }
 
 function setTrackVolumeFromClientY(clientY) {
+  if (activeProjectReadOnly.value) return;
   const targetId = activeTrackVolumeId.value;
   const progress = trackVolumeProgressRef.value;
   if (!targetId || !progress) return;
@@ -573,13 +612,14 @@ const invalidDurationVideoKeys = ref(new Set());
 const importVideoItemRefs = new Map();
 
 function createDefaultVideoTransformValues() {
+  const canvas = activeTemplateCanvas.value;
   return {
-    x: 480,
-    y: 270,
+    x: canvas.editorWidth / 2,
+    y: canvas.editorHeight / 2,
     angle: 0,
     scale: 1,
-    canvasWidth: 960,
-    canvasHeight: 540,
+    canvasWidth: canvas.editorWidth,
+    canvasHeight: canvas.editorHeight,
     transformOrigin: 'center',
     beauty: {
       lutStyle: 'none',
@@ -613,6 +653,8 @@ function normalizeVideoTransformValues(values = null) {
   return {
     ...defaults,
     ...source,
+    canvasWidth: defaults.canvasWidth,
+    canvasHeight: defaults.canvasHeight,
     beauty,
   };
 }
@@ -2382,26 +2424,17 @@ function parseTemplateAssetProperties(xmlContent, assetId) {
     Math.max(-1, readNumber('skin_tone', 0)),
   );
   const rotation = readNumber('rotation', 0);
-  const propertyCanvasWidth = Math.max(
-    1,
-    readNumber('canvas_width', EDITOR_CANVAS_WIDTH),
-  );
-  const propertyCanvasHeight = Math.max(
-    1,
-    readNumber('canvas_height', EDITOR_CANVAS_HEIGHT),
-  );
-  const positionScaleX = EDITOR_CANVAS_WIDTH / propertyCanvasWidth;
-  const positionScaleY = EDITOR_CANVAS_HEIGHT / propertyCanvasHeight;
-  const legacyScaleRatio =
-    COMPOSER_PREVIEW_CANVAS_WIDTH / propertyCanvasWidth;
+  const canvas = activeTemplateCanvas.value;
+  const positionScaleX = canvas.editorWidth / canvas.width;
+  const positionScaleY = canvas.editorHeight / canvas.height;
 
   return {
-    x: readNumber('positionX', propertyCanvasWidth / 2) * positionScaleX,
-    y: readNumber('positionY', propertyCanvasHeight / 2) * positionScaleY,
+    x: readNumber('positionX', canvas.width / 2) * positionScaleX,
+    y: readNumber('positionY', canvas.height / 2) * positionScaleY,
     angle: rotation,
-    scale: readNumber('scale', 1) * legacyScaleRatio,
-    canvasWidth: EDITOR_CANVAS_WIDTH,
-    canvasHeight: EDITOR_CANVAS_HEIGHT,
+    scale: readNumber('scale', 1),
+    canvasWidth: canvas.editorWidth,
+    canvasHeight: canvas.editorHeight,
     transformOrigin: readText('transform_origin', 'center'),
     beauty: {
       lutStyle: lutOptionIdFromStoredValue(readText('lut_style', 'none')),
@@ -3303,6 +3336,7 @@ function getOneClickImportSlots(target, mode = 'overwrite') {
 }
 
 async function importPathsIntoSlots(slots, filePaths) {
+  if (activeProjectReadOnly.value) return false;
   const assignments = slots.slice(0, filePaths.length).map((slot, index) => ({
     ...slot,
     filePath: filePaths[index],
@@ -3441,6 +3475,7 @@ async function executeOneClickImport(target, mode, filePaths, repeat = false) {
 }
 
 async function openOneClickImportFilePicker(target, mode = 'overwrite') {
+  if (activeProjectReadOnly.value) return;
   const filePaths = await pickVideoPaths(true);
   if (filePaths.length === 0) return;
 
@@ -3750,13 +3785,9 @@ function clampBeautyUnit(value) {
   return Math.min(1, Math.max(0, number / 100));
 }
 
-const EDITOR_CANVAS_WIDTH = 960;
-const EDITOR_CANVAS_HEIGHT = 540;
-const COMPOSER_PREVIEW_CANVAS_WIDTH = 1920;
-const COMPOSER_PREVIEW_CANVAS_HEIGHT = 1080;
-
 function buildBeautyFrameParams(values = {}) {
   const beauty = values.beauty || {};
+  const canvas = activeTemplateCanvas.value;
   const rotation = Number(values.angle) || 0;
   const skinIntensity = clampBeautyUnit(beauty.skinIntensity);
   const skinTone =
@@ -3768,15 +3799,14 @@ function buildBeautyFrameParams(values = {}) {
   const lutFile = String(beauty.lutFile || '').trim();
   const editorCanvasWidth = Math.max(
     1,
-    Number(values.canvasWidth) || EDITOR_CANVAS_WIDTH,
+    Number(values.canvasWidth) || canvas.editorWidth,
   );
   const editorCanvasHeight = Math.max(
     1,
-    Number(values.canvasHeight) || EDITOR_CANVAS_HEIGHT,
+    Number(values.canvasHeight) || canvas.editorHeight,
   );
-  const positionScaleX = COMPOSER_PREVIEW_CANVAS_WIDTH / editorCanvasWidth;
-  const positionScaleY =
-    COMPOSER_PREVIEW_CANVAS_HEIGHT / editorCanvasHeight;
+  const positionScaleX = canvas.width / editorCanvasWidth;
+  const positionScaleY = canvas.height / editorCanvasHeight;
 
   return {
     whiteness: clampBeautyUnit(beauty.whitening),
@@ -3790,8 +3820,8 @@ function buildBeautyFrameParams(values = {}) {
     positionX: (Number(values.x) || 0) * positionScaleX,
     positionY: (Number(values.y) || 0) * positionScaleY,
     scale: Number(values.scale) || 1,
-    canvas_width: COMPOSER_PREVIEW_CANVAS_WIDTH,
-    canvas_height: COMPOSER_PREVIEW_CANVAS_HEIGHT,
+    canvas_width: canvas.width,
+    canvas_height: canvas.height,
     transform_origin: values.transformOrigin || 'center',
     stabilization: Boolean(beauty.stabilization),
     one_click_beauty: Boolean(beauty.oneClickBeauty),
@@ -7886,7 +7916,7 @@ onBeforeUnmount(() => {
             </h2>
           </div>
           <div
-            v-if="currentViewState === 'import'"
+            v-if="currentViewState === 'import' && !activeProjectReadOnly"
             class="timeline-title-editor flex items-center gap-1.5 px-3 py-2 border-b border-white/5 bg-surface-container-low"
           >
             <label
@@ -7910,6 +7940,13 @@ onBeforeUnmount(() => {
             >
               {{ subtitleApplying ? '应用中...' : '应用更改' }}
             </button>
+          </div>
+          <div
+            v-else-if="currentViewState === 'import'"
+            class="flex items-center gap-2 border-b border-white/5 bg-amber-500/10 px-3 py-2 text-[10px] font-bold text-amber-300"
+          >
+            <AppIcon name="lock" :size="14" />
+            <span>当前工程为只读状态，仅支持预览和导出</span>
           </div>
           <div class="flex-1 overflow-y-auto custom-scrollbar flex flex-col">
             <div v-if="currentViewState === 'subtopics'" class="p-4 space-y-4">
@@ -8367,12 +8404,14 @@ onBeforeUnmount(() => {
             >
               <VideoTransformer
                 v-if="currentViewState === 'import'"
-                :key="`player-transform-${selectedVideoKey}`"
+                :key="`player-transform-${selectedVideoKey}-${activeTemplateCanvas.editorWidth}x${activeTemplateCanvas.editorHeight}`"
                 ref="videoTransformerRef"
                 class="workspace-video-transformer"
                 :source="selectedVideoSource"
                 :source-name="selectedVideoName"
                 :initial-transform="selectedVideoTransform"
+                :canvas-width="activeTemplateCanvas.editorWidth"
+                :canvas-height="activeTemplateCanvas.editorHeight"
                 :preview-loading="
                   beautyFramePreviewLoading || beautyVideoPreviewLoading
                 "
@@ -10501,6 +10540,11 @@ onBeforeUnmount(() => {
 .duration-selection.is-dragging {
   cursor: grabbing;
   transition: none !important;
+}
+
+.duration-selection.is-readonly {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
 .duration-meta-row {
