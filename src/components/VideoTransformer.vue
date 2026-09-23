@@ -56,6 +56,9 @@ const canvasShellStyle = computed(() => ({
   '--canvas-width-from-height': `${
     (canvasWidth.value / canvasHeight.value) * 100
   }cqh`,
+  '--canvas-height-from-width': `${
+    (canvasHeight.value / canvasWidth.value) * 100
+  }cqw`,
 }));
 const CORNER_ROTATION_OFFSET = 15;
 const CORNER_ROTATION_HIT_SIZE = 22;
@@ -104,6 +107,7 @@ let videoObject = null;
 let videoElement = null;
 let videoBaseScale = 1;
 let animationFrameId = 0;
+let pendingFrameRenderCleanup = null;
 let sourceRevision = 0;
 let beautyPreviewRevision = 0;
 let rotationLastVisualAngle = null;
@@ -362,6 +366,90 @@ function syncVideoInteractivity() {
   fabricCanvas?.requestRenderAll();
 }
 
+function cancelPendingFrameRender() {
+  pendingFrameRenderCleanup?.();
+  pendingFrameRenderCleanup = null;
+}
+
+// Paused videos do not continuously repaint Fabric's canvas. Wait until the
+// browser has decoded the requested frame before asking Fabric to draw it.
+function renderDecodedVideoFrame(video, revision, waitForSeek = false) {
+  cancelPendingFrameRender();
+
+  let finished = false;
+  let fallbackTimer = null;
+  let frameCallbackId = null;
+  let firstAnimationFrame = null;
+  let secondAnimationFrame = null;
+
+  const cleanup = () => {
+    video.removeEventListener('loadeddata', onFrameAvailable);
+    video.removeEventListener('seeked', onFrameAvailable);
+    if (fallbackTimer !== null) window.clearTimeout(fallbackTimer);
+    if (firstAnimationFrame !== null) {
+      window.cancelAnimationFrame(firstAnimationFrame);
+    }
+    if (secondAnimationFrame !== null) {
+      window.cancelAnimationFrame(secondAnimationFrame);
+    }
+    if (
+      frameCallbackId !== null &&
+      typeof video.cancelVideoFrameCallback === 'function'
+    ) {
+      video.cancelVideoFrameCallback(frameCallbackId);
+    }
+    if (pendingFrameRenderCleanup === cleanup) {
+      pendingFrameRenderCleanup = null;
+    }
+  };
+
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    cleanup();
+    if (
+      video !== videoElement ||
+      revision !== sourceRevision ||
+      !fabricCanvas
+    ) {
+      return;
+    }
+    fabricCanvas.requestRenderAll();
+    emitTimeUpdate();
+  };
+
+  const waitForPresentedFrame = () => {
+    if (
+      waitForSeek &&
+      typeof video.requestVideoFrameCallback === 'function'
+    ) {
+      frameCallbackId = video.requestVideoFrameCallback(() => finish());
+    } else {
+      firstAnimationFrame = window.requestAnimationFrame(() => {
+        firstAnimationFrame = null;
+        secondAnimationFrame = window.requestAnimationFrame(() => {
+          secondAnimationFrame = null;
+          finish();
+        });
+      });
+    }
+    fallbackTimer = window.setTimeout(finish, 2000);
+  };
+
+  function onFrameAvailable() {
+    waitForPresentedFrame();
+  }
+
+  pendingFrameRenderCleanup = cleanup;
+  if (waitForSeek) {
+    video.addEventListener('seeked', onFrameAvailable, { once: true });
+  } else if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+    waitForPresentedFrame();
+  } else {
+    video.addEventListener('loadeddata', onFrameAvailable, { once: true });
+  }
+}
+
 function addVideoToCanvas(video, revision) {
   if (!fabricCanvas || video !== videoElement || revision !== sourceRevision) {
     return;
@@ -446,6 +534,7 @@ function disposeVideo() {
   sourceRevision += 1;
   rotationLastVisualAngle = null;
   clearBeautyPreview();
+  cancelPendingFrameRender();
   cancelAnimationFrame(animationFrameId);
   animationFrameId = 0;
   if (videoObject && fabricCanvas) fabricCanvas.remove(videoObject);
@@ -477,13 +566,10 @@ function loadSource(source) {
   video.crossOrigin = 'anonymous';
   videoElement = video;
   video.addEventListener(
-    'loadedmetadata',
+    'loadeddata',
     () => addVideoToCanvas(video, revision),
     { once: true },
   );
-  video.addEventListener('loadeddata', () => fabricCanvas?.requestRenderAll(), {
-    once: true,
-  });
   video.addEventListener('play', onVideoPlay);
   video.addEventListener('pause', onVideoPause);
   video.addEventListener('ended', onVideoPause);
@@ -568,6 +654,8 @@ function pause() {
 function seekTo(value) {
   if (!videoElement) return;
   clearBeautyPreview();
+  const video = videoElement;
+  const revision = sourceRevision;
   const duration = Number.isFinite(videoElement.duration)
     ? videoElement.duration
     : 0;
@@ -575,9 +663,11 @@ function seekTo(value) {
     ? Math.min(duration, Math.max(0, Number(value) || 0))
     : Math.max(0, Number(value) || 0);
   try {
-    videoElement.currentTime = nextTime;
-    fabricCanvas?.requestRenderAll();
-    emitTimeUpdate();
+    const requiresSeek =
+      !Number.isFinite(video.currentTime) ||
+      Math.abs(video.currentTime - nextTime) >= 0.001;
+    renderDecodedVideoFrame(video, revision, requiresSeek);
+    if (requiresSeek) video.currentTime = nextTime;
   } catch {
     // 元数据就绪后由父组件再次同步时间。
   }
@@ -656,7 +746,81 @@ async function showBeautyVideoPreview(source) {
   const previewVideo = beautyPreviewVideoElement.value;
   if (!previewVideo) return false;
 
-  previewVideo.currentTime = 0;
+  await new Promise((resolve, reject) => {
+    if (previewVideo.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+      resolve();
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      cleanup();
+      if (revision !== beautyPreviewRevision) resolve();
+      else reject(new Error('视频预览首帧加载超时'));
+    }, 5000);
+    const cleanup = () => {
+      window.clearTimeout(timeoutId);
+      previewVideo.removeEventListener('loadeddata', onLoadedData);
+      previewVideo.removeEventListener('error', onError);
+      previewVideo.removeEventListener('emptied', onEmptied);
+    };
+    const onLoadedData = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = () => {
+      cleanup();
+      if (revision !== beautyPreviewRevision) resolve();
+      else reject(new Error('视频预览无法加载'));
+    };
+    const onEmptied = () => {
+      cleanup();
+      resolve();
+    };
+
+    previewVideo.addEventListener('loadeddata', onLoadedData, { once: true });
+    previewVideo.addEventListener('error', onError, { once: true });
+    previewVideo.addEventListener('emptied', onEmptied, { once: true });
+    previewVideo.load();
+  });
+  if (
+    revision !== beautyPreviewRevision ||
+    previewVideo !== beautyPreviewVideoElement.value
+  ) {
+    return false;
+  }
+
+  const duration = Number.isFinite(previewVideo.duration)
+    ? previewVideo.duration
+    : 0;
+  previewVideo.currentTime = Math.min(duration, 0.001);
+  await new Promise((resolve) => {
+    let settled = false;
+    let callbackId = null;
+    const timeoutId = window.setTimeout(finish, 500);
+    function finish() {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeoutId);
+      if (
+        callbackId !== null &&
+        typeof previewVideo.cancelVideoFrameCallback === 'function'
+      ) {
+        previewVideo.cancelVideoFrameCallback(callbackId);
+      }
+      resolve();
+    }
+    if (typeof previewVideo.requestVideoFrameCallback === 'function') {
+      callbackId = previewVideo.requestVideoFrameCallback(finish);
+    } else {
+      window.requestAnimationFrame(() => window.requestAnimationFrame(finish));
+    }
+  });
+  if (
+    revision !== beautyPreviewRevision ||
+    previewVideo !== beautyPreviewVideoElement.value
+  ) {
+    return false;
+  }
   try {
     await previewVideo.play();
   } catch {
@@ -1379,10 +1543,8 @@ defineExpose({
 
 .canvas-shell {
   position: relative;
-  width: min(100%, var(--canvas-width-from-height));
-  height: auto;
-  max-width: 100%;
-  max-height: 100%;
+  width: min(100cqw, var(--canvas-width-from-height));
+  height: min(100cqh, var(--canvas-height-from-width));
   flex: 0 0 auto;
   aspect-ratio: var(--canvas-aspect-ratio);
   overflow: hidden;
