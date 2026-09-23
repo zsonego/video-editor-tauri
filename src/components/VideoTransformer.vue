@@ -1,5 +1,6 @@
 <script setup>
 import {
+  computed,
   nextTick,
   onBeforeUnmount,
   onMounted,
@@ -19,6 +20,9 @@ const props = defineProps({
   applyLoading: { type: Boolean, default: false },
   propertiesLocked: { type: Boolean, default: false },
   materialResetLoading: { type: Boolean, default: false },
+  readOnly: { type: Boolean, default: false },
+  canvasWidth: { type: Number, default: 960 },
+  canvasHeight: { type: Number, default: 540 },
 });
 
 const emit = defineEmits([
@@ -34,8 +38,25 @@ const emit = defineEmits([
   'layout-change',
 ]);
 
-const CANVAS_WIDTH = 960;
-const CANVAS_HEIGHT = 540;
+function normalizeCanvasDimension(value, fallback) {
+  const dimension = Number(value);
+  return Number.isFinite(dimension) && dimension > 0
+    ? Math.round(dimension)
+    : fallback;
+}
+
+const canvasWidth = computed(() =>
+  normalizeCanvasDimension(props.canvasWidth, 960),
+);
+const canvasHeight = computed(() =>
+  normalizeCanvasDimension(props.canvasHeight, 540),
+);
+const canvasShellStyle = computed(() => ({
+  '--canvas-aspect-ratio': `${canvasWidth.value} / ${canvasHeight.value}`,
+  '--canvas-width-from-height': `${
+    (canvasWidth.value / canvasHeight.value) * 100
+  }cqh`,
+}));
 const CORNER_ROTATION_OFFSET = 15;
 const CORNER_ROTATION_HIT_SIZE = 22;
 const ROTATE_CURSOR_PATHS = [
@@ -50,7 +71,12 @@ const propertiesPanelOpen = ref(true);
 const isTransformExpanded = ref(true);
 const isBeautyExpanded = ref(true);
 const materialResetConfirmVisible = ref(false);
-const transform = reactive({ x: 480, y: 270, angle: 0, scale: 1 });
+const transform = reactive({
+  x: canvasWidth.value / 2,
+  y: canvasHeight.value / 2,
+  angle: 0,
+  scale: 1,
+});
 const DEFAULT_BEAUTY_SETTINGS = Object.freeze({
   lutStyle: 'none',
   lutIntensity: 50,
@@ -107,8 +133,8 @@ function getShortestAngleDelta(current, previous) {
 function getCoverScale(video) {
   if (!video.videoWidth || !video.videoHeight) return 1;
   return Math.max(
-    CANVAS_WIDTH / video.videoWidth,
-    CANVAS_HEIGHT / video.videoHeight,
+    canvasWidth.value / video.videoWidth,
+    canvasHeight.value / video.videoHeight,
   );
 }
 
@@ -188,8 +214,8 @@ function emitTransform(changeType = 'transform') {
     angle: transform.angle,
     scale: transform.scale,
     scalePercent: round(transform.scale * 100),
-    canvasWidth: CANVAS_WIDTH,
-    canvasHeight: CANVAS_HEIGHT,
+    canvasWidth: canvasWidth.value,
+    canvasHeight: canvasHeight.value,
     transformOrigin: 'center',
     beauty: getBeautySettings(),
   });
@@ -264,8 +290,8 @@ function restoreProperties(values = null) {
   if (values?.beauty) syncBeautySettings(values.beauty);
   applyTransform(
     values || {
-      x: CANVAS_WIDTH / 2,
-      y: CANVAS_HEIGHT / 2,
+      x: canvasWidth.value / 2,
+      y: canvasHeight.value / 2,
       angle: 0,
       scale: 1,
     },
@@ -346,8 +372,8 @@ function addVideoToCanvas(video, revision) {
   const initialScale = getCoverScale(video);
   videoBaseScale = initialScale;
   videoObject = new FabricImage(video, {
-    left: CANVAS_WIDTH / 2,
-    top: CANVAS_HEIGHT / 2,
+    left: canvasWidth.value / 2,
+    top: canvasHeight.value / 2,
     originX: 'center',
     originY: 'center',
     scaleX: initialScale,
@@ -490,8 +516,8 @@ function resetRotation() {
 function resetTransform() {
   if (!videoElement || !videoObject || props.propertiesLocked) return;
   applyTransform({
-    x: CANVAS_WIDTH / 2,
-    y: CANVAS_HEIGHT / 2,
+    x: canvasWidth.value / 2,
+    y: canvasHeight.value / 2,
     angle: 0,
     scale: 1,
   });
@@ -654,6 +680,7 @@ function requestFooterPrimaryAction() {
 }
 
 function confirmMaterialReset() {
+  if (props.readOnly) return;
   materialResetConfirmVisible.value = false;
   emit('material-reset-request');
 }
@@ -661,8 +688,8 @@ function confirmMaterialReset() {
 onMounted(async () => {
   await nextTick();
   fabricCanvas = new Canvas(canvasElement.value, {
-    width: CANVAS_WIDTH,
-    height: CANVAS_HEIGHT,
+    width: canvasWidth.value,
+    height: canvasHeight.value,
     backgroundColor: '#000000',
     defaultCursor: 'grab',
     hoverCursor: 'grab',
@@ -741,7 +768,11 @@ defineExpose({
       @transitionend="handleWorkspaceTransitionEnd"
     >
       <div class="canvas-column">
-        <div class="canvas-shell" :class="{ empty: !isReady }">
+        <div
+          class="canvas-shell"
+          :class="{ empty: !isReady }"
+          :style="canvasShellStyle"
+        >
           <canvas ref="canvasElement" />
           <img
             v-if="beautyPreviewSource"
@@ -824,7 +855,7 @@ defineExpose({
           <button
             class="material-reset-button"
             type="button"
-            :disabled="materialResetLoading"
+            :disabled="materialResetLoading || readOnly"
             @click="materialResetConfirmVisible = true"
           >
             {{ materialResetLoading ? '重置中…' : '素材重置' }}
@@ -1348,12 +1379,12 @@ defineExpose({
 
 .canvas-shell {
   position: relative;
-  width: min(100%, calc(100cqh * 16 / 9));
+  width: min(100%, var(--canvas-width-from-height));
   height: auto;
   max-width: 100%;
   max-height: 100%;
   flex: 0 0 auto;
-  aspect-ratio: 16 / 9;
+  aspect-ratio: var(--canvas-aspect-ratio);
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 10px;

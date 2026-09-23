@@ -99,11 +99,50 @@ const activeDownloadId = ref('');
 const activeTemplateId = ref('');
 const activeTemplateExportCredit = ref(0);
 const activeTemplateLocalInfo = ref(null);
+const LANDSCAPE_TEMPLATE_CANVAS = Object.freeze({
+  width: 1920,
+  height: 1080,
+  editorWidth: 960,
+  editorHeight: 540,
+  orientation: 'landscape',
+});
+const PORTRAIT_TEMPLATE_CANVAS = Object.freeze({
+  width: 1080,
+  height: 1920,
+  editorWidth: 540,
+  editorHeight: 960,
+  orientation: 'portrait',
+});
+
+function parseTemplateCanvas(xmlContent) {
+  const content = String(xmlContent || '').trim();
+  if (!content) return LANDSCAPE_TEMPLATE_CANVAS;
+
+  const xml = new DOMParser().parseFromString(content, 'text/xml');
+  if (xml.querySelector('parsererror')) return LANDSCAPE_TEMPLATE_CANVAS;
+
+  const resolution = String(
+    xml.querySelector('video > resolution')?.textContent || '',
+  ).trim();
+  const match = resolution.match(/^(\d+)\s*[xX*×]\s*(\d+)$/);
+  if (!match) return LANDSCAPE_TEMPLATE_CANVAS;
+
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  return width === 1080 && height === 1920
+    ? PORTRAIT_TEMPLATE_CANVAS
+    : LANDSCAPE_TEMPLATE_CANVAS;
+}
+
+const activeTemplateCanvas = computed(() =>
+  parseTemplateCanvas(activeTemplateLocalInfo.value?.xmlContent),
+);
 const originalTemplateXmlContent = ref('');
 const activeTemplateDemoSource = ref('');
 const activeProjectDir = ref('');
 const activeBackendProjectId = ref('');
 const activeProjectExported = ref(false);
+const activeProjectEditable = ref(true);
 const editingFromDraftLibrary = ref(false);
 const favoriteTemplateIds = ref(new Set());
 const favoriteUpdatingIds = ref(new Set());
@@ -171,6 +210,7 @@ const trackVolumePopupStyle = reactive({
 const trackVolumeProgressRef = ref(null);
 const trackVolumeDragging = ref(false);
 function toggleAudioDropdown(clipId, event) {
+  if (!activeProjectEditable.value) return;
   const willOpen = activeAudioDropdownClipId.value !== clipId;
   activeAudioDropdownClipId.value = willOpen ? clipId : '';
   hoveredAudioTextName.value = '';
@@ -201,12 +241,14 @@ function toggleAudioDropdown(clipId, event) {
 }
 
 function selectDemoAudio(clipId, audioName) {
+  if (!activeProjectEditable.value) return;
   demoAudioSelections[clipId] = audioName;
   activeAudioDropdownClipId.value = '';
   hoveredAudioTextName.value = '';
 }
 
 function toggleTrackVolumePopup(trackId, event) {
+  if (!activeProjectEditable.value) return;
   const willOpen = activeTrackVolumeId.value !== trackId;
   activeTrackVolumeId.value = willOpen ? trackId : '';
   activeAudioDropdownClipId.value = '';
@@ -235,11 +277,13 @@ function toggleTrackVolumePopup(trackId, event) {
 }
 
 function adjustTrackVolume(trackId, change) {
+  if (!activeProjectEditable.value) return;
   const currentVolume = Number(trackVolumes[trackId]) || 0;
   trackVolumes[trackId] = Math.min(100, Math.max(0, currentVolume + change));
 }
 
 function setTrackVolumeFromClientY(clientY) {
+  if (!activeProjectEditable.value) return;
   const targetId = activeTrackVolumeId.value;
   const progress = trackVolumeProgressRef.value;
   if (!targetId || !progress) return;
@@ -252,6 +296,7 @@ function setTrackVolumeFromClientY(clientY) {
 }
 
 function startTrackVolumeDrag(event) {
+  if (!activeProjectEditable.value) return;
   event.preventDefault();
   event.stopPropagation();
   event.currentTarget.setPointerCapture?.(event.pointerId);
@@ -532,13 +577,14 @@ const invalidDurationVideoKeys = ref(new Set());
 const importVideoItemRefs = new Map();
 
 function createDefaultVideoTransformValues() {
+  const canvas = activeTemplateCanvas.value;
   return {
-    x: 480,
-    y: 270,
+    x: canvas.editorWidth / 2,
+    y: canvas.editorHeight / 2,
     angle: 0,
     scale: 1,
-    canvasWidth: 960,
-    canvasHeight: 540,
+    canvasWidth: canvas.editorWidth,
+    canvasHeight: canvas.editorHeight,
     transformOrigin: 'center',
     beauty: {
       lutStyle: 'none',
@@ -572,6 +618,8 @@ function normalizeVideoTransformValues(values = null) {
   return {
     ...defaults,
     ...source,
+    canvasWidth: defaults.canvasWidth,
+    canvasHeight: defaults.canvasHeight,
     beauty,
   };
 }
@@ -962,7 +1010,8 @@ const selectedVideoGeneratePath = computed(() =>
   ),
 );
 const selectedVideoPropertiesLocked = computed(
-  () => Boolean(selectedVideoGeneratePath.value),
+  () =>
+    !activeProjectEditable.value || Boolean(selectedVideoGeneratePath.value),
 );
 
 // 页面级导航和主视图切换。
@@ -1010,6 +1059,7 @@ async function goHome() {
   activeProjectDir.value = '';
   activeBackendProjectId.value = '';
   activeProjectExported.value = false;
+  activeProjectEditable.value = true;
   editingFromDraftLibrary.value = false;
   selectedVideoSource.value = '';
   selectedVideoPath.value = '';
@@ -1052,6 +1102,7 @@ function openPreview(title, subtitle) {
   activeProjectDir.value = '';
   activeBackendProjectId.value = '';
   activeProjectExported.value = false;
+  activeProjectEditable.value = true;
   activeTemplateName.value = title;
   previewTitle.value = title;
   previewSubtitle.value = subtitle;
@@ -1641,6 +1692,7 @@ async function createBackendProjectIfNeeded() {
 }
 
 async function startEditing() {
+  activeProjectEditable.value = true;
   editingFromDraftLibrary.value = false;
   const backendProjectCreated = await createBackendProjectIfNeeded();
   if (!backendProjectCreated) {
@@ -1707,6 +1759,7 @@ async function handleSidebarBack() {
     activeProjectDir.value = '';
     activeBackendProjectId.value = '';
     activeProjectExported.value = false;
+    activeProjectEditable.value = true;
     editingFromDraftLibrary.value = false;
     clearProjectEditingState();
     showFinishedControls.value = false;
@@ -1984,26 +2037,17 @@ function parseTemplateAssetProperties(xmlContent, assetId) {
     Math.max(-1, readNumber('skin_tone', 0)),
   );
   const rotation = readNumber('rotation', 0);
-  const propertyCanvasWidth = Math.max(
-    1,
-    readNumber('canvas_width', EDITOR_CANVAS_WIDTH),
-  );
-  const propertyCanvasHeight = Math.max(
-    1,
-    readNumber('canvas_height', EDITOR_CANVAS_HEIGHT),
-  );
-  const positionScaleX = EDITOR_CANVAS_WIDTH / propertyCanvasWidth;
-  const positionScaleY = EDITOR_CANVAS_HEIGHT / propertyCanvasHeight;
-  const legacyScaleRatio =
-    COMPOSER_PREVIEW_CANVAS_WIDTH / propertyCanvasWidth;
+  const canvas = activeTemplateCanvas.value;
+  const positionScaleX = canvas.editorWidth / canvas.width;
+  const positionScaleY = canvas.editorHeight / canvas.height;
 
   return {
-    x: readNumber('positionX', propertyCanvasWidth / 2) * positionScaleX,
-    y: readNumber('positionY', propertyCanvasHeight / 2) * positionScaleY,
+    x: readNumber('positionX', canvas.width / 2) * positionScaleX,
+    y: readNumber('positionY', canvas.height / 2) * positionScaleY,
     angle: rotation,
-    scale: readNumber('scale', 1) * legacyScaleRatio,
-    canvasWidth: EDITOR_CANVAS_WIDTH,
-    canvasHeight: EDITOR_CANVAS_HEIGHT,
+    scale: readNumber('scale', 1),
+    canvasWidth: canvas.editorWidth,
+    canvasHeight: canvas.editorHeight,
     transformOrigin: readText('transform_origin', 'center'),
     beauty: {
       lutStyle: lutOptionIdFromStoredValue(readText('lut_style', 'none')),
@@ -2685,6 +2729,7 @@ function getOneClickImportSlots(target, mode = 'overwrite') {
 }
 
 async function importPathsIntoSlots(slots, filePaths) {
+  if (!activeProjectEditable.value) return false;
   const assignments = slots.slice(0, filePaths.length).map((slot, index) => ({
     ...slot,
     filePath: filePaths[index],
@@ -2784,6 +2829,7 @@ async function importPathsIntoSlots(slots, filePaths) {
 }
 
 async function executeOneClickImport(target, mode, filePaths, repeat = false) {
+  if (!activeProjectEditable.value) return;
   const slots = getOneClickImportSlots(target, mode);
   const pathsToImport = repeat
     ? buildFilledImportPaths(filePaths, slots.length)
@@ -2797,6 +2843,7 @@ async function executeOneClickImport(target, mode, filePaths, repeat = false) {
 }
 
 async function openOneClickImportFilePicker(target, mode = 'overwrite') {
+  if (!activeProjectEditable.value) return;
   const filePaths = await pickVideoPaths(true);
   if (filePaths.length === 0) return;
 
@@ -2813,6 +2860,7 @@ async function openOneClickImportFilePicker(target, mode = 'overwrite') {
 }
 
 function requestOneClickImportTarget(target) {
+  if (!activeProjectEditable.value) return;
   const normalizedTarget = normalizeOneClickImportTarget(target);
   if (
     hasImportedVideoInOneClickTarget(normalizedTarget) &&
@@ -2868,6 +2916,7 @@ async function resolveRepeatImport(shouldRepeat) {
 
 // 替换单个已导入视频，同时清理被替换的工程素材文件。
 async function openReplaceFilePicker(segment, videoIndex) {
+  if (!activeProjectEditable.value) return;
   const [filePath] = await pickVideoPaths(false);
   const previousState = getSegmentImportState(segment.id);
 
@@ -3064,13 +3113,9 @@ function clampBeautyUnit(value) {
   return Math.min(1, Math.max(0, number / 100));
 }
 
-const EDITOR_CANVAS_WIDTH = 960;
-const EDITOR_CANVAS_HEIGHT = 540;
-const COMPOSER_PREVIEW_CANVAS_WIDTH = 1920;
-const COMPOSER_PREVIEW_CANVAS_HEIGHT = 1080;
-
 function buildBeautyFrameParams(values = {}) {
   const beauty = values.beauty || {};
+  const canvas = activeTemplateCanvas.value;
   const rotation = Number(values.angle) || 0;
   const skinIntensity = clampBeautyUnit(beauty.skinIntensity);
   const skinTone =
@@ -3082,15 +3127,14 @@ function buildBeautyFrameParams(values = {}) {
   const lutFile = String(beauty.lutFile || '').trim();
   const editorCanvasWidth = Math.max(
     1,
-    Number(values.canvasWidth) || EDITOR_CANVAS_WIDTH,
+    Number(values.canvasWidth) || canvas.editorWidth,
   );
   const editorCanvasHeight = Math.max(
     1,
-    Number(values.canvasHeight) || EDITOR_CANVAS_HEIGHT,
+    Number(values.canvasHeight) || canvas.editorHeight,
   );
-  const positionScaleX = COMPOSER_PREVIEW_CANVAS_WIDTH / editorCanvasWidth;
-  const positionScaleY =
-    COMPOSER_PREVIEW_CANVAS_HEIGHT / editorCanvasHeight;
+  const positionScaleX = canvas.width / editorCanvasWidth;
+  const positionScaleY = canvas.height / editorCanvasHeight;
 
   return {
     whiteness: clampBeautyUnit(beauty.whitening),
@@ -3104,8 +3148,8 @@ function buildBeautyFrameParams(values = {}) {
     positionX: (Number(values.x) || 0) * positionScaleX,
     positionY: (Number(values.y) || 0) * positionScaleY,
     scale: Number(values.scale) || 1,
-    canvas_width: COMPOSER_PREVIEW_CANVAS_WIDTH,
-    canvas_height: COMPOSER_PREVIEW_CANVAS_HEIGHT,
+    canvas_width: canvas.width,
+    canvas_height: canvas.height,
     transform_origin: values.transformOrigin || 'center',
     stabilization: Boolean(beauty.stabilization),
     one_click_beauty: Boolean(beauty.oneClickBeauty),
@@ -3137,6 +3181,7 @@ function buildProjectAssetProperties(values = {}) {
 }
 
 function scheduleProjectAssetPropertyUpdate(assetId, values) {
+  if (!activeProjectEditable.value) return;
   const normalizedAssetId = String(assetId || '').trim();
   const projectDir = activeProjectDir.value;
   if (!normalizedAssetId || !projectDir) return;
@@ -3211,7 +3256,7 @@ function invalidateBeautyPreview() {
 }
 
 function scheduleBeautyPreview(values, delay = BEAUTY_PREVIEW_DEBOUNCE_MS) {
-  if (!selectedVideoPath.value) return;
+  if (!activeProjectEditable.value || !selectedVideoPath.value) return;
 
   if (pendingBeautyVideoPreview && !beautyVideoPreviewRunning) {
     pendingBeautyVideoPreview = null;
@@ -3241,6 +3286,7 @@ function scheduleBeautyPreview(values, delay = BEAUTY_PREVIEW_DEBOUNCE_MS) {
 }
 
 async function handleBeautyPreviewRequest(values) {
+  if (!activeProjectEditable.value) return;
   if (
     beautyFramePreviewLoading.value ||
     beautyVideoPreviewLoading.value
@@ -3591,7 +3637,7 @@ async function handleApplyGeneratedVideo(values) {
 }
 
 async function handleMaterialResetRequest() {
-  if (materialResetting.value) return;
+  if (!activeProjectEditable.value || materialResetting.value) return;
   const projectDir = activeProjectDir.value;
   const assetId = selectedVideoAssetId.value;
   if (!projectDir || !assetId) {
@@ -4019,7 +4065,9 @@ function handleModalVideoLoadedMetadata() {
 
 // 将用户调整后的素材偏移写回工程 XML。
 async function persistSelectedVideoOffset(assetId, offsetMs) {
-  if (!activeProjectDir.value || !assetId) return;
+  if (!activeProjectEditable.value || !activeProjectDir.value || !assetId) {
+    return;
+  }
 
   try {
     const areaOffsets = getTemplateAreaOffsetPayload(assetId, offsetMs);
@@ -4041,6 +4089,7 @@ async function persistSelectedVideoOffset(assetId, offsetMs) {
 }
 
 function scheduleSelectedVideoOffsetPersist() {
+  if (!activeProjectEditable.value) return;
   if (offsetPersistTimer) {
     window.clearTimeout(offsetPersistTimer);
   }
@@ -4056,6 +4105,7 @@ function scheduleSelectedVideoOffsetPersist() {
 }
 
 async function flushSelectedVideoOffsetPersist() {
+  if (!activeProjectEditable.value) return;
   if (offsetPersistTimer) {
     window.clearTimeout(offsetPersistTimer);
     offsetPersistTimer = null;
@@ -4069,6 +4119,7 @@ async function flushSelectedVideoOffsetPersist() {
 }
 
 async function applySubtitleChange() {
+  if (!activeProjectEditable.value) return;
   const text = subtitleText.value.trim();
   if (!text) {
     systemMessage.error('请输入内容');
@@ -4097,7 +4148,7 @@ async function applySubtitleChange() {
 
 // 拖动选区时限制其始终落在时间线有效范围内。
 function startTimelineDrag(event) {
-  if (beautyVideoPreviewActive.value) return;
+  if (!activeProjectEditable.value || beautyVideoPreviewActive.value) return;
   const track = timelineTrackRef.value;
   if (!track) return;
 
@@ -4358,6 +4409,7 @@ async function openDraftProject(projectId) {
 
     clearProjectEditingState();
     activeBackendProjectId.value = detailProjectId;
+    activeProjectEditable.value = detail.editable !== false;
     activeProjectExported.value =
       String(detail.statusName || '').trim() === '已导出';
     editingFromDraftLibrary.value = true;
@@ -4381,7 +4433,9 @@ async function openDraftProject(projectId) {
 
     await initializeDefaultTemplateAssets();
     restoreProjectVideoOffsets(projectFileXml);
-    await initializeProjectAssetProperties();
+    if (activeProjectEditable.value) {
+      await initializeProjectAssetProperties();
+    }
 
     draftLibraryVisible.value = false;
     resetDraftBatchDelete();
@@ -6267,7 +6321,7 @@ onBeforeUnmount(() => {
             </h2>
           </div>
           <div
-            v-if="currentViewState === 'import'"
+            v-if="currentViewState === 'import' && activeProjectEditable"
             class="timeline-title-editor flex items-center gap-1.5 px-3 py-2 border-b border-white/5 bg-surface-container-low"
           >
             <label
@@ -6290,6 +6344,13 @@ onBeforeUnmount(() => {
             >
               {{ subtitleApplying ? '应用中...' : '应用更改' }}
             </button>
+          </div>
+          <div
+            v-else-if="currentViewState === 'import'"
+            class="flex items-center gap-2 border-b border-white/5 bg-amber-500/10 px-3 py-2 text-[10px] font-bold text-amber-300"
+          >
+            <AppIcon name="lock" :size="14" />
+            <span>当前工程为只读状态，仅支持预览和导出</span>
           </div>
           <div class="flex-1 overflow-y-auto custom-scrollbar flex flex-col">
             <div v-if="currentViewState === 'subtopics'" class="p-4 space-y-4">
@@ -6481,13 +6542,14 @@ onBeforeUnmount(() => {
                         </div>
                         <div class="flex items-center gap-2 shrink-0">
                           <button
-                            class="px-3 py-1.5 text-[11px] font-bold rounded-md flex items-center gap-1 transition-colors"
+                            class="px-3 py-1.5 text-[11px] font-bold rounded-md flex items-center gap-1 transition-colors disabled:cursor-not-allowed disabled:opacity-40"
                             :class="
                               isSegmentGroupFullyImported(collection)
                                 ? 'bg-white/5 text-on-surface-variant/60 border border-white/10 hover:bg-white/10'
                                 : 'bg-electric-blue text-white shadow-lg shadow-electric-blue/10 hover:brightness-110'
                             "
                             type="button"
+                            :disabled="!activeProjectEditable"
                             @click="requestGroupOneClickImport(collection)"
                           >
                             {{ `一键导入 (${collection.count})` }}
@@ -6541,13 +6603,14 @@ onBeforeUnmount(() => {
                             </div>
                           </div>
                           <button
-                            class="px-3 py-1.5 text-[11px] font-bold rounded-md flex items-center gap-1 shrink-0 transition-colors"
+                            class="px-3 py-1.5 text-[11px] font-bold rounded-md flex items-center gap-1 shrink-0 transition-colors disabled:cursor-not-allowed disabled:opacity-40"
                             :class="
                               isSegmentFullyImported(style)
                                 ? 'bg-white/5 text-on-surface-variant/60 border border-white/10 hover:bg-white/10'
                                 : 'bg-electric-blue text-white shadow-lg shadow-electric-blue/10 hover:brightness-110'
                             "
                             type="button"
+                            :disabled="!activeProjectEditable"
                             @click="requestOneClickImport(style)"
                           >
                             {{ collection.isGroup ? '导入' : '一键导入' }}
@@ -6612,12 +6675,13 @@ onBeforeUnmount(() => {
                             </div>
                             <button
                               type="button"
-                              class="px-2 py-1 rounded text-[10px] font-bold shrink-0 transition-colors"
+                              class="px-2 py-1 rounded text-[10px] font-bold shrink-0 transition-colors disabled:cursor-not-allowed disabled:opacity-40"
                               :class="
                                 isProjectImportedVideo(video)
                                   ? 'bg-white/5 text-on-surface-variant/60 border border-white/10 hover:bg-white/10'
                                   : 'bg-electric-blue/10 text-electric-blue hover:bg-electric-blue/20'
                               "
+                              :disabled="!activeProjectEditable"
                               @click.stop="
                                 openReplaceFilePicker(style, videoIndex)
                               "
@@ -6744,18 +6808,21 @@ onBeforeUnmount(() => {
             >
               <VideoTransformer
                 v-if="currentViewState === 'import'"
-                :key="`player-transform-${selectedVideoKey}`"
+                :key="`player-transform-${selectedVideoKey}-${activeTemplateCanvas.editorWidth}x${activeTemplateCanvas.editorHeight}`"
                 ref="videoTransformerRef"
                 class="workspace-video-transformer"
                 :source="selectedVideoSource"
                 :source-name="selectedVideoName"
                 :initial-transform="selectedVideoTransform"
+                :canvas-width="activeTemplateCanvas.editorWidth"
+                :canvas-height="activeTemplateCanvas.editorHeight"
                 :preview-loading="
                   beautyFramePreviewLoading || beautyVideoPreviewLoading
                 "
                 :video-preview-loading="beautyVideoPreviewLoading"
                 :apply-loading="generatedVideoApplying"
                 :properties-locked="selectedVideoPropertiesLocked"
+                :read-only="!activeProjectEditable"
                 :material-reset-loading="materialResetting"
                 @change="handleTimelineVideoTransformChange"
                 @video-loaded="handleTransformerVideoLoaded"
@@ -6826,7 +6893,11 @@ onBeforeUnmount(() => {
                         <div ref="timelineTrackRef" class="duration-track">
                           <div
                             class="duration-selection bg-electric-blue/20 border-2 border-electric-blue rounded-md flex items-center px-2 shadow-[0_0_15px_rgba(74,142,255,0.25)]"
-                            :class="{ 'is-dragging': timelineDragging }"
+                            :class="{
+                              'is-dragging': timelineDragging,
+                              'is-readonly': !activeProjectEditable,
+                            }"
+                            :aria-disabled="!activeProjectEditable"
                             :style="{
                               ...timelineSelectionStyle,
                               boxShadow:
@@ -8980,6 +9051,11 @@ onBeforeUnmount(() => {
 .duration-selection.is-dragging {
   cursor: grabbing;
   transition: none !important;
+}
+
+.duration-selection.is-readonly {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
 .duration-meta-row {
