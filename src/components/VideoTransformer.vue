@@ -737,6 +737,7 @@ function showBeautyPreview(source) {
 
 async function showBeautyVideoPreview(source) {
   clearBeautyPreview();
+  const revision = beautyPreviewRevision;
   if (!source || !fabricCanvas || !videoObject) {
     throw new Error('当前视频尚未准备好');
   }
