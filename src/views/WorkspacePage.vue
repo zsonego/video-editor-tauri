@@ -6845,6 +6845,7 @@ onBeforeUnmount(() => {
                 class="workspace-video-transformer"
                 :source="selectedVideoSource"
                 :source-name="selectedVideoName"
+                :initial-time="timelinePlayheadTime"
                 :initial-transform="selectedVideoTransform"
                 :canvas-width="activeTemplateCanvas.editorWidth"
                 :canvas-height="activeTemplateCanvas.editorHeight"

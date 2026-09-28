@@ -14,6 +14,7 @@ import lutManifest from '../../src-tauri/resources/luts/luts.json';
 const props = defineProps({
   source: { type: String, default: '' },
   sourceName: { type: String, default: '' },
+  initialTime: { type: Number, default: 0 },
   initialTransform: { type: Object, default: null },
   previewLoading: { type: Boolean, default: false },
   videoPreviewLoading: { type: Boolean, default: false },
@@ -108,6 +109,7 @@ let videoElement = null;
 let videoBaseScale = 1;
 let animationFrameId = 0;
 let pendingFrameRenderCleanup = null;
+let pendingInitialFrameCleanup = null;
 let sourceRevision = 0;
 let beautyPreviewRevision = 0;
 let rotationLastVisualAngle = null;
@@ -134,9 +136,9 @@ function getShortestAngleDelta(current, previous) {
   return delta;
 }
 
-function getCoverScale(video) {
+function getContainScale(video) {
   if (!video.videoWidth || !video.videoHeight) return 1;
-  return Math.max(
+  return Math.min(
     canvasWidth.value / video.videoWidth,
     canvasHeight.value / video.videoHeight,
   );
@@ -371,6 +373,76 @@ function cancelPendingFrameRender() {
   pendingFrameRenderCleanup = null;
 }
 
+function cancelPendingInitialFrame() {
+  pendingInitialFrameCleanup?.();
+  pendingInitialFrameCleanup = null;
+}
+
+// Keep the video off the Fabric canvas until the timeline's target frame has
+// completed seeking. Otherwise Fabric first paints frame 0 and then repaints
+// the requested frame, which causes a visible flash when switching materials.
+function prepareInitialVideoFrame(video, revision) {
+  cancelPendingInitialFrame();
+
+  let finished = false;
+  let fallbackTimer = null;
+
+  const cleanup = () => {
+    video.removeEventListener('loadeddata', onLoadedData);
+    video.removeEventListener('seeked', onSeeked);
+    if (fallbackTimer !== null) window.clearTimeout(fallbackTimer);
+    if (pendingInitialFrameCleanup === cleanup) {
+      pendingInitialFrameCleanup = null;
+    }
+  };
+
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    cleanup();
+    addVideoToCanvas(video, revision);
+  };
+
+  function onSeeked() {
+    finish();
+  }
+
+  function onLoadedData() {
+    if (video !== videoElement || revision !== sourceRevision) {
+      cleanup();
+      return;
+    }
+
+    const duration = Number.isFinite(video.duration) ? video.duration : 0;
+    const requestedTime = Math.max(0, Number(props.initialTime) || 0);
+    const targetTime = duration
+      ? Math.min(duration, requestedTime)
+      : requestedTime;
+    const requiresSeek =
+      !Number.isFinite(video.currentTime) ||
+      Math.abs(video.currentTime - targetTime) >= 0.001;
+
+    if (!requiresSeek) {
+      finish();
+      return;
+    }
+
+    video.addEventListener('seeked', onSeeked, { once: true });
+    try {
+      video.currentTime = targetTime;
+      // Some WebViews occasionally omit `seeked` for paused, local videos.
+      // The delayed fallback still prevents frame 0 from reaching the canvas
+      // during the normal seek path.
+      fallbackTimer = window.setTimeout(finish, 2000);
+    } catch {
+      finish();
+    }
+  }
+
+  pendingInitialFrameCleanup = cleanup;
+  video.addEventListener('loadeddata', onLoadedData, { once: true });
+}
+
 // Paused videos do not continuously repaint Fabric's canvas. Wait until the
 // browser has decoded the requested frame before asking Fabric to draw it.
 function renderDecodedVideoFrame(video, revision, waitForSeek = false) {
@@ -457,7 +529,7 @@ function addVideoToCanvas(video, revision) {
 
   video.width = video.videoWidth;
   video.height = video.videoHeight;
-  const initialScale = getCoverScale(video);
+  const initialScale = getContainScale(video);
   videoBaseScale = initialScale;
   videoObject = new FabricImage(video, {
     left: canvasWidth.value / 2,
@@ -534,6 +606,7 @@ function disposeVideo() {
   sourceRevision += 1;
   rotationLastVisualAngle = null;
   clearBeautyPreview();
+  cancelPendingInitialFrame();
   cancelPendingFrameRender();
   cancelAnimationFrame(animationFrameId);
   animationFrameId = 0;
@@ -565,11 +638,7 @@ function loadSource(source) {
   video.playsInline = true;
   video.crossOrigin = 'anonymous';
   videoElement = video;
-  video.addEventListener(
-    'loadeddata',
-    () => addVideoToCanvas(video, revision),
-    { once: true },
-  );
+  prepareInitialVideoFrame(video, revision);
   video.addEventListener('play', onVideoPlay);
   video.addEventListener('pause', onVideoPause);
   video.addEventListener('ended', onVideoPause);
