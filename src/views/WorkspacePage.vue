@@ -8399,7 +8399,7 @@ onBeforeUnmount(() => {
                   <img
                     v-if="card.image"
                     :alt="card.title"
-                    class="w-full h-full object-cover opacity-70 group-hover:scale-105 transition-transform duration-500"
+                    class="w-full h-full object-contain opacity-70"
                     :src="card.image"
                   />
                   <div class="absolute inset-0 flex flex-col justify-end p-4">
@@ -9765,7 +9765,7 @@ onBeforeUnmount(() => {
             <img
               v-if="project.image"
               alt="draft preview"
-              class="w-full h-full object-cover opacity-70 group-hover:scale-105 transition-transform duration-500 cursor-pointer"
+              class="w-full h-full object-contain opacity-70 cursor-pointer"
               :src="project.image"
             />
             <div
