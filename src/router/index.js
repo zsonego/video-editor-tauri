@@ -3,6 +3,7 @@ import LoginPage from "../views/LoginPage.vue";
 import WorkspacePage from "../views/WorkspacePage.vue";
 import CreateTemplatePage from "../views/CreateTemplatePage.vue";
 import MyTemplatesPage from "../views/MyTemplatesPage.vue";
+import { canUseTemplateFactory } from "../utils/permissions";
 
 function hasLoginState() {
   try {
@@ -34,7 +35,7 @@ const routes = [
     path: "/create-template",
     name: "create-template",
     component: CreateTemplatePage,
-    meta: { requiresAuth: true },
+    meta: { requiresAuth: true, requiresTemplateFactory: true },
   },
   {
     path: "/my-templates",
@@ -58,6 +59,10 @@ router.beforeEach((to) => {
 
   if (to.meta.requiresAuth && !loggedIn) {
     return { name: "login", query: { redirect: to.fullPath } };
+  }
+
+  if (to.meta.requiresTemplateFactory && !canUseTemplateFactory.value) {
+    return { name: "home" };
   }
 
   if (to.meta.guestOnly && loggedIn) {

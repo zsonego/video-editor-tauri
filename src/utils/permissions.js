@@ -1,13 +1,23 @@
 import { computed, ref } from 'vue';
 
 export const TEMPLATE_FACTORY_PERMISSION = 'aicut:template:factory';
-
-const currentPermissions = ref([]);
+export const ADMIN_PERMISSION = '*:*:*';
 
 function normalizePermissions(permissions) {
   if (!Array.isArray(permissions)) return [];
   return [...new Set(permissions.map((item) => String(item).trim()).filter(Boolean))];
 }
+
+function getStoredPermissions() {
+  try {
+    const stored = JSON.parse(localStorage.getItem('userInfo') || 'null');
+    return normalizePermissions(stored?.permissions);
+  } catch {
+    return [];
+  }
+}
+
+const currentPermissions = ref(getStoredPermissions());
 
 function persistPermissions(permissions) {
   try {
@@ -32,6 +42,8 @@ export function clearCurrentPermissions() {
 }
 
 export const canUseTemplateFactory = computed(() =>
-  currentPermissions.value.includes(TEMPLATE_FACTORY_PERMISSION),
+  currentPermissions.value.some((permission) =>
+    [TEMPLATE_FACTORY_PERMISSION, ADMIN_PERMISSION].includes(permission),
+  ),
 );
 
