@@ -1,14 +1,10 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
-import { useRouter } from 'vue-router';
 import { invoke } from '@tauri-apps/api/core';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { getUserInfo, logoutUser, resetPassword } from '../api/user';
 import { systemMessage } from '../utils/message';
-import {
-  canUseTemplateFactory,
-  setCurrentPermissions,
-} from '../utils/permissions';
+import { setCurrentPermissions } from '../utils/permissions';
 import AppIcon from './AppIcon.vue';
 
 const props = defineProps({
@@ -18,7 +14,6 @@ const props = defineProps({
   },
 });
 const emit = defineEmits(['logout']);
-const router = useRouter();
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 const menuVisible = ref(false);
@@ -207,11 +202,6 @@ function showHelp() {
   helpVisible.value = true;
 }
 
-function showMyTemplates() {
-  closeMenu();
-  router.push({ name: 'my-templates' });
-}
-
 async function downloadHelpGuide() {
   if (helpGuideDownloading.value) return;
   helpGuideDownloading.value = true;
@@ -290,12 +280,6 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', closeMenu));
         <AppIcon name="lock_reset" :size="18" /><span>修改密码</span>
       </button>
       <div class="account-menu-divider"></div>
-      <template v-if="canUseTemplateFactory">
-        <button class="account-menu-item" type="button" @click="showMyTemplates">
-          <AppIcon name="video_library" :size="18" /><span>我的模板</span>
-        </button>
-        <div class="account-menu-divider"></div>
-      </template>
       <button class="account-menu-item" type="button" @click="showHelp">
         <AppIcon name="help_center" :size="18" /><span>帮助中心</span>
       </button>

@@ -90,6 +90,10 @@ function openWorkspaceLibrary() {
   });
 }
 
+function openMyTemplates() {
+  router.push({ name: 'my-templates' });
+}
+
 function handleAccountLogout() {
   localStorage.removeItem('token');
   localStorage.removeItem('userInfo');
@@ -99,7 +103,6 @@ function handleAccountLogout() {
 }
 
 const transitionEffects = ref([]);
-const defaultTransitionEffect = ref('Fade');
 let transitionEffectsRequest = null;
 
 async function loadTransitionEffects() {
@@ -123,10 +126,6 @@ async function loadTransitionEffects() {
         }))
         .filter((item) => item.value);
       transitionEffects.value = effects;
-      defaultTransitionEffect.value =
-        effects.find((item) => item.isDefault)?.value ||
-        effects[0]?.value ||
-        'Fade';
       if (!effects.length) showToast('暂无可用的转场类型', 'warning');
     } catch (error) {
       if (prBridgePageActive) {
@@ -217,6 +216,7 @@ function lutOptionIdFromStoredValue(value) {
 const VIDEO_EXTENSIONS = ['mp4', 'mov', 'm4v', 'avi', 'mkv', 'webm'];
 const AUDIO_EXTENSIONS = ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg'];
 const THUMBNAIL_CONCURRENCY = 2;
+const THUMBNAIL_MAX_EDGE = 480;
 const DROPPED_AREA_WIDTH = 960;
 const DROPPED_AREA_HEIGHT = 540;
 const SEQUENCE_TIMELINE_BASE_PIXELS_PER_SECOND = 16;
@@ -244,8 +244,8 @@ const createDefaultMediaGroups = () =>
 const createInitialModel = () => ({
   id: generateId(),
   clipsId: generateId(),
-  name: '我的视频模板',
-  duration: 0,
+  name: '',
+  duration: '',
   resolution: '1920*1080',
   videoStyle: 'none',
   progress: 0,
@@ -322,7 +322,6 @@ const areaContextMenu = reactive({
 });
 let areaInteraction = null;
 let subtitleInteraction = null;
-let timelineEditSnapshot = null;
 let activeThumbnailJobs = 0;
 let thumbnailPageDisposed = false;
 const thumbnailQueue = [];
@@ -350,8 +349,6 @@ let sequenceAudioAnimationFrame = 0;
 let sequencePlayheadMoveHandler = null;
 let sequencePlayheadUpHandler = null;
 let sequenceAudioResumeAfterDrag = false;
-const CLIP_PREVIEW_COVER_SECONDS = 0.5;
-
 const selectedClip = computed(
   () => model.clips.find((clip) => clip.id === selectedClipId.value) ?? null,
 );
@@ -736,6 +733,48 @@ function normalizeAssetThumbnailBytes(value) {
   return null;
 }
 
+function createOptimizedThumbnailUrl(bytes) {
+  return new Promise((resolve) => {
+    const sourceBlob = new Blob([bytes], { type: 'image/png' });
+    const sourceUrl = URL.createObjectURL(sourceBlob);
+    const image = new window.Image();
+    image.onload = () => {
+      const sourceWidth = Math.max(1, image.naturalWidth || image.width || 1);
+      const sourceHeight = Math.max(
+        1,
+        image.naturalHeight || image.height || 1,
+      );
+      const scale = Math.min(
+        1,
+        THUMBNAIL_MAX_EDGE / Math.max(sourceWidth, sourceHeight),
+      );
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(sourceWidth * scale));
+      canvas.height = Math.max(1, Math.round(sourceHeight * scale));
+      const context = canvas.getContext('2d', { alpha: false });
+      if (!context) {
+        URL.revokeObjectURL(sourceUrl);
+        resolve(URL.createObjectURL(sourceBlob));
+        return;
+      }
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      canvas.toBlob(
+        (optimizedBlob) => {
+          URL.revokeObjectURL(sourceUrl);
+          resolve(URL.createObjectURL(optimizedBlob || sourceBlob));
+        },
+        'image/jpeg',
+        0.84,
+      );
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(sourceUrl);
+      resolve(URL.createObjectURL(sourceBlob));
+    };
+    image.src = sourceUrl;
+  });
+}
+
 function createVideoThumbnail(sourcePath) {
   return new Promise((resolve) => {
     let settled = false;
@@ -758,7 +797,7 @@ function createVideoThumbnail(sourcePath) {
     activeThumbnailCancels.add(cancel);
 
     invoke('generate_asset_thumbnail', { inputVideoPath: sourcePath })
-      .then((response) => {
+      .then(async (response) => {
         if (settled) return;
         const bytes = normalizeAssetThumbnailBytes(response);
         if (!bytes?.byteLength) {
@@ -766,9 +805,7 @@ function createVideoThumbnail(sourcePath) {
           return;
         }
         finish({
-          thumbnailUrl: URL.createObjectURL(
-            new Blob([bytes], { type: 'image/png' }),
-          ),
+          thumbnailUrl: await createOptimizedThumbnailUrl(bytes),
         });
       })
       .catch((error) => {
@@ -942,113 +979,6 @@ function removeAsset(group, asset) {
       );
     },
   });
-}
-
-function createClip() {
-  if (isPrImportedTemplate.value) return;
-  const previous = model.clips.at(-1);
-  const clip = {
-    id: generateId(),
-    name: `片段 ${model.clips.length + 1}`,
-    materialType: 'variable',
-    starttime: previous
-      ? Number(previous.starttime) + Number(previous.duration)
-      : 0,
-    duration: 3000,
-    topVideo: '',
-    topVideoSourcePath: '',
-    areas: [],
-    subtitles: [],
-    transition: {
-      enabled: false,
-      effect: defaultTransitionEffect.value,
-      duration: 500,
-    },
-  };
-  model.clips.push(clip);
-  selectedClipId.value = clip.id;
-  showToast('已添加新片段');
-}
-
-function removeClip(clip) {
-  askConfirm({
-    title: '删除这个片段？',
-    message: `“${clip.name}”以及其中的 Area、字幕和转场设置都会被删除。`,
-    action: () => {
-      if (playingClipPreviewId.value === clip.id) stopClipPreview();
-      disposeFixedClipThumbnail(clip);
-      model.clips.splice(model.clips.indexOf(clip), 1);
-      if (selectedClipId.value === clip.id) selectedClipId.value = '';
-      showToast('片段已删除');
-    },
-  });
-}
-
-function timelineNumber(value) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : 0;
-}
-
-function captureTimelineEdit() {
-  timelineEditSnapshot = model.clips.map((clip) => ({
-    id: clip.id,
-    starttime: timelineNumber(clip.starttime),
-    duration: timelineNumber(clip.duration),
-  }));
-}
-
-function finishTimelineEdit() {
-  timelineEditSnapshot = null;
-}
-
-function recalculateAllClipStartTimes() {
-  let nextStarttime = 0;
-  model.clips.forEach((clip) => {
-    clip.starttime = nextStarttime;
-    nextStarttime += timelineNumber(clip.duration);
-  });
-}
-
-function propagateClipTimeline(clip) {
-  if (!timelineEditSnapshot || clip.starttime === '' || clip.duration === '') {
-    return;
-  }
-  const changedIndex = model.clips.indexOf(clip);
-  if (changedIndex < 0) return;
-
-  for (let index = changedIndex + 1; index < model.clips.length; index += 1) {
-    const previousBefore = timelineEditSnapshot[index - 1];
-    const currentBefore = timelineEditSnapshot[index];
-    if (
-      !previousBefore ||
-      !currentBefore ||
-      previousBefore.id !== model.clips[index - 1].id ||
-      currentBefore.id !== model.clips[index].id ||
-      currentBefore.starttime !==
-        previousBefore.starttime + previousBefore.duration
-    ) {
-      break;
-    }
-    const previous = model.clips[index - 1];
-    model.clips[index].starttime =
-      timelineNumber(previous.starttime) + timelineNumber(previous.duration);
-  }
-}
-
-function updateClipTiming(clip, field, event) {
-  const rawValue = event.target.value;
-  clip[field] = rawValue === '' ? '' : Number(rawValue);
-  propagateClipTimeline(clip);
-}
-
-function moveClip(clip, direction) {
-  const index = model.clips.indexOf(clip);
-  const nextIndex = index + direction;
-  if (nextIndex < 0 || nextIndex >= model.clips.length) return;
-  finishTimelineEdit();
-  model.clips.splice(index, 1);
-  model.clips.splice(nextIndex, 0, clip);
-  recalculateAllClipStartTimes();
 }
 
 function appendArea({
@@ -1491,6 +1421,10 @@ function createQuad() {
 }
 
 function openAreaManager() {
+  if (clipMaterialType(selectedClip.value) === 'fixed') {
+    showToast('固定素材的画面区域由 PR 导入，不能修改。', 'warning');
+    return;
+  }
   const firstArea = selectedClip.value?.areas[0];
   if (firstArea) {
     editArea(firstArea);
@@ -2827,6 +2761,7 @@ function moveSubtitleInteraction(event) {
 }
 
 function validateModel({ forPreview = false } = {}) {
+  if (!isPrImportedTemplate.value) return '请先从 Premiere Pro 导入模板。';
   if (!model.name.trim()) return '请填写模板名称。';
   if (
     !Number.isInteger(Number(model.duration)) ||
@@ -3125,7 +3060,9 @@ function createLocalTemplateKey() {
 
 function getCurrentTemplateResourcePaths() {
   const resourcePaths = [
-    ...Object.values(selectedFilePaths),
+    ...Object.entries(selectedFilePaths)
+      .filter(([key]) => key !== 'demo')
+      .map(([, path]) => path),
     ...(model.tracks.recordingClips || []).map((clip) => clip.sourcePath),
     ...model.mediaGroups.flatMap((group) =>
       group.assets.map((asset) => asset.sourcePath),
@@ -3654,39 +3591,23 @@ function setClipPreviewVideoRef(clipId, element) {
   }
 }
 
-function showClipPreviewCoverFrame(video) {
-  if (!video || !Number.isFinite(video.duration) || video.duration <= 0) return;
-  const coverTime = Math.min(CLIP_PREVIEW_COVER_SECONDS, video.duration / 2);
-  if (coverTime > 0.01) video.currentTime = coverTime;
-}
-
-function handleClipPreviewLoadedMetadata(clipId, event) {
-  if (playingClipPreviewId.value === clipId) return;
-  showClipPreviewCoverFrame(event.currentTarget);
-}
-
-function stopClipPreview({ reset = true } = {}) {
+function stopClipPreview() {
   const clipId = playingClipPreviewId.value;
   const video = clipPreviewVideoRefs.get(clipId);
-  if (video) {
-    video.pause();
-    if (reset) showClipPreviewCoverFrame(video);
-  }
+  if (video) video.pause();
   playingClipPreviewId.value = '';
   loadingClipPreviewId.value = '';
 }
 
 async function toggleClipPreview(clip) {
-  const video = clipPreviewVideoRefs.get(clip.id);
-  if (!video || !clipPreviewSource(clip)) {
+  const source = clipPreviewSource(clip);
+  if (!source) {
     showToast('当前可变片段没有可预览的素材视频', 'warning');
     return;
   }
 
-  if (playingClipPreviewId.value === clip.id && !video.paused) {
-    video.pause();
-    playingClipPreviewId.value = '';
-    loadingClipPreviewId.value = '';
+  if (playingClipPreviewId.value === clip.id) {
+    stopClipPreview();
     return;
   }
 
@@ -3694,17 +3615,16 @@ async function toggleClipPreview(clip) {
     stopClipPreview();
   }
 
-  if (
-    video.ended ||
-    video.currentTime <= CLIP_PREVIEW_COVER_SECONDS + 0.05
-  ) {
-    video.currentTime = 0;
-  }
   playingClipPreviewId.value = clip.id;
   loadingClipPreviewId.value = clip.id;
+  await nextTick();
+  const video = clipPreviewVideoRefs.get(clip.id);
+  if (!video || playingClipPreviewId.value !== clip.id) return;
   try {
+    video.currentTime = 0;
     await video.play();
   } catch (error) {
+    if (playingClipPreviewId.value !== clip.id) return;
     playingClipPreviewId.value = '';
     loadingClipPreviewId.value = '';
     showToast(error?.message || '片段素材视频播放失败', 'error');
@@ -3733,8 +3653,6 @@ function handleClipPreviewTimeUpdate(clip, event) {
 }
 
 function handleClipPreviewEnded(clipId) {
-  const video = clipPreviewVideoRefs.get(clipId);
-  if (video) showClipPreviewCoverFrame(video);
   if (playingClipPreviewId.value === clipId) {
     playingClipPreviewId.value = '';
     loadingClipPreviewId.value = '';
@@ -3747,23 +3665,6 @@ function handleClipPreviewError(clipId) {
     loadingClipPreviewId.value = '';
     showToast('片段素材视频加载失败', 'error');
   }
-}
-
-function setClipMaterialType(clip, materialType) {
-  if (!clip) return;
-  if (
-    materialType === 'fixed' &&
-    playingClipPreviewId.value === clip.id
-  ) {
-    stopClipPreview();
-  }
-  clip.materialType = materialType === 'fixed' ? 'fixed' : 'variable';
-  if (clip.materialType === 'fixed') {
-    enqueueFixedClipThumbnail(clip);
-  } else {
-    disposeFixedClipThumbnail(clip);
-  }
-  applyGlobalLutToVariableAreas();
 }
 
 function clipTransitionDescription(clip) {
@@ -3993,7 +3894,11 @@ onBeforeUnmount(() => {
           class="button button-primary preview-button"
           type="button"
           :title="templatePreviewRunning ? '正在生成预览' : '预览模板视频'"
-          :disabled="templatePreviewRunning || templateDraftCreating"
+          :disabled="
+            !isPrImportedTemplate ||
+            templatePreviewRunning ||
+            templateDraftCreating
+          "
           @click="previewTemplateVideo"
         >
           <LoaderCircle
@@ -4005,9 +3910,21 @@ onBeforeUnmount(() => {
           {{ templatePreviewRunning ? '生成中...' : '预览' }}
         </button>
         <button
+          class="button button-secondary"
+          type="button"
+          @click="openMyTemplates"
+        >
+          <Film :size="16" />
+          我的模板
+        </button>
+        <button
           class="button button-primary"
           type="button"
-          :disabled="templateDraftCreating || templatePreviewRunning"
+          :disabled="
+            !isPrImportedTemplate ||
+            templateDraftCreating ||
+            templatePreviewRunning
+          "
           @click="generateAndSaveTemplate"
         >
           <LoaderCircle
@@ -4058,7 +3975,8 @@ onBeforeUnmount(() => {
             id="template-name"
             v-model="model.name"
             type="text"
-            placeholder="输入模板名称"
+            placeholder=""
+            :disabled="!isPrImportedTemplate"
           />
         </div>
 
@@ -4070,12 +3988,14 @@ onBeforeUnmount(() => {
             type="number"
             min="0"
             step="1"
-            :disabled="isPrImportedTemplate"
+            placeholder=""
+            :disabled="!isPrImportedTemplate"
           />
         </div>
+
           </section>
 
-          <section v-show="!isPrImportedTemplate" class="side-section">
+          <section v-if="false" class="side-section">
         <div class="section-heading compact">
           <div>
             <span class="eyebrow">TRACKS</span>
@@ -4218,7 +4138,7 @@ onBeforeUnmount(() => {
         </div>
           </section>
 
-          <section class="side-section">
+          <section v-if="false" class="side-section">
         <div class="section-heading compact">
           <div>
             <span class="eyebrow">VIDEO STYLE</span>
@@ -4487,9 +4407,9 @@ onBeforeUnmount(() => {
             <div class="film-line"></div>
             <Sparkles :size="18" />
           </div>
-          <span class="eyebrow">START BUILDING</span>
-          <h2>从第一个片段开始</h2>
-          <p>创建 Clip 后，即可添加素材画面、字幕和片段转场。</p>
+          <span class="eyebrow">WAITING FOR PREMIERE PRO</span>
+          <h2>等待 PR 导入模板</h2>
+          <p>请在 Premiere Pro 插件中生成并导入模板。</p>
         </div>
 
         <div class="clip-grid">
@@ -4505,14 +4425,14 @@ onBeforeUnmount(() => {
             <div class="clip-preview">
               <div class="preview-grid"></div>
               <video
-                v-if="clipPreviewSource(clip)"
+                v-if="
+                  playingClipPreviewId === clip.id && clipPreviewSource(clip)
+                "
                 :ref="(element) => setClipPreviewVideoRef(clip.id, element)"
                 class="clip-preview-video"
                 :src="clipPreviewSource(clip)"
-                :poster="clipPreviewThumbnailUrl(clip) || undefined"
-                preload="auto"
+                preload="metadata"
                 playsinline
-                @loadedmetadata="handleClipPreviewLoadedMetadata(clip.id, $event)"
                 @playing="handleClipPreviewPlaying(clip.id)"
                 @waiting="handleClipPreviewWaiting(clip.id)"
                 @timeupdate="handleClipPreviewTimeUpdate(clip, $event)"
@@ -4528,6 +4448,8 @@ onBeforeUnmount(() => {
                 class="clip-preview-poster"
                 :src="clipPreviewThumbnailUrl(clip)"
                 alt=""
+                loading="eager"
+                decoding="sync"
                 draggable="false"
               />
               <img
@@ -4538,6 +4460,8 @@ onBeforeUnmount(() => {
                 class="clip-preview-poster clip-preview-poster-static"
                 :src="clipPreviewThumbnailUrl(clip)"
                 alt=""
+                loading="eager"
+                decoding="sync"
                 draggable="false"
               />
               <div class="preview-number">
@@ -4648,16 +4572,6 @@ onBeforeUnmount(() => {
             </div>
           </article>
 
-          <button
-            v-if="!isPrImportedTemplate"
-            class="add-clip-card"
-            type="button"
-            @click="createClip"
-          >
-            <span><Plus :size="24" /></span>
-            <strong>{{ model.clips.length ? '添加片段' : '新建 Clip' }}</strong>
-            <small>自动生成片段 ID</small>
-          </button>
         </div>
 
         <div v-if="model.clips.length" class="sequence-summary">
@@ -4935,7 +4849,7 @@ onBeforeUnmount(() => {
                   :class="{
                     active: clipMaterialType(selectedClip) === 'variable',
                   }"
-                  @click="setClipMaterialType(selectedClip, 'variable')"
+                  disabled
                 >
                   可变素材
                 </button>
@@ -4944,7 +4858,7 @@ onBeforeUnmount(() => {
                   :class="{
                     active: clipMaterialType(selectedClip) === 'fixed',
                   }"
-                  @click="setClipMaterialType(selectedClip, 'fixed')"
+                  disabled
                 >
                   固定素材
                 </button>
@@ -4958,9 +4872,7 @@ onBeforeUnmount(() => {
                   type="number"
                   min="0"
                   step="1"
-                  @focus="captureTimelineEdit"
-                  @input="updateClipTiming(selectedClip, 'starttime', $event)"
-                  @blur="finishTimelineEdit"
+                  disabled
                 />
               </div>
               <div class="field">
@@ -4970,15 +4882,10 @@ onBeforeUnmount(() => {
                   type="number"
                   min="1"
                   step="1"
-                  @focus="captureTimelineEdit"
-                  @input="updateClipTiming(selectedClip, 'duration', $event)"
-                  @blur="finishTimelineEdit"
+                  disabled
                 />
               </div>
             </div>
-            <p class="field-note">
-              <CircleHelp :size="13" /> 连续片段的后续开始时间会实时联动
-            </p>
           </section>
 
           <section class="drawer-section">
@@ -4991,16 +4898,23 @@ onBeforeUnmount(() => {
             <button
               class="area-manager-entry"
               type="button"
+              :disabled="clipMaterialType(selectedClip) === 'fixed'"
               @click="openAreaManager"
             >
               <Maximize2 :size="20" />
               <span>
                 <strong>{{
-                  selectedClip.areas.length
+                  clipMaterialType(selectedClip) === 'fixed'
+                    ? '固定素材画面区域'
+                    : selectedClip.areas.length
                     ? `管理 ${selectedClip.areas.length} 个画面区域`
                     : '设置画面区域'
                 }}</strong>
-                <small>在弹窗中添加、查看和编辑区域</small>
+                <small>{{
+                  clipMaterialType(selectedClip) === 'fixed'
+                    ? '由 PR 导入，不能修改'
+                    : '在弹窗中添加、查看和编辑区域'
+                }}</small>
               </span>
               <ChevronRight :size="16" />
             </button>
@@ -5016,6 +4930,7 @@ onBeforeUnmount(() => {
                 <input
                   v-model="selectedClip.transition.enabled"
                   type="checkbox"
+                  disabled
                 />
                 <span></span>
               </label>
@@ -5026,7 +4941,7 @@ onBeforeUnmount(() => {
             >
               <div class="field">
                 <label>转场特效</label>
-                <select v-model="selectedClip.transition.effect">
+                <select v-model="selectedClip.transition.effect" disabled>
                   <option
                     v-for="effect in displayedTransitionEffects"
                     :key="effect.value"
@@ -5045,6 +4960,7 @@ onBeforeUnmount(() => {
                   min="0"
                   max="2000"
                   step="10"
+                  disabled
                 />
                 <label class="area-inspector-value">
                   <input
@@ -5054,6 +4970,7 @@ onBeforeUnmount(() => {
                     max="2000"
                     step="10"
                     aria-label="转场时长"
+                    disabled
                     @change="
                       selectedClip.transition.duration = clampNumber(
                         selectedClip.transition.duration,
@@ -5067,7 +4984,7 @@ onBeforeUnmount(() => {
               </div>
             </div>
             <p v-else class="disabled-hint">
-              开启后，该片段到下一个片段时应用转场。
+              此片段未从 PR 读取到转场。
             </p>
           </section>
 
@@ -5135,33 +5052,6 @@ onBeforeUnmount(() => {
           </section>
         </div>
 
-        <div class="drawer-footer">
-          <div class="drawer-move">
-            <button
-              type="button"
-              :disabled="model.clips.indexOf(selectedClip) === 0"
-              @click="moveClip(selectedClip, -1)"
-            >
-              前移
-            </button>
-            <button
-              type="button"
-              :disabled="
-                model.clips.indexOf(selectedClip) === model.clips.length - 1
-              "
-              @click="moveClip(selectedClip, 1)"
-            >
-              后移
-            </button>
-          </div>
-          <button
-            class="button button-danger-ghost"
-            type="button"
-            @click="removeClip(selectedClip)"
-          >
-            <Trash2 :size="15" /> 删除片段
-          </button>
-        </div>
       </aside>
     </Transition>
 
@@ -8467,10 +8357,15 @@ button.sequence-track-clip.active {
   cursor: pointer;
 }
 
-.area-manager-entry:hover {
+.area-manager-entry:hover:not(:disabled) {
   color: var(--accent-dark);
   border-color: #e3a18e;
   background: var(--accent-soft);
+}
+
+.area-manager-entry:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .area-manager-entry > span {
@@ -8806,6 +8701,15 @@ button.sequence-track-clip.active {
   color: var(--ink);
   background: var(--paper);
   box-shadow: 0 1px 5px rgba(32, 32, 30, 0.08);
+}
+
+.segmented button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.clip-material-segmented button.active:disabled {
+  opacity: 1;
 }
 
 .color-input {
