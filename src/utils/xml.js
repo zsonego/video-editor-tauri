@@ -33,10 +33,19 @@ const percent = (value, fallback = 0) =>
 const saturationPercent = (value, fallback = 100) =>
   Math.min(200, Math.max(0, n(value, fallback)));
 const bool = (value) => value === true || value === 'true' || value === '1';
-const PROPERTY_CANVAS_WIDTH = 1920;
-const PROPERTY_CANVAS_HEIGHT = 1080;
 const TEMPLATE_LAYOUT_WIDTH = 1920;
 const TEMPLATE_LAYOUT_HEIGHT = 1080;
+
+const resolutionSize = (value) => {
+  const match = String(value || '').match(/(\d+)\s*[x*×]\s*(\d+)/i);
+  const width = Number(match?.[1]);
+  const height = Number(match?.[2]);
+  return {
+    width: Number.isFinite(width) && width > 0 ? width : TEMPLATE_LAYOUT_WIDTH,
+    height:
+      Number.isFinite(height) && height > 0 ? height : TEMPLATE_LAYOUT_HEIGHT,
+  };
+};
 
 const directChild = (node, tag) =>
   Array.from(node?.children ?? []).find((child) => child.tagName === tag) ??
@@ -55,6 +64,7 @@ export function assetPath(filename) {
 }
 
 export function buildXml(model, options = {}) {
+  const layout = resolutionSize(model.resolution);
   const resolveLutStyle =
     typeof options.resolveLutStyle === 'function'
       ? options.resolveLutStyle
@@ -160,19 +170,15 @@ export function buildXml(model, options = {}) {
     }
 
     clip.areas.forEach((area) => {
-      const areaWidth = n(area.width, TEMPLATE_LAYOUT_WIDTH);
-      const areaHeight = n(area.height, TEMPLATE_LAYOUT_HEIGHT);
-      const propertyPositionX =
-        (n(area.x) + areaWidth / 2) *
-        (PROPERTY_CANVAS_WIDTH / TEMPLATE_LAYOUT_WIDTH);
-      const propertyPositionY =
-        (n(area.y) + areaHeight / 2) *
-        (PROPERTY_CANVAS_HEIGHT / TEMPLATE_LAYOUT_HEIGHT);
+      const areaX = n(area.x);
+      const areaY = n(area.y);
+      const areaWidth = n(area.width, layout.width);
+      const areaHeight = n(area.height, layout.height);
+      const propertyPositionX = areaX + areaWidth / 2;
+      const propertyPositionY = areaY + areaHeight / 2;
       const propertyScale = Math.max(
-        (areaWidth / TEMPLATE_LAYOUT_WIDTH) *
-          (PROPERTY_CANVAS_WIDTH / TEMPLATE_LAYOUT_WIDTH),
-        (areaHeight / TEMPLATE_LAYOUT_HEIGHT) *
-          (PROPERTY_CANVAS_HEIGHT / TEMPLATE_LAYOUT_HEIGHT),
+        areaWidth / layout.width,
+        areaHeight / layout.height,
       );
       const beauty = area.beauty || {};
       const skinIntensity = percent(beauty.skinIntensity, 60) / 100;
@@ -213,16 +219,16 @@ export function buildXml(model, options = {}) {
         `                        <positionX>${propertyPositionX}</positionX><!-- 中心点横坐标 -->`,
         `                        <positionY>${propertyPositionY}</positionY><!-- 中心点纵坐标 -->`,
         `                        <scale>${propertyScale}</scale><!-- 缩放比例 -->`,
-        `                        <canvas_width>${PROPERTY_CANVAS_WIDTH}</canvas_width><!-- 画布宽度 -->`,
-        `                        <canvas_height>${PROPERTY_CANVAS_HEIGHT}</canvas_height><!-- 画布高度 -->`,
+        `                        <canvas_width>${layout.width}</canvas_width><!-- 画布宽度 -->`,
+        `                        <canvas_height>${layout.height}</canvas_height><!-- 画布高度 -->`,
         '                        <transform_origin>center</transform_origin><!-- 变换基准点 -->',
         `                        <stabilization>${Boolean(beauty.stabilization)}</stabilization><!-- 视频去抖动开关 -->`,
         `                        <one_click_beauty>${Boolean(beauty.oneClickBeauty)}</one_click_beauty><!-- 一键美颜开关 -->`,
         '                    </property>',
         '                    <destination>',
-        '                        <position x="0" y="0" />',
-        `                        <width>${TEMPLATE_LAYOUT_WIDTH}</width>`,
-        `                        <height>${TEMPLATE_LAYOUT_HEIGHT}</height>`,
+        `                        <position x="${attr(areaX)}" y="${attr(areaY)}" />`,
+        `                        <width>${areaWidth}</width>`,
+        `                        <height>${areaHeight}</height>`,
         '                    </destination>',
         '                </area>',
       );
@@ -238,6 +244,7 @@ export function buildXml(model, options = {}) {
         `                    <default>${text(subtitle.defaultText)}</default>`,
         `                    <font family="${attr(subtitle.fontFamily)}" size="${attr(n(subtitle.fontSize))}" color="${attr(subtitle.color)}" />`,
         `                    <position x="${attr(n(subtitle.x))}" y="${attr(n(subtitle.y))}" />`,
+        `                    <direction>${subtitle.direction === 'vertical' ? 'vertical' : 'horizontal'}</direction>`,
         '                </subtitle>',
       );
     });
@@ -274,6 +281,9 @@ export function parseXml(xmlText, { preserveIds = false } = {}) {
     preserveIds && value ? value : generateId();
 
   const video = directChild(template, 'video');
+  const resolution =
+    childText(video, 'resolution', '1920*1080') || '1920*1080';
+  const layout = resolutionSize(resolution);
   const tracksNode = directChild(template, 'tracks');
   const trackNodes = directChildren(tracksNode, 'track');
   const findTrack = (id) =>
@@ -347,11 +357,11 @@ export function parseXml(xmlText, { preserveIds = false } = {}) {
         const legacyY = n(position?.getAttribute('y'));
         const legacyWidth = n(
           childText(destination, 'width'),
-          TEMPLATE_LAYOUT_WIDTH,
+          layout.width,
         );
         const legacyHeight = n(
           childText(destination, 'height'),
-          TEMPLATE_LAYOUT_HEIGHT,
+          layout.height,
         );
         const propertyNumber = (tag, fallback) => {
           const value = childText(property, tag);
@@ -359,43 +369,49 @@ export function parseXml(xmlText, { preserveIds = false } = {}) {
         };
         const propertyCanvasWidth = Math.max(
           1,
-          propertyNumber('canvas_width', PROPERTY_CANVAS_WIDTH),
+          propertyNumber('canvas_width', layout.width),
         );
         const propertyCanvasHeight = Math.max(
           1,
-          propertyNumber('canvas_height', PROPERTY_CANVAS_HEIGHT),
+          propertyNumber('canvas_height', layout.height),
         );
         const propertyScale = propertyNumber(
           'scale',
           Math.max(
-            (legacyWidth / TEMPLATE_LAYOUT_WIDTH) *
-              (PROPERTY_CANVAS_WIDTH / TEMPLATE_LAYOUT_WIDTH),
-            (legacyHeight / TEMPLATE_LAYOUT_HEIGHT) *
-              (PROPERTY_CANVAS_HEIGHT / TEMPLATE_LAYOUT_HEIGHT),
+            legacyWidth / layout.width,
+            legacyHeight / layout.height,
           ),
         );
         const propertyWidth =
-          propertyScale *
-          TEMPLATE_LAYOUT_WIDTH *
-          (TEMPLATE_LAYOUT_WIDTH / propertyCanvasWidth);
+          propertyScale * layout.width * (layout.width / propertyCanvasWidth);
         const propertyHeight =
           propertyScale *
-          TEMPLATE_LAYOUT_HEIGHT *
-          (TEMPLATE_LAYOUT_HEIGHT / propertyCanvasHeight);
+          layout.height *
+          (layout.height / propertyCanvasHeight);
         const propertyCenterX = propertyNumber(
           'positionX',
           (legacyX + legacyWidth / 2) *
-            (PROPERTY_CANVAS_WIDTH / TEMPLATE_LAYOUT_WIDTH),
+            (propertyCanvasWidth / layout.width),
         );
         const propertyCenterY = propertyNumber(
           'positionY',
           (legacyY + legacyHeight / 2) *
-            (PROPERTY_CANVAS_HEIGHT / TEMPLATE_LAYOUT_HEIGHT),
+            (propertyCanvasHeight / layout.height),
         );
         const propertyRotationText = childText(property, 'rotation');
         const skinToneText = childText(property, 'skin_tone', '0');
         const skinToneValue = n(skinToneText);
-        const hasProperty = Boolean(property);
+        const hasPropertyGeometry = Boolean(
+          directChild(property, 'positionX') &&
+            directChild(property, 'positionY') &&
+            directChild(property, 'scale'),
+        );
+        const usePropertyGeometry =
+          hasPropertyGeometry &&
+          legacyX === 0 &&
+          legacyY === 0 &&
+          legacyWidth === layout.width &&
+          legacyHeight === layout.height;
         return {
           id: parsedId(areaNode.getAttribute('id')),
           assetId: assetIdMap.get(oldAssetId) || '',
@@ -441,18 +457,18 @@ export function parseXml(xmlText, { preserveIds = false } = {}) {
               childText(property, 'one_click_beauty', 'false'),
             ),
           },
-          x: hasProperty
+          x: usePropertyGeometry
             ? propertyCenterX *
-                (TEMPLATE_LAYOUT_WIDTH / propertyCanvasWidth) -
+                (layout.width / propertyCanvasWidth) -
               propertyWidth / 2
             : legacyX,
-          y: hasProperty
+          y: usePropertyGeometry
             ? propertyCenterY *
-                (TEMPLATE_LAYOUT_HEIGHT / propertyCanvasHeight) -
+                (layout.height / propertyCanvasHeight) -
               propertyHeight / 2
             : legacyY,
-          width: hasProperty ? propertyWidth : legacyWidth,
-          height: hasProperty ? propertyHeight : legacyHeight,
+          width: usePropertyGeometry ? propertyWidth : legacyWidth,
+          height: usePropertyGeometry ? propertyHeight : legacyHeight,
         };
       },
     );
@@ -477,8 +493,12 @@ export function parseXml(xmlText, { preserveIds = false } = {}) {
           fontFamily: font?.getAttribute('family') || 'Songti SC',
           fontSize: n(font?.getAttribute('size'), 60),
           color: font?.getAttribute('color') || '#ffffff',
-          x: n(position?.getAttribute('x'), 960),
-          y: n(position?.getAttribute('y'), 900),
+          x: n(position?.getAttribute('x'), layout.width / 2),
+          y: n(position?.getAttribute('y'), layout.height * (5 / 6)),
+          direction:
+            childText(subtitleNode, 'direction') === 'vertical'
+              ? 'vertical'
+              : 'horizontal',
           expanded: true,
         };
       },
@@ -511,7 +531,7 @@ export function parseXml(xmlText, { preserveIds = false } = {}) {
     clipsId: parsedId(clipsNode?.getAttribute('id')),
     name: template.getAttribute('name') || '未命名模板',
     duration: n(childText(video, 'duration')),
-    resolution: childText(video, 'resolution', '1920*1080') || '1920*1080',
+    resolution,
     videoStyle: 'none',
     progress: 0,
     demoPath: childText(video, 'demo-path'),

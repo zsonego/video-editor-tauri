@@ -103,6 +103,7 @@ function handleAccountLogout() {
 }
 
 const transitionEffects = ref([]);
+const defaultTransitionEffect = ref('Fade');
 let transitionEffectsRequest = null;
 
 async function loadTransitionEffects() {
@@ -126,6 +127,10 @@ async function loadTransitionEffects() {
         }))
         .filter((item) => item.value);
       transitionEffects.value = effects;
+      defaultTransitionEffect.value =
+        effects.find((item) => item.isDefault)?.value ||
+        effects[0]?.value ||
+        'Fade';
       if (!effects.length) showToast('暂无可用的转场类型', 'warning');
     } catch (error) {
       if (prBridgePageActive) {
@@ -188,12 +193,6 @@ const AREA_SKIN_TONE_OPTIONS = Object.freeze([
 ]);
 const AREA_CANVAS_WIDTH = 1920;
 const AREA_CANVAS_HEIGHT = 1080;
-const AREA_ASPECT_WIDTH = 16;
-const AREA_ASPECT_HEIGHT = 9;
-const AREA_MAX_SCALE = Math.min(
-  AREA_CANVAS_WIDTH / AREA_ASPECT_WIDTH,
-  AREA_CANVAS_HEIGHT / AREA_ASPECT_HEIGHT,
-);
 
 function lutOptionIdFromStoredValue(value) {
   const storedValue = String(value || '').trim();
@@ -263,6 +262,24 @@ const createInitialModel = () => ({
 });
 
 const model = reactive(createInitialModel());
+const canvasSize = computed(() => {
+  const match = String(model.resolution || '').match(
+    /(\d+)\s*[x*×]\s*(\d+)/i,
+  );
+  const width = Number(match?.[1]);
+  const height = Number(match?.[2]);
+  return {
+    width:
+      Number.isFinite(width) && width > 0 ? width : AREA_CANVAS_WIDTH,
+    height:
+      Number.isFinite(height) && height > 0 ? height : AREA_CANVAS_HEIGHT,
+  };
+});
+const canvasWidth = computed(() => canvasSize.value.width);
+const canvasHeight = computed(() => canvasSize.value.height);
+const canvasPreviewStyle = computed(() => ({
+  aspectRatio: `${canvasWidth.value} / ${canvasHeight.value}`,
+}));
 const globalLutInheritedAreaIds = new Set();
 const selectedFilePaths = reactive({
   demo: '',
@@ -296,7 +313,7 @@ const areaCanvasDragOver = ref(false);
 const draggedAreaAssetId = ref('');
 const subtitleDialogOpen = ref(false);
 const subtitleDraft = ref(null);
-const subtitleIsNew = ref(false);
+const subtitlePreviewRef = ref(null);
 const recordingClipDraft = ref(null);
 const searchKeyword = ref('');
 const basicSettingsExpanded = ref(true);
@@ -321,7 +338,11 @@ const areaContextMenu = reactive({
   areaId: '',
 });
 let areaInteraction = null;
+let areaMoveFrame = 0;
+let pendingAreaMove = null;
 let subtitleInteraction = null;
+let subtitleMoveFrame = 0;
+let pendingSubtitleMove = null;
 let activeThumbnailJobs = 0;
 let thumbnailPageDisposed = false;
 const thumbnailQueue = [];
@@ -561,6 +582,41 @@ const sequenceTimelineMinorTicks = computed(() => {
 const areaPreviewStyle = computed(() => {
   return areaRectStyle(areaDraft.value);
 });
+function areaCenterPosition(area) {
+  const geometry = normalizedAreaGeometry(area);
+  return {
+    x: geometry.x + geometry.width / 2,
+    y: geometry.y + geometry.height / 2,
+  };
+}
+
+function setAreaCenterCoordinate(axis, value) {
+  if (!areaDraft.value || isBoundGeneratedArea(areaDraft.value)) return;
+  const number = Number(value);
+  if (!Number.isFinite(number)) return;
+  const geometry = normalizedAreaGeometry(areaDraft.value);
+  if (axis === 'x') {
+    areaDraft.value.x = number - geometry.width / 2;
+  } else {
+    areaDraft.value.y = number - geometry.height / 2;
+  }
+}
+
+const areaDraftCenterX = computed({
+  get: () => areaCenterPosition(areaDraft.value).x,
+  set: (value) => setAreaCenterCoordinate('x', value),
+});
+const areaDraftCenterY = computed({
+  get: () => areaCenterPosition(areaDraft.value).y,
+  set: (value) => setAreaCenterCoordinate('y', value),
+});
+
+function formatAreaCoordinate(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return '0';
+  return Number.isInteger(number) ? String(number) : number.toFixed(2);
+}
+
 const areaPreviewThumbnailUrl = computed(
   () =>
     allAssets.value.find((asset) => asset.id === areaDraft.value?.assetId)
@@ -584,14 +640,49 @@ const otherAreaPreviews = computed(() => {
     }))
     .filter((preview) => preview.id !== draftId);
 });
+
+function subtitlePositionBounds(
+  subtitle = subtitleDraft.value,
+  previewText = subtitlePreviewRef.value,
+) {
+  const fontSize = clampNumber(subtitle?.fontSize, 1, 500);
+  const fallbackInset = Math.min(fontSize * 0.625, canvasHeight.value / 2);
+  const preview = previewText?.closest?.('.screen-preview');
+  const previewBounds = preview?.getBoundingClientRect();
+  const textBounds = previewText?.getBoundingClientRect?.();
+  const hasMeasuredBounds =
+    previewBounds?.width &&
+    previewBounds?.height &&
+    textBounds?.width &&
+    textBounds?.height;
+  const halfWidth = hasMeasuredBounds
+    ? Math.min(
+        canvasWidth.value / 2,
+        (textBounds.width * canvasWidth.value) / previewBounds.width / 2,
+      )
+    : fallbackInset;
+  const halfHeight = hasMeasuredBounds
+    ? Math.min(
+        canvasHeight.value / 2,
+        (textBounds.height * canvasHeight.value) / previewBounds.height / 2,
+      )
+    : fallbackInset;
+  return {
+    minX: halfWidth,
+    maxX: canvasWidth.value - halfWidth,
+    minY: halfHeight,
+    maxY: canvasHeight.value - halfHeight,
+  };
+}
+
 const subtitlePreviewStyle = computed(() => {
   if (!subtitleDraft.value) return {};
-  const x = clampNumber(subtitleDraft.value.x, 0, AREA_CANVAS_WIDTH);
-  const y = clampNumber(subtitleDraft.value.y, 0, AREA_CANVAS_HEIGHT);
+  const x = clampNumber(subtitleDraft.value.x, 0, canvasWidth.value);
+  const y = clampNumber(subtitleDraft.value.y, 0, canvasHeight.value);
   const fontSize = clampNumber(subtitleDraft.value.fontSize, 1, 500);
   return {
-    left: `${(x / AREA_CANVAS_WIDTH) * 100}%`,
-    top: `${(y / AREA_CANVAS_HEIGHT) * 100}%`,
+    left: `${(x / canvasWidth.value) * 100}%`,
+    top: `${(y / canvasHeight.value) * 100}%`,
     color: subtitleDraft.value.color || '#ffffff',
     fontFamily: subtitleDraft.value.fontFamily || 'sans-serif',
     fontSize: `${fontSize / 19.2}cqw`,
@@ -600,6 +691,31 @@ const subtitlePreviewStyle = computed(() => {
 const subtitlePreviewText = computed(
   () => subtitleDraft.value?.defaultText?.trim() || '字幕预览',
 );
+const otherSubtitlePreviews = computed(() => {
+  const activeId = subtitleDraft.value?.id;
+  return (selectedClip.value?.subtitles ?? [])
+    .map((subtitle, index) => ({
+      subtitle,
+      index,
+      text: subtitle.defaultText?.trim() || `字幕 ${index + 1}`,
+      style: subtitlePreviewStyleFor(subtitle),
+      vertical: subtitle.direction === 'vertical',
+    }))
+    .filter((preview) => preview.subtitle.id !== activeId);
+});
+
+function subtitlePreviewStyleFor(subtitle) {
+  const x = clampNumber(subtitle?.x, 0, canvasWidth.value);
+  const y = clampNumber(subtitle?.y, 0, canvasHeight.value);
+  const fontSize = clampNumber(subtitle?.fontSize, 1, 500);
+  return {
+    left: `${(x / canvasWidth.value) * 100}%`,
+    top: `${(y / canvasHeight.value) * 100}%`,
+    color: subtitle?.color || '#ffffff',
+    fontFamily: subtitle?.fontFamily || 'sans-serif',
+    fontSize: `${fontSize / 19.2}cqw`,
+  };
+}
 
 function replaceModel(next, { fromPr = false } = {}) {
   if (!next || !Array.isArray(next.clips) || !Array.isArray(next.mediaGroups)) {
@@ -981,6 +1097,31 @@ function removeAsset(group, asset) {
   });
 }
 
+function createClip() {
+  const previous = model.clips.at(-1);
+  const clip = {
+    id: generateId(),
+    name: `片段 ${model.clips.length + 1}`,
+    materialType: 'variable',
+    starttime: previous
+      ? Number(previous.starttime) + Number(previous.duration)
+      : 0,
+    duration: 3000,
+    topVideo: '',
+    topVideoSourcePath: '',
+    areas: [],
+    subtitles: [],
+    transition: {
+      enabled: false,
+      effect: defaultTransitionEffect.value,
+      duration: 500,
+    },
+  };
+  model.clips.push(clip);
+  selectedClipId.value = clip.id;
+  showToast('已添加新片段');
+}
+
 function appendArea({
   assetId = '',
   mirror = 'none',
@@ -1004,8 +1145,8 @@ function appendArea({
   index = null,
   x = 0,
   y = 0,
-  width = 1920,
-  height = 1080,
+  width = canvasWidth.value,
+  height = canvasHeight.value,
 } = {}) {
   if (!selectedClip.value) return;
   const nextLayerIndex =
@@ -1092,21 +1233,23 @@ function dropAssetOnAreaCanvas(event) {
   const bounds = event.currentTarget.getBoundingClientRect();
   if (!bounds.width || !bounds.height) return;
   const canvasX =
-    ((event.clientX - bounds.left) / bounds.width) * AREA_CANVAS_WIDTH;
+    ((event.clientX - bounds.left) / bounds.width) * canvasWidth.value;
   const canvasY =
-    ((event.clientY - bounds.top) / bounds.height) * AREA_CANVAS_HEIGHT;
+    ((event.clientY - bounds.top) / bounds.height) * canvasHeight.value;
+  const droppedWidth = Math.min(DROPPED_AREA_WIDTH, canvasWidth.value);
+  const droppedHeight = Math.min(DROPPED_AREA_HEIGHT, canvasHeight.value);
   const x = Math.round(
     clampNumber(
-      canvasX - DROPPED_AREA_WIDTH / 2,
+      canvasX - droppedWidth / 2,
       0,
-      AREA_CANVAS_WIDTH - DROPPED_AREA_WIDTH,
+      canvasWidth.value - droppedWidth,
     ),
   );
   const y = Math.round(
     clampNumber(
-      canvasY - DROPPED_AREA_HEIGHT / 2,
+      canvasY - droppedHeight / 2,
       0,
-      AREA_CANVAS_HEIGHT - DROPPED_AREA_HEIGHT,
+      canvasHeight.value - droppedHeight,
     ),
   );
 
@@ -1118,8 +1261,8 @@ function dropAssetOnAreaCanvas(event) {
       assetId,
       x,
       y,
-      width: DROPPED_AREA_WIDTH,
-      height: DROPPED_AREA_HEIGHT,
+      width: droppedWidth,
+      height: droppedHeight,
     });
   }
 }
@@ -1240,8 +1383,8 @@ function canMirrorArea(areaId, direction) {
   return (
     target.x >= 0 &&
     target.y >= 0 &&
-    target.x + target.width <= AREA_CANVAS_WIDTH &&
-    target.y + target.height <= AREA_CANVAS_HEIGHT
+    target.x + target.width <= canvasWidth.value &&
+    target.y + target.height <= canvasHeight.value
   );
 }
 
@@ -1313,12 +1456,14 @@ function createTriptych(rotation) {
   const sourceArea = areaForContextMenu();
   if (!sourceArea || !canCreateTriptych(sourceArea.id)) return;
   const groupId = generateId();
+  const areaWidth = canvasWidth.value / 3;
+  const areaHeight = canvasHeight.value;
   closeAreaContextMenu();
   Object.assign(sourceArea, {
-    x: 640,
+    x: areaWidth,
     y: 0,
-    width: 640,
-    height: 1080,
+    width: areaWidth,
+    height: areaHeight,
     mirror: 'none',
     rotate: rotation,
     triptychGroupId: groupId,
@@ -1337,8 +1482,8 @@ function createTriptych(rotation) {
     triptychRole: 'left',
     x: 0,
     y: 0,
-    width: 640,
-    height: 1080,
+    width: areaWidth,
+    height: areaHeight,
   });
   appendArea({
     assetId: sourceArea.assetId,
@@ -1351,10 +1496,10 @@ function createTriptych(rotation) {
     triptychGroupId: groupId,
     triptychSourceAreaId: sourceArea.id,
     triptychRole: 'right',
-    x: 1280,
+    x: areaWidth * 2,
     y: 0,
-    width: 640,
-    height: 1080,
+    width: areaWidth,
+    height: areaHeight,
   });
   areaDraft.value = sourceArea;
   showToast('三分屏区域已创建');
@@ -1376,6 +1521,8 @@ function createQuad() {
   if (!sourceArea || !canCreateQuad(sourceArea.id)) return;
 
   const groupId = generateId();
+  const areaWidth = canvasWidth.value / 2;
+  const areaHeight = canvasHeight.value / 2;
   const sharedArea = {
     assetId: sourceArea.assetId,
     mirror: sourceArea.mirror || 'none',
@@ -1386,35 +1533,35 @@ function createQuad() {
     isQuadGenerated: true,
     quadGroupId: groupId,
     quadSourceAreaId: sourceArea.id,
-    width: 960,
-    height: 540,
+    width: areaWidth,
+    height: areaHeight,
   };
   closeAreaContextMenu();
   Object.assign(sourceArea, {
     x: 0,
     y: 0,
-    width: 960,
-    height: 540,
+    width: areaWidth,
+    height: areaHeight,
     quadGroupId: groupId,
     quadRole: 'top-left',
   });
   appendArea({
     ...sharedArea,
     quadRole: 'top-right',
-    x: 960,
+    x: areaWidth,
     y: 0,
   });
   appendArea({
     ...sharedArea,
     quadRole: 'bottom-left',
     x: 0,
-    y: 540,
+    y: areaHeight,
   });
   appendArea({
     ...sharedArea,
     quadRole: 'bottom-right',
-    x: 960,
-    y: 540,
+    x: areaWidth,
+    y: areaHeight,
   });
   areaDraft.value = sourceArea;
   showToast('四分屏区域已创建');
@@ -1522,11 +1669,20 @@ function removeArea(area) {
   });
 }
 
+function openSubtitleManager() {
+  if (!selectedClip.value) return;
+  subtitleDialogOpen.value = true;
+  const firstSubtitle = selectedClip.value.subtitles[0];
+  if (firstSubtitle) editSubtitle(firstSubtitle);
+  else subtitleDraft.value = null;
+}
+
 function createSubtitle() {
   if (!selectedClip.value) return;
-  subtitleDraft.value = {
+  const subtitle = {
     id: generateId(),
     timeMode: 'relative',
+    direction: 'horizontal',
     time: 0,
     duration: 5000,
     minlen: 2,
@@ -1535,41 +1691,56 @@ function createSubtitle() {
     fontFamily: 'Songti SC',
     fontSize: 60,
     color: '#ffffff',
-    x: 960,
-    y: 900,
+    x: canvasWidth.value / 2,
+    y: canvasHeight.value * (5 / 6),
     expanded: true,
   };
-  subtitleIsNew.value = true;
+  selectedClip.value.subtitles.push(subtitle);
+  subtitleDraft.value = subtitle;
   subtitleDialogOpen.value = true;
+  nextTick(normalizeSubtitleDraftPosition);
+  showToast('已添加新字幕');
 }
 
 function editSubtitle(subtitle) {
-  subtitleDraft.value = { ...subtitle };
-  normalizeSubtitleDraftPosition();
-  subtitleIsNew.value = false;
+  if (!subtitle) return;
+  subtitle.direction =
+    subtitle.direction === 'vertical' ? 'vertical' : 'horizontal';
+  subtitleDraft.value = subtitle;
   subtitleDialogOpen.value = true;
+  nextTick(normalizeSubtitleDraftPosition);
 }
 
-function saveSubtitle() {
-  if (!selectedClip.value || !subtitleDraft.value) return;
-  normalizeSubtitleDraftPosition();
-  if (subtitleIsNew.value) {
-    selectedClip.value.subtitles.push({ ...subtitleDraft.value });
-  } else {
-    const target = selectedClip.value.subtitles.find(
-      (subtitle) => subtitle.id === subtitleDraft.value.id,
-    );
-    if (target) Object.assign(target, subtitleDraft.value);
-  }
+function setSubtitleDirection(direction) {
+  if (!subtitleDraft.value) return;
+  subtitleDraft.value.direction =
+    direction === 'vertical' ? 'vertical' : 'horizontal';
+  nextTick(normalizeSubtitleDraftPosition);
+}
+
+function normalizeSubtitleDraftPositionAfterRender() {
+  nextTick(normalizeSubtitleDraftPosition);
+}
+
+function closeSubtitleDialog() {
+  if (subtitleDraft.value) normalizeSubtitleDraftPosition();
+  stopSubtitleInteraction();
   subtitleDialogOpen.value = false;
-  showToast(subtitleIsNew.value ? '字幕已添加' : '字幕已保存');
+  subtitleDraft.value = null;
 }
 
 function removeSubtitle(subtitle) {
-  selectedClip.value?.subtitles.splice(
-    selectedClip.value.subtitles.indexOf(subtitle),
-    1,
-  );
+  const subtitles = selectedClip.value?.subtitles;
+  if (!subtitles) return;
+  const index = subtitles.indexOf(subtitle);
+  if (index < 0) return;
+  const removingActive = subtitleDraft.value?.id === subtitle.id;
+  subtitles.splice(index, 1);
+  if (removingActive) {
+    subtitleDraft.value = subtitles[Math.min(index, subtitles.length - 1)] ?? null;
+    if (subtitleDraft.value) nextTick(normalizeSubtitleDraftPosition);
+  }
+  showToast('字幕已删除');
 }
 
 function openRecordingClipEditor(clip) {
@@ -2152,11 +2323,15 @@ function clampNumber(value, min, max) {
 }
 
 function normalizedAreaGeometry(area) {
-  const width = clampNumber(area?.width, 1, AREA_CANVAS_WIDTH);
-  const height = clampNumber(area?.height, 1, AREA_CANVAS_HEIGHT);
+  const rawWidth = Number(area?.width);
+  const rawHeight = Number(area?.height);
+  const width = Number.isFinite(rawWidth) ? Math.max(1, rawWidth) : 1;
+  const height = Number.isFinite(rawHeight) ? Math.max(1, rawHeight) : 1;
+  const rawX = Number(area?.x);
+  const rawY = Number(area?.y);
   return {
-    x: clampNumber(area?.x, 0, AREA_CANVAS_WIDTH - width),
-    y: clampNumber(area?.y, 0, AREA_CANVAS_HEIGHT - height),
+    x: Number.isFinite(rawX) ? rawX : 0,
+    y: Number.isFinite(rawY) ? rawY : 0,
     width,
     height,
   };
@@ -2166,18 +2341,19 @@ function areaRectStyle(area) {
   if (!area) return {};
   const { x, y, width, height } = normalizedAreaGeometry(area);
   return {
-    left: `${(x / AREA_CANVAS_WIDTH) * 100}%`,
-    top: `${(y / AREA_CANVAS_HEIGHT) * 100}%`,
-    width: `${(width / AREA_CANVAS_WIDTH) * 100}%`,
-    height: `${(height / AREA_CANVAS_HEIGHT) * 100}%`,
+    left: `${(x / canvasWidth.value) * 100}%`,
+    top: `${(y / canvasHeight.value) * 100}%`,
+    width: `${(width / canvasWidth.value) * 100}%`,
+    height: `${(height / canvasHeight.value) * 100}%`,
     zIndex: Math.max(0, Math.round(Number(area.index) || 0)) + 1,
   };
 }
 
 function areaImageTransformStyle(area) {
   if (!area) return {};
-  const scaleX = area.mirror === 'horizontal' ? -1 : 1;
-  const scaleY = area.mirror === 'vertical' ? -1 : 1;
+  const scaleX =
+    area.mirror === 'horizontal' || area.mirror === 'both' ? -1 : 1;
+  const scaleY = area.mirror === 'vertical' || area.mirror === 'both' ? -1 : 1;
   const rotate = Number.isFinite(Number(area.rotate)) ? Number(area.rotate) : 0;
   const opacity = clampNumber(area.opacity ?? 1, 0, 1);
   const normalizedRotation = ((rotate % 360) + 360) % 360;
@@ -2304,79 +2480,6 @@ function resetAreaBeauty() {
   applyGlobalLutToVariableAreas();
 }
 
-function mirrorAxisForDirection(area, direction) {
-  const boundArea = selectedClip.value?.areas.find(
-    (candidate) =>
-      candidate.isMirrorGenerated &&
-      candidate.mirrorSourceAreaId === area.id &&
-      candidate.mirrorDirection === direction,
-  );
-  return boundArea
-    ? resolveMirrorAxis(area, boundArea)
-    : mirrorAxisForGeometry(normalizedAreaGeometry(area), direction);
-}
-
-function areaMirrorBindingBounds(area, width, height) {
-  const directions = new Set(area?.mirroredDirections ?? []);
-  const triptychSource = isTriptychSourceArea(area);
-  const quadSource = isQuadSourceArea(area);
-  if (quadSource) {
-    return {
-      minX: 0,
-      maxX: AREA_CANVAS_WIDTH - width * 2,
-      minY: 0,
-      maxY: AREA_CANVAS_HEIGHT - height * 2,
-      horizontalSlots: 2,
-      verticalSlots: 2,
-    };
-  }
-  const hasLeft = triptychSource || directions.has('left');
-  const hasRight = triptychSource || directions.has('right');
-  const hasUp = directions.has('up');
-  const hasDown = directions.has('down');
-  if (!triptychSource && directions.size) {
-    let minX = 0;
-    let maxX = AREA_CANVAS_WIDTH - width;
-    let minY = 0;
-    let maxY = AREA_CANVAS_HEIGHT - height;
-    directions.forEach((direction) => {
-      const axis = mirrorAxisForDirection(area, direction);
-      if (direction === 'left') {
-        minX = Math.max(minX, axis);
-        maxX = Math.min(maxX, axis * 2 - width);
-      }
-      if (direction === 'right') {
-        minX = Math.max(minX, axis * 2 - AREA_CANVAS_WIDTH);
-        maxX = Math.min(maxX, axis - width);
-      }
-      if (direction === 'up') {
-        minY = Math.max(minY, axis);
-        maxY = Math.min(maxY, axis * 2 - height);
-      }
-      if (direction === 'down') {
-        minY = Math.max(minY, axis * 2 - AREA_CANVAS_HEIGHT);
-        maxY = Math.min(maxY, axis - height);
-      }
-    });
-    return {
-      minX,
-      maxX,
-      minY,
-      maxY,
-      horizontalSlots: 1 + Number(hasLeft) + Number(hasRight),
-      verticalSlots: 1 + Number(hasUp) + Number(hasDown),
-    };
-  }
-  return {
-    minX: hasLeft ? width : 0,
-    maxX: AREA_CANVAS_WIDTH - width * (hasRight ? 2 : 1),
-    minY: hasUp ? height : 0,
-    maxY: AREA_CANVAS_HEIGHT - height * (hasDown ? 2 : 1),
-    horizontalSlots: 1 + Number(hasLeft) + Number(hasRight),
-    verticalSlots: 1 + Number(hasUp) + Number(hasDown),
-  };
-}
-
 function resolveMirrorAxis(sourceArea, boundArea) {
   const storedAxis = Number(boundArea.mirrorAxis);
   if (
@@ -2484,76 +2587,15 @@ function syncAllMirroredAreas() {
   });
 }
 
-function normalizeAreaDraft(sizeSource = 'width') {
+function normalizeAreaDraft() {
   if (!areaDraft.value || isBoundGeneratedArea(areaDraft.value)) return;
-  if (isTriptychSourceArea(areaDraft.value)) {
-    const width = Math.round(
-      clampNumber(areaDraft.value.width, 1, AREA_CANVAS_WIDTH / 3),
-    );
-    const height = Math.round(
-      clampNumber(areaDraft.value.height, 1, AREA_CANVAS_HEIGHT),
-    );
-    const bounds = areaMirrorBindingBounds(areaDraft.value, width, height);
-    Object.assign(areaDraft.value, {
-      x: Math.round(
-        clampNumber(areaDraft.value.x, bounds.minX, bounds.maxX),
-      ),
-      y: Math.round(
-        clampNumber(areaDraft.value.y, bounds.minY, bounds.maxY),
-      ),
-      width,
-      height,
-    });
-    return;
-  }
-  const rawScale =
-    sizeSource === 'height'
-      ? Number(areaDraft.value.height) / AREA_ASPECT_HEIGHT
-      : Number(areaDraft.value.width) / AREA_ASPECT_WIDTH;
-  const directions = new Set(areaDraft.value.mirroredDirections ?? []);
-  const horizontalSlots = isQuadSourceArea(areaDraft.value)
-    ? 2
-    : 1 + Number(directions.has('left')) + Number(directions.has('right'));
-  const verticalSlots = isQuadSourceArea(areaDraft.value)
-    ? 2
-    : 1 + Number(directions.has('up')) + Number(directions.has('down'));
-  let mirrorWidthLimit = AREA_CANVAS_WIDTH;
-  let mirrorHeightLimit = AREA_CANVAS_HEIGHT;
-  directions.forEach((direction) => {
-    const axis = mirrorAxisForDirection(areaDraft.value, direction);
-    if (direction === 'left' || direction === 'right') {
-      mirrorWidthLimit = Math.min(
-        mirrorWidthLimit,
-        axis,
-        AREA_CANVAS_WIDTH - axis,
-      );
-    } else {
-      mirrorHeightLimit = Math.min(
-        mirrorHeightLimit,
-        axis,
-        AREA_CANVAS_HEIGHT - axis,
-      );
-    }
-  });
-  const bindingMaxScale = Math.floor(
-    Math.min(
-      AREA_CANVAS_WIDTH / horizontalSlots / AREA_ASPECT_WIDTH,
-      AREA_CANVAS_HEIGHT / verticalSlots / AREA_ASPECT_HEIGHT,
-      mirrorWidthLimit / AREA_ASPECT_WIDTH,
-      mirrorHeightLimit / AREA_ASPECT_HEIGHT,
-    ),
-  );
-  const scale = Math.round(
-    clampNumber(rawScale, 1, Math.min(AREA_MAX_SCALE, bindingMaxScale)),
-  );
-  const width = scale * AREA_ASPECT_WIDTH;
-  const height = scale * AREA_ASPECT_HEIGHT;
-  const bounds = areaMirrorBindingBounds(areaDraft.value, width, height);
+  const rawX = Number(areaDraft.value.x);
+  const rawY = Number(areaDraft.value.y);
   Object.assign(areaDraft.value, {
-    x: clampNumber(areaDraft.value.x, bounds.minX, bounds.maxX),
-    y: clampNumber(areaDraft.value.y, bounds.minY, bounds.maxY),
-    width,
-    height,
+    x: Number.isFinite(rawX) ? rawX : 0,
+    y: Number.isFinite(rawY) ? rawY : 0,
+    width: Math.max(1, Number(areaDraft.value.width) || 1),
+    height: Math.max(1, Number(areaDraft.value.height) || 1),
   });
 }
 
@@ -2570,6 +2612,14 @@ function normalizeAreaOpacity(area = areaDraft.value) {
 function stopAreaInteraction(event) {
   if (event && areaInteraction && event.pointerId !== areaInteraction.pointerId)
     return;
+  if (areaMoveFrame) {
+    window.cancelAnimationFrame(areaMoveFrame);
+    areaMoveFrame = 0;
+  }
+  if (pendingAreaMove && areaInteraction) {
+    applyAreaInteractionMove(pendingAreaMove);
+  }
+  pendingAreaMove = null;
   areaInteraction = null;
   window.removeEventListener('pointermove', moveAreaInteraction);
   window.removeEventListener('pointerup', stopAreaInteraction);
@@ -2596,8 +2646,8 @@ function startAreaInteraction(event, mode) {
     mode,
     startClientX: event.clientX,
     startClientY: event.clientY,
-    scaleX: AREA_CANVAS_WIDTH / bounds.width,
-    scaleY: AREA_CANVAS_HEIGHT / bounds.height,
+    scaleX: canvasWidth.value / bounds.width,
+    scaleY: canvasHeight.value / bounds.height,
     startLeft: geometry.x,
     startTop: geometry.y,
     startRight: geometry.x + geometry.width,
@@ -2616,21 +2666,37 @@ function moveAreaInteraction(event) {
     !areaDraft.value
   )
     return;
+  pendingAreaMove = {
+    pointerId: event.pointerId,
+    clientX: event.clientX,
+    clientY: event.clientY,
+  };
+  if (!areaMoveFrame) {
+    areaMoveFrame = window.requestAnimationFrame(() => {
+      areaMoveFrame = 0;
+      const pendingMove = pendingAreaMove;
+      pendingAreaMove = null;
+      if (!pendingMove || !areaInteraction) return;
+      applyAreaInteractionMove(pendingMove);
+    });
+  }
+  event.preventDefault();
+}
+
+function applyAreaInteractionMove(event) {
+  if (
+    !areaInteraction ||
+    event.pointerId !== areaInteraction.pointerId ||
+    !areaDraft.value
+  )
+    return;
   const state = areaInteraction;
   const dx = (event.clientX - state.startClientX) * state.scaleX;
   const dy = (event.clientY - state.startClientY) * state.scaleY;
 
   if (state.mode === 'move') {
-    const width = state.startRight - state.startLeft;
-    const height = state.startBottom - state.startTop;
-    const bounds = areaMirrorBindingBounds(areaDraft.value, width, height);
-    areaDraft.value.x = Math.round(
-      clampNumber(state.startLeft + dx, bounds.minX, bounds.maxX),
-    );
-    areaDraft.value.y = Math.round(
-      clampNumber(state.startTop + dy, bounds.minY, bounds.maxY),
-    );
-    event.preventDefault();
+    areaDraft.value.x = Math.round(state.startLeft + dx);
+    areaDraft.value.y = Math.round(state.startTop + dy);
     return;
   }
 
@@ -2642,41 +2708,8 @@ function moveAreaInteraction(event) {
   const rawHeight = state.mode.includes('n')
     ? anchorY - (state.startTop + dy)
     : state.startBottom + dy - anchorY;
-  if (isTriptychSourceArea(areaDraft.value)) {
-    const width = Math.max(1, Math.round(rawWidth));
-    const height = Math.max(1, Math.round(rawHeight));
-    Object.assign(areaDraft.value, {
-      x: state.mode.includes('w') ? anchorX - width : anchorX,
-      y: state.mode.includes('n') ? anchorY - height : anchorY,
-      width,
-      height,
-    });
-    normalizeAreaDraft();
-    event.preventDefault();
-    return;
-  }
-  const startScale = (state.startRight - state.startLeft) / AREA_ASPECT_WIDTH;
-  const widthScale = rawWidth / AREA_ASPECT_WIDTH;
-  const heightScale = rawHeight / AREA_ASPECT_HEIGHT;
-  const requestedScale =
-    Math.abs(widthScale - startScale) >= Math.abs(heightScale - startScale)
-      ? widthScale
-      : heightScale;
-  const maxWidth = state.mode.includes('w')
-    ? anchorX
-    : AREA_CANVAS_WIDTH - anchorX;
-  const maxHeight = state.mode.includes('n')
-    ? anchorY
-    : AREA_CANVAS_HEIGHT - anchorY;
-  const maxScale = Math.max(
-    1,
-    Math.floor(
-      Math.min(maxWidth / AREA_ASPECT_WIDTH, maxHeight / AREA_ASPECT_HEIGHT),
-    ),
-  );
-  const scale = Math.round(clampNumber(requestedScale, 1, maxScale));
-  const width = scale * AREA_ASPECT_WIDTH;
-  const height = scale * AREA_ASPECT_HEIGHT;
+  const width = Math.round(Math.max(1, rawWidth));
+  const height = Math.round(Math.max(1, rawHeight));
   const left = state.mode.includes('w') ? anchorX - width : anchorX;
   const top = state.mode.includes('n') ? anchorY - height : anchorY;
 
@@ -2686,17 +2719,17 @@ function moveAreaInteraction(event) {
     width,
     height,
   });
-  normalizeAreaDraft('width');
-  event.preventDefault();
+  normalizeAreaDraft();
 }
 
 function normalizeSubtitleDraftPosition() {
   if (!subtitleDraft.value) return;
+  const bounds = subtitlePositionBounds();
   subtitleDraft.value.x = Math.round(
-    clampNumber(subtitleDraft.value.x, 0, AREA_CANVAS_WIDTH),
+    clampNumber(subtitleDraft.value.x, bounds.minX, bounds.maxX),
   );
   subtitleDraft.value.y = Math.round(
-    clampNumber(subtitleDraft.value.y, 0, AREA_CANVAS_HEIGHT),
+    clampNumber(subtitleDraft.value.y, bounds.minY, bounds.maxY),
   );
 }
 
@@ -2708,6 +2741,17 @@ function stopSubtitleInteraction(event) {
   ) {
     return;
   }
+  if (subtitleMoveFrame) {
+    window.cancelAnimationFrame(subtitleMoveFrame);
+    subtitleMoveFrame = 0;
+  }
+  if (pendingSubtitleMove && subtitleInteraction) {
+    applySubtitleInteractionPosition(
+      pendingSubtitleMove.clientX,
+      pendingSubtitleMove.clientY,
+    );
+  }
+  pendingSubtitleMove = null;
   subtitleInteraction = null;
   window.removeEventListener('pointermove', moveSubtitleInteraction);
   window.removeEventListener('pointerup', stopSubtitleInteraction);
@@ -2728,8 +2772,12 @@ function startSubtitleInteraction(event) {
     startClientY: event.clientY,
     startX: subtitleDraft.value.x,
     startY: subtitleDraft.value.y,
-    scaleX: AREA_CANVAS_WIDTH / bounds.width,
-    scaleY: AREA_CANVAS_HEIGHT / bounds.height,
+    scaleX: canvasWidth.value / bounds.width,
+    scaleY: canvasHeight.value / bounds.height,
+    positionBounds: subtitlePositionBounds(
+      subtitleDraft.value,
+      event.currentTarget,
+    ),
   };
   window.addEventListener('pointermove', moveSubtitleInteraction);
   window.addEventListener('pointerup', stopSubtitleInteraction);
@@ -2745,19 +2793,42 @@ function moveSubtitleInteraction(event) {
   ) {
     return;
   }
+  pendingSubtitleMove = {
+    clientX: event.clientX,
+    clientY: event.clientY,
+  };
+  if (!subtitleMoveFrame) {
+    subtitleMoveFrame = window.requestAnimationFrame(() => {
+      subtitleMoveFrame = 0;
+      const pendingMove = pendingSubtitleMove;
+      pendingSubtitleMove = null;
+      if (!pendingMove || !subtitleInteraction) return;
+      applySubtitleInteractionPosition(
+        pendingMove.clientX,
+        pendingMove.clientY,
+      );
+    });
+  }
+  event.preventDefault();
+}
+
+function applySubtitleInteractionPosition(clientX, clientY) {
+  if (!subtitleInteraction || !subtitleDraft.value) return;
   const dx =
-    (event.clientX - subtitleInteraction.startClientX) *
+    (clientX - subtitleInteraction.startClientX) *
     subtitleInteraction.scaleX;
   const dy =
-    (event.clientY - subtitleInteraction.startClientY) *
+    (clientY - subtitleInteraction.startClientY) *
     subtitleInteraction.scaleY;
-  subtitleDraft.value.x = Math.round(
-    clampNumber(subtitleInteraction.startX + dx, 0, AREA_CANVAS_WIDTH),
-  );
-  subtitleDraft.value.y = Math.round(
-    clampNumber(subtitleInteraction.startY + dy, 0, AREA_CANVAS_HEIGHT),
-  );
-  event.preventDefault();
+  const bounds = subtitleInteraction.positionBounds;
+  Object.assign(subtitleDraft.value, {
+    x: Math.round(
+      clampNumber(subtitleInteraction.startX + dx, bounds.minX, bounds.maxX),
+    ),
+    y: Math.round(
+      clampNumber(subtitleInteraction.startY + dy, bounds.minY, bounds.maxY),
+    ),
+  });
 }
 
 function validateModel({ forPreview = false } = {}) {
@@ -2858,12 +2929,6 @@ function validateModel({ forPreview = false } = {}) {
       }
       if (Number(area.width) <= 0 || Number(area.height) <= 0) {
         return `片段“${clip.name}”的 Area 宽高必须大于 0。`;
-      }
-      if (
-        Number(area.width) * AREA_ASPECT_HEIGHT !==
-        Number(area.height) * AREA_ASPECT_WIDTH
-      ) {
-        return `片段“${clip.name}”的 Area 宽高比必须为 16:9。`;
       }
     }
     if (
@@ -4407,9 +4472,9 @@ onBeforeUnmount(() => {
             <div class="film-line"></div>
             <Sparkles :size="18" />
           </div>
-          <span class="eyebrow">WAITING FOR PREMIERE PRO</span>
-          <h2>等待 PR 导入模板</h2>
-          <p>请在 Premiere Pro 插件中生成并导入模板。</p>
+          <span class="eyebrow">CREATE OR IMPORT</span>
+          <h2>从 PR 导入或手动添加片段</h2>
+          <p>测试时可直接新建片段，也可以在 Premiere Pro 中导入模板。</p>
         </div>
 
         <div class="clip-grid">
@@ -4572,6 +4637,11 @@ onBeforeUnmount(() => {
             </div>
           </article>
 
+          <button class="add-clip-card" type="button" @click="createClip">
+            <span><Plus :size="24" /></span>
+            <strong>{{ model.clips.length ? '添加片段' : '新建 Clip' }}</strong>
+            <small>自动生成片段 ID</small>
+          </button>
         </div>
 
         <div v-if="model.clips.length" class="sequence-summary">
@@ -4988,66 +5058,28 @@ onBeforeUnmount(() => {
             </p>
           </section>
 
-          <section v-if="false" class="drawer-section">
-            <div class="drawer-section-title with-action">
+          <section class="drawer-section">
+            <div class="drawer-section-title">
               <div>
                 <span class="step-number">04</span>
                 <h3>字幕</h3>
-                <em>{{ selectedClip.subtitles.length }}</em>
               </div>
-              <button class="mini-button" type="button" @click="createSubtitle">
-                <Plus :size="14" /> 添加
-              </button>
-            </div>
-
-            <div v-if="selectedClip.subtitles.length" class="subtitle-list">
-              <article
-                v-for="(subtitle, index) in selectedClip.subtitles"
-                :key="subtitle.id"
-                class="subtitle-card"
-              >
-                <button
-                  class="subtitle-row"
-                  type="button"
-                  @click="editSubtitle(subtitle)"
-                >
-                  <span class="subtitle-row-index">
-                    <Captions :size="15" />
-                  </span>
-                  <span class="subtitle-row-main">
-                    <strong>{{
-                      subtitle.defaultText || `字幕 ${index + 1}`
-                    }}</strong>
-                    <small>
-                      {{
-                        subtitle.timeMode === 'absolute'
-                          ? '绝对时间'
-                          : '相对时间'
-                      }}
-                      · {{ subtitle.time }}ms · {{ subtitle.duration }}ms
-                    </small>
-                  </span>
-                  <ChevronRight :size="15" />
-                </button>
-                <button
-                  class="plain-icon danger-hover"
-                  type="button"
-                  title="删除字幕"
-                  @click.stop="removeSubtitle(subtitle)"
-                >
-                  <Trash2 :size="14" />
-                </button>
-              </article>
             </div>
             <button
-              v-else
-              class="empty-block compact"
+              class="area-manager-entry"
               type="button"
-              @click="createSubtitle"
+              @click="openSubtitleManager"
             >
-              <Captions :size="19" />
-              <strong>还没有字幕</strong>
-              <span>可添加多条字幕配置</span>
+              <Captions :size="20" />
+              <span>
+                <strong>{{
+                  selectedClip.subtitles.length
+                    ? `管理 ${selectedClip.subtitles.length} 条字幕`
+                    : '设置字幕'
+                }}</strong>
+                <small>在弹窗中添加、查看和编辑字幕</small>
+              </span>
+              <ChevronRight :size="16" />
             </button>
           </section>
         </div>
@@ -5288,8 +5320,9 @@ onBeforeUnmount(() => {
                       <span class="area-main">
                         <strong>{{ assetName(area.assetId) }}</strong>
                         <small
-                          >层级 {{ area.index ?? index + 1 }} · {{ area.x }},
-                          {{ area.y }} · {{ area.width }} ×
+                          >层级 {{ area.index ?? index + 1 }} · 中心
+                          {{ formatAreaCoordinate(areaCenterPosition(area).x) }},
+                          {{ formatAreaCoordinate(areaCenterPosition(area).y) }} · {{ area.width }} ×
                           {{ area.height }}</small
                         >
                       </span>
@@ -5481,7 +5514,7 @@ onBeforeUnmount(() => {
                               ? '四分屏联动'
                             : isTriptychSourceArea(areaDraft)
                               ? '三分屏联动'
-                              : '固定 16:9'
+                              : '自由尺寸'
                         }}</small>
                         <ChevronDown
                           v-if="areaModalSectionsExpanded.position"
@@ -5497,28 +5530,24 @@ onBeforeUnmount(() => {
                         <div class="modal-section-collapse-inner">
                     <div class="area-inspector-controls">
                       <div class="area-inspector-row area-inspector-pair-row">
-                        <span class="area-inspector-label">位置</span>
+                        <span class="area-inspector-label">位置（中心点）</span>
                         <div class="area-inspector-pair">
                           <label class="area-inspector-value has-prefix">
                             <small>X</small>
                             <input
-                              v-model.number="areaDraft.x"
+                              v-model.number="areaDraftCenterX"
                               type="number"
                               :disabled="isBoundGeneratedArea(areaDraft)"
-                              min="0"
-                              max="1919"
-                              @change="normalizeAreaDraft"
+                              step="0.01"
                             />
                           </label>
                           <label class="area-inspector-value has-prefix">
                             <small>Y</small>
                             <input
-                              v-model.number="areaDraft.y"
+                              v-model.number="areaDraftCenterY"
                               type="number"
                               :disabled="isBoundGeneratedArea(areaDraft)"
-                              min="0"
-                              max="1079"
-                              @change="normalizeAreaDraft"
+                              step="0.01"
                             />
                           </label>
                         </div>
@@ -5532,10 +5561,9 @@ onBeforeUnmount(() => {
                               v-model.number="areaDraft.width"
                               type="number"
                               :disabled="isBoundGeneratedArea(areaDraft)"
-                              min="16"
-                              max="1920"
-                              step="16"
-                              @change="normalizeAreaDraft('width')"
+                              min="1"
+                              step="0.001"
+                              @change="normalizeAreaDraft"
                             />
                           </label>
                           <label class="area-inspector-value has-prefix">
@@ -5544,10 +5572,9 @@ onBeforeUnmount(() => {
                               v-model.number="areaDraft.height"
                               type="number"
                               :disabled="isBoundGeneratedArea(areaDraft)"
-                              min="9"
-                              max="1080"
-                              step="9"
-                              @change="normalizeAreaDraft('height')"
+                              min="1"
+                              step="0.001"
+                              @change="normalizeAreaDraft"
                             />
                           </label>
                         </div>
@@ -5831,6 +5858,7 @@ onBeforeUnmount(() => {
                   <div
                     class="screen-preview"
                     :class="{ 'asset-drag-over': areaCanvasDragOver }"
+                    :style="canvasPreviewStyle"
                     @dragover="handleAreaCanvasDragOver"
                     @dragleave="handleAreaCanvasDragLeave"
                     @drop="dropAssetOnAreaCanvas"
@@ -6040,9 +6068,9 @@ onBeforeUnmount(() => {
     <Teleport to="body">
       <Transition name="modal">
         <div
-          v-if="subtitleDialogOpen && subtitleDraft"
+          v-if="subtitleDialogOpen"
           class="modal-backdrop"
-          @mousedown.self="subtitleDialogOpen = false"
+          @mousedown.self="closeSubtitleDialog"
         >
         <div
           class="area-modal subtitle-modal"
@@ -6053,23 +6081,77 @@ onBeforeUnmount(() => {
           <div class="modal-header">
             <div>
               <span class="eyebrow">SUBTITLE SETTINGS</span>
-              <h2 id="subtitle-dialog-title">
-                {{ subtitleIsNew ? '添加字幕' : '编辑字幕' }}
-              </h2>
-              <p>设置字幕文案、时间、字体样式和画布位置</p>
+              <h2 id="subtitle-dialog-title">字幕设置</h2>
+              <p>所有修改都会自动保存，可连续添加多条字幕</p>
             </div>
             <button
               class="icon-button"
               type="button"
               title="关闭字幕设置"
-              @click="subtitleDialogOpen = false"
+              @click="closeSubtitleDialog"
             >
               <X :size="18" />
             </button>
           </div>
 
           <div class="modal-body subtitle-modal-body">
-            <div class="subtitle-settings-grid">
+            <section class="area-dialog-manager subtitle-dialog-manager">
+              <div class="area-dialog-manager-head">
+                <div>
+                  <strong>字幕列表</strong>
+                  <small>{{ selectedClip?.subtitles.length || 0 }} 条已保存字幕</small>
+                </div>
+                <button class="mini-button" type="button" @click="createSubtitle">
+                  <Plus :size="14" /> 添加字幕
+                </button>
+              </div>
+
+              <div
+                v-if="selectedClip?.subtitles.length"
+                class="area-list area-dialog-list subtitle-dialog-list"
+              >
+                <div
+                  v-for="(subtitle, index) in selectedClip.subtitles"
+                  :key="subtitle.id"
+                  class="area-item subtitle-dialog-item"
+                  :class="{
+                    active: subtitleDraft && subtitleDraft.id === subtitle.id,
+                  }"
+                  role="button"
+                  tabindex="0"
+                  @click="editSubtitle(subtitle)"
+                  @keydown.enter="editSubtitle(subtitle)"
+                >
+                  <span class="area-index">{{
+                    String(index + 1).padStart(2, '0')
+                  }}</span>
+                  <span class="area-main">
+                    <strong>{{ subtitle.defaultText || `字幕 ${index + 1}` }}</strong>
+                    <small>
+                      {{ subtitle.timeMode === 'absolute' ? '绝对时间' : '相对时间' }}
+                      · {{ subtitle.time }}ms · {{ subtitle.duration }}ms
+                    </small>
+                  </span>
+                  <span class="area-state">
+                    {{ subtitle.direction === 'vertical' ? '竖排' : '横排' }}
+                  </span>
+                  <button
+                    class="plain-icon area-delete"
+                    type="button"
+                    title="删除字幕"
+                    @click.stop="removeSubtitle(subtitle)"
+                  >
+                    <Trash2 :size="13" />
+                  </button>
+                  <ChevronRight :size="15" />
+                </div>
+              </div>
+              <div v-else class="subtitle-dialog-list-empty">
+                当前片段还没有字幕，点击“添加字幕”开始设置。
+              </div>
+            </section>
+
+            <div v-if="subtitleDraft" class="subtitle-settings-grid">
               <section class="modal-section">
                 <div class="modal-section-head">
                   <div>
@@ -6083,6 +6165,7 @@ onBeforeUnmount(() => {
                     v-model="subtitleDraft.defaultText"
                     rows="3"
                     placeholder="输入需要预览和导出的字幕文字"
+                    @input="normalizeSubtitleDraftPositionAfterRender"
                   ></textarea>
                 </div>
                 <div class="segmented">
@@ -6099,6 +6182,25 @@ onBeforeUnmount(() => {
                     @click="subtitleDraft.timeMode = 'absolute'"
                   >
                     绝对时间
+                  </button>
+                </div>
+                <div
+                  class="segmented subtitle-direction-segmented"
+                  aria-label="字幕排列方向"
+                >
+                  <button
+                    :class="{ active: subtitleDraft.direction === 'horizontal' }"
+                    type="button"
+                    @click="setSubtitleDirection('horizontal')"
+                  >
+                    横排
+                  </button>
+                  <button
+                    :class="{ active: subtitleDraft.direction === 'vertical' }"
+                    type="button"
+                    @click="setSubtitleDirection('vertical')"
+                  >
+                    竖排
                   </button>
                 </div>
                 <div class="field-grid">
@@ -6150,7 +6252,10 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="field">
                   <label>字体</label>
-                  <select v-model="subtitleDraft.fontFamily">
+                  <select
+                    v-model="subtitleDraft.fontFamily"
+                    @change="normalizeSubtitleDraftPositionAfterRender"
+                  >
                     <option
                       v-for="font in fontOptions"
                       :key="font"
@@ -6167,6 +6272,8 @@ onBeforeUnmount(() => {
                       v-model.number="subtitleDraft.fontSize"
                       type="number"
                       min="1"
+                      max="500"
+                      @change="normalizeSubtitleDraftPositionAfterRender"
                     />
                   </div>
                   <div class="field">
@@ -6184,7 +6291,7 @@ onBeforeUnmount(() => {
                       v-model.number="subtitleDraft.x"
                       type="number"
                       min="0"
-                      max="1920"
+                      :max="canvasWidth"
                       @change="normalizeSubtitleDraftPosition"
                     />
                   </div>
@@ -6194,7 +6301,7 @@ onBeforeUnmount(() => {
                       v-model.number="subtitleDraft.y"
                       type="number"
                       min="0"
-                      max="1080"
+                      :max="canvasHeight"
                       @change="normalizeSubtitleDraftPosition"
                     />
                   </div>
@@ -6205,13 +6312,36 @@ onBeforeUnmount(() => {
               </section>
             </div>
 
+            <div v-else class="subtitle-editor-empty">
+              <Captions :size="22" />
+              <strong>选择或添加一条字幕</strong>
+              <span>选中字幕后可编辑文案、时间、排版和画布位置</span>
+            </div>
+
             <section class="canvas-preview-section subtitle-preview-section">
-              <div class="screen-preview subtitle-screen-preview">
+              <div
+                class="screen-preview subtitle-screen-preview"
+                :style="canvasPreviewStyle"
+              >
                 <div class="screen-safe"></div>
                 <div
-                  class="subtitle-preview-text"
+                  v-for="preview in otherSubtitlePreviews"
+                  :key="preview.subtitle.id"
+                  class="subtitle-preview-text subtitle-preview-readonly"
+                  :class="{ vertical: preview.vertical }"
+                  :style="preview.style"
+                  :title="`字幕 ${preview.index + 1} · 点击编辑`"
+                  @click.stop="editSubtitle(preview.subtitle)"
+                >
+                  {{ preview.text }}
+                </div>
+                <div
+                  v-if="subtitleDraft"
+                  ref="subtitlePreviewRef"
+                  class="subtitle-preview-text subtitle-preview-active"
                   :class="{
                     placeholder: !(subtitleDraft.defaultText || '').trim(),
+                    vertical: subtitleDraft.direction === 'vertical',
                   }"
                   :style="subtitlePreviewStyle"
                   title="拖动调整字幕位置"
@@ -6224,19 +6354,13 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="modal-footer">
-            <button
-              class="button button-secondary"
-              type="button"
-              @click="subtitleDialogOpen = false"
-            >
-              取消
-            </button>
+            <span class="auto-save-note">字幕修改已自动保存</span>
             <button
               class="button button-primary"
               type="button"
-              @click="saveSubtitle"
+              @click="closeSubtitleDialog"
             >
-              <Check :size="16" /> 保存字幕
+              <Check :size="16" /> 完成
             </button>
           </div>
         </div>
@@ -8738,7 +8862,7 @@ button.sequence-track-clip.active {
 }
 
 .area-modal.subtitle-modal {
-  width: min(900px, 100%);
+  width: min(1100px, 100%);
   grid-template-rows: auto minmax(0, 1fr) auto;
 }
 
@@ -8752,18 +8876,88 @@ button.sequence-track-clip.active {
   gap: 16px;
 }
 
-.subtitle-modal-body {
+.modal-body.subtitle-modal-body {
   min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 340px);
+  grid-template-rows: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 12px 14px;
+  overflow: hidden;
+  padding: 14px 16px;
+}
+
+.subtitle-modal-body > .subtitle-dialog-manager {
+  grid-column: 1;
+  grid-row: 1;
+  margin: 0;
+}
+
+.subtitle-dialog-list {
+  max-height: 142px;
+  overflow-y: auto;
+  padding-right: 2px;
+  scrollbar-width: thin;
+}
+
+.subtitle-dialog-item {
+  grid-template-columns: 30px minmax(0, 1fr) auto 25px 15px;
+}
+
+.subtitle-dialog-list-empty,
+.subtitle-editor-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--subtle);
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: 9px;
+}
+
+.subtitle-dialog-list-empty {
+  min-height: 48px;
+}
+
+.subtitle-editor-empty {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  min-height: 96px;
+  align-self: stretch;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.subtitle-editor-empty strong {
+  color: var(--ink);
+  font-size: 11px;
+}
+
+.subtitle-editor-empty span {
+  font-size: 8px;
 }
 
 .subtitle-settings-grid {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: stretch;
+  align-content: start;
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  min-height: 0;
+  overflow-y: auto;
+  padding-left: 14px;
+  border-left: 1px solid var(--line);
+  scrollbar-width: thin;
 }
 
-.subtitle-preview-section {
-  margin-top: 12px;
+.subtitle-modal-body > .subtitle-preview-section {
+  grid-column: 1;
+  grid-row: 2;
+  min-height: 0;
+  margin-top: 0;
 }
 
 .subtitle-screen-preview {
@@ -8775,6 +8969,7 @@ button.sequence-track-clip.active {
   z-index: 2;
   width: max-content;
   max-width: 100%;
+  max-height: 100%;
   box-sizing: border-box;
   padding: 3px 6px;
   line-height: 1.25;
@@ -8789,6 +8984,24 @@ button.sequence-track-clip.active {
   cursor: grab;
   user-select: none;
   touch-action: none;
+  will-change: left, top;
+}
+
+.subtitle-preview-text.vertical {
+  width: auto;
+  height: max-content;
+  writing-mode: vertical-rl;
+  text-orientation: upright;
+}
+
+.subtitle-preview-readonly {
+  z-index: 1;
+  opacity: 0.72;
+  cursor: pointer;
+}
+
+.subtitle-preview-active {
+  z-index: 3;
 }
 
 .subtitle-preview-text:hover {
@@ -9877,6 +10090,7 @@ button.sequence-track-clip.active {
 
 .area-rect-active {
   z-index: 2;
+  will-change: left, top, width, height;
 }
 
 .area-rect-active.bound {
@@ -10235,8 +10449,40 @@ button.sequence-track-clip.active {
 }
 
 @media (max-width: 760px) {
-  .subtitle-settings-grid {
+  .modal-body.subtitle-modal-body {
+    display: grid;
     grid-template-columns: 1fr;
+    grid-template-rows: auto auto auto;
+    overflow-y: auto;
+  }
+
+  .subtitle-modal-body > .subtitle-dialog-manager,
+  .subtitle-modal-body > .subtitle-preview-section,
+  .subtitle-settings-grid,
+  .subtitle-editor-empty {
+    grid-column: 1;
+  }
+
+  .subtitle-modal-body > .subtitle-dialog-manager {
+    grid-row: 1;
+  }
+
+  .subtitle-modal-body > .subtitle-preview-section {
+    grid-row: 2;
+  }
+
+  .subtitle-settings-grid {
+    grid-row: 3;
+    grid-template-columns: 1fr;
+    overflow: visible;
+    padding-top: 12px;
+    padding-left: 0;
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+
+  .subtitle-editor-empty {
+    grid-row: 3;
   }
 
   .area-editor-layout {
