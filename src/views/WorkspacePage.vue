@@ -3556,6 +3556,11 @@ async function confirmImportOverwrite() {
   }
 }
 
+function closeImportOverwriteConfirm() {
+  importOverwriteConfirmVisible.value = false;
+  pendingImportSegment.value = null;
+}
+
 async function resolveRepeatImport(shouldRepeat) {
   const pendingImport = pendingRepeatImport.value;
   importRepeatConfirmVisible.value = false;
@@ -3568,6 +3573,11 @@ async function resolveRepeatImport(shouldRepeat) {
       shouldRepeat,
     );
   }
+}
+
+function closeRepeatImportConfirm() {
+  importRepeatConfirmVisible.value = false;
+  pendingRepeatImport.value = null;
 }
 
 // 替换单个已导入视频，同时清理被替换的工程素材文件。
@@ -9231,6 +9241,15 @@ onBeforeUnmount(() => {
             <div
               class="relative w-full max-w-sm bg-surface-container-highest rounded-2xl p-7 border border-white/10 shadow-2xl modal-pop-in"
             >
+              <button
+                class="absolute right-4 top-4 flex h-8 w-8 items-center justify-center rounded-full text-on-surface-variant transition-colors hover:bg-white/10 hover:text-white"
+                type="button"
+                title="关闭并取消导入"
+                aria-label="关闭并取消导入"
+                @click="closeImportOverwriteConfirm"
+              >
+                <AppIcon name="close" :size="18" />
+              </button>
               <div class="flex flex-col items-center text-center gap-5">
                 <div>
                   <h3 class="text-lg font-black text-white mb-2">
@@ -9268,6 +9287,15 @@ onBeforeUnmount(() => {
             <div
               class="relative w-full max-w-sm bg-surface-container-highest rounded-2xl p-7 border border-white/10 shadow-2xl modal-pop-in"
             >
+              <button
+                class="absolute right-4 top-4 flex h-8 w-8 items-center justify-center rounded-full text-on-surface-variant transition-colors hover:bg-white/10 hover:text-white"
+                type="button"
+                title="关闭并取消导入"
+                aria-label="关闭并取消导入"
+                @click="closeRepeatImportConfirm"
+              >
+                <AppIcon name="close" :size="18" />
+              </button>
               <div class="flex flex-col items-center text-center gap-5">
                 <div>
                   <h3 class="text-lg font-black text-white mb-2">
