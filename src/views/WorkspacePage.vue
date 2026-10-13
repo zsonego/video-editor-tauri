@@ -160,11 +160,26 @@ const originalTemplateXmlContent = ref('');
 const activeTemplateDemoSource = ref('');
 const templateOnlineUrlCache = new Map();
 const templateOnlineUrlRequests = new Map();
-const TEMPLATE_ONLINE_CACHE_MODE = 'row-online';
+const TEMPLATE_ASSETS_ONLINE_CACHE_MODE = 'assets-online';
+const LEGACY_TEMPLATE_ONLINE_CACHE_MODE = 'row-online';
 const TEMPLATE_ONLINE_URL_REFRESH_MARGIN_MS = 60 * 1000;
 let activeTemplateDemoRequestId = 0;
 let activeTemplateDemoErrorRetryCount = 0;
 let pendingModalPreviewSeekTime = null;
+
+function supportsTemplateOnlineFallback(localInfo) {
+  return [
+    TEMPLATE_ASSETS_ONLINE_CACHE_MODE,
+    LEGACY_TEMPLATE_ONLINE_CACHE_MODE,
+  ].includes(String(localInfo?.cacheMode || ''));
+}
+
+function usesOnlineTemplateDemo(localInfo) {
+  return (
+    supportsTemplateOnlineFallback(localInfo) &&
+    !String(localInfo?.localDemoPath || '').trim()
+  );
+}
 const activeProjectDir = ref('');
 const activeBackendProjectId = ref('');
 let activeNarrationTaskProjectId = '';
@@ -1267,7 +1282,11 @@ function enterTemplatePreview(topic, templateId, localInfo) {
   originalTemplateXmlContent.value = localInfo.xmlContent || '';
   activeTemplateDemoErrorRetryCount = 0;
   pendingModalPreviewSeekTime = null;
-  if (localInfo.cacheMode === TEMPLATE_ONLINE_CACHE_MODE) {
+  const localDemoPath = String(localInfo.localDemoPath || '').trim();
+  if (localDemoPath) {
+    activeTemplateDemoRequestId += 1;
+    activeTemplateDemoSource.value = convertFileSrc(localDemoPath);
+  } else if (usesOnlineTemplateDemo(localInfo)) {
     activeTemplateDemoSource.value = '';
     void refreshActiveTemplateDemoSource(templateId, localInfo).catch(
       (error) => {
@@ -1396,7 +1415,7 @@ async function refreshActiveTemplateDemoSource(
   localInfo = activeTemplateLocalInfo.value,
   { force = false, preserveTime = false } = {},
 ) {
-  if (localInfo?.cacheMode !== TEMPLATE_ONLINE_CACHE_MODE) return false;
+  if (!usesOnlineTemplateDemo(localInfo)) return false;
 
   const templateBucket = String(
     localInfo.templateBucket || getStoredUploadBucket('template-bucket'),
@@ -1430,7 +1449,7 @@ async function refreshActiveTemplateDemoSource(
   if (
     requestId !== activeTemplateDemoRequestId ||
     String(activeTemplateId.value) !== String(templateId) ||
-    activeTemplateLocalInfo.value?.cacheMode !== TEMPLATE_ONLINE_CACHE_MODE
+    !usesOnlineTemplateDemo(activeTemplateLocalInfo.value)
   ) {
     if (requestId === activeTemplateDemoRequestId) {
       pendingModalPreviewSeekTime = null;
@@ -1455,7 +1474,7 @@ async function getBosTemplateDownloadUrls(templateId, templateBucket) {
       getTemplateBosObjectPath(templateBucket, templateId, 'template.xml'),
     ),
     requestBosObjectDownloadUrl(
-      getTemplateBosObjectPath(templateBucket, templateId, 'assets-row.zip'),
+      getTemplateBosObjectPath(templateBucket, templateId, 'assets.zip'),
     ),
   ]);
 
@@ -2933,7 +2952,7 @@ async function createTemplateAssetVideo(asset, index) {
   const source = exists ? resolveTemplateVideoSource(asset.filepath) : '';
   const fileName = getFileNameFromPath(asset.filepath);
   const onlineOnly =
-    activeTemplateLocalInfo.value?.cacheMode === TEMPLATE_ONLINE_CACHE_MODE &&
+    supportsTemplateOnlineFallback(activeTemplateLocalInfo.value) &&
     !exists;
   const templateBucket = String(
     activeTemplateLocalInfo.value?.templateBucket ||
@@ -5543,6 +5562,7 @@ async function activateDraftProjectWorkspace(
     cacheMode: workspace.cacheMode || '',
     templateBucket:
       workspace.templateBucket || getStoredUploadBucket('template-bucket'),
+    localDemoPath: workspace.localDemoPath || '',
   };
   activeTemplateSegments.value = parseTemplateSegments(templateXml);
   activeTemplateDemoRequestId += 1;
@@ -6522,7 +6542,7 @@ async function toggleModalPreviewPlayback() {
   let video = modalVideoRef.value;
   if (!video) return;
   if (video.paused) {
-    if (activeTemplateLocalInfo.value?.cacheMode === TEMPLATE_ONLINE_CACHE_MODE) {
+    if (usesOnlineTemplateDemo(activeTemplateLocalInfo.value)) {
       try {
         const ready = await refreshActiveTemplateDemoSource(
           activeTemplateId.value,
@@ -6550,7 +6570,7 @@ async function toggleModalPreviewPlayback() {
 
 async function handleModalVideoError() {
   if (
-    activeTemplateLocalInfo.value?.cacheMode !== TEMPLATE_ONLINE_CACHE_MODE ||
+    !usesOnlineTemplateDemo(activeTemplateLocalInfo.value) ||
     activeTemplateDemoErrorRetryCount >= 1
   ) {
     return;
@@ -6714,7 +6734,7 @@ function collectTemplateVideoFileNames() {
 
 async function collectMissingTemplateVideoTasks() {
   if (
-    activeTemplateLocalInfo.value?.cacheMode !== TEMPLATE_ONLINE_CACHE_MODE ||
+    !supportsTemplateOnlineFallback(activeTemplateLocalInfo.value) ||
     !activeTemplateId.value
   ) {
     return [];

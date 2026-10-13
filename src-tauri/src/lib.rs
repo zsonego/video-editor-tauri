@@ -651,12 +651,14 @@ struct PreparedTemplate {
     cache_mode: String,
     template_bucket: String,
     existing_asset_ids: Vec<String>,
+    local_demo_path: String,
 }
 
 const TEMPLATE_CACHE_SCHEMA_VERSION: u32 = 1;
 const TEMPLATE_CACHE_MANIFEST_NAME: &str = "cache-manifest.json";
 const TEMPLATE_CACHE_MODE_LEGACY_FULL: &str = "legacy-full";
 const TEMPLATE_CACHE_MODE_ROW_ONLINE: &str = "row-online";
+const TEMPLATE_CACHE_MODE_ASSETS_ONLINE: &str = "assets-online";
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -764,6 +766,7 @@ struct LocalProjectWorkspace {
     existing_asset_ids: Vec<String>,
     cache_mode: String,
     template_bucket: String,
+    local_demo_path: String,
 }
 
 #[derive(Serialize)]
@@ -1911,13 +1914,15 @@ impl Drop for ComposerRuntime {
 fn composer_step_status(step: i32) -> &'static str {
     match step {
         0 => "初始化",
-        1 => "预处理片段",
-        2 => "合成画中画",
-        3 => "合并转场",
-        4 => "构建最终视频",
-        5 => "添加字幕",
-        6 => "混流音频",
-        7 => "合成完成",
+        1 => "美颜处理",
+        2 => "预处理片段",
+        3 => "合成画中画",
+        4 => "合并转场",
+        5 => "构建最终视频",
+        6 => "添加字幕",
+        7 => "混流音频",
+        8 => "叠加水印",
+        9 => "合成完成",
         _ => "正在合成视频...",
     }
 }
@@ -2514,8 +2519,39 @@ fn legacy_template_files_complete(
     has_named_resource("top.mov") && has_named_resource("bottom.mp4")
 }
 
-fn row_template_files_complete(assets_dir: &Path) -> bool {
+fn assets_template_files_complete(assets_dir: &Path) -> bool {
     assets_dir.join("top.mov").is_file()
+}
+
+fn existing_template_demo_path(
+    xml_content: &str,
+    template_dir: &Path,
+    assets_dir: &Path,
+) -> String {
+    let configured_path = find_xml_element_blocks(xml_content, "demo-path")
+        .into_iter()
+        .next()
+        .map(|(_, value)| unescape_xml_value(value.trim()))
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            PathBuf::from(resolve_template_resource_filepath(
+                template_dir,
+                assets_dir,
+                &value,
+            ))
+        });
+    let fallback_path = assets_dir.join("template.mp4");
+
+    configured_path
+        .into_iter()
+        .chain(std::iter::once(fallback_path))
+        .find(|path| {
+            path.metadata()
+                .map(|metadata| metadata.is_file() && metadata.len() > 0)
+                .unwrap_or(false)
+        })
+        .map(path_to_xml_filepath)
+        .unwrap_or_default()
 }
 
 fn existing_template_asset_ids(
@@ -4636,7 +4672,10 @@ fn read_cached_template_assets(
             {
                 TEMPLATE_CACHE_MODE_LEGACY_FULL
             }
-            TEMPLATE_CACHE_MODE_ROW_ONLINE if row_template_files_complete(&assets_dir) => {
+            TEMPLATE_CACHE_MODE_ASSETS_ONLINE if assets_template_files_complete(&assets_dir) => {
+                TEMPLATE_CACHE_MODE_ASSETS_ONLINE
+            }
+            TEMPLATE_CACHE_MODE_ROW_ONLINE if assets_template_files_complete(&assets_dir) => {
                 TEMPLATE_CACHE_MODE_ROW_ONLINE
             }
             _ => return Ok(None),
@@ -4654,6 +4693,7 @@ fn read_cached_template_assets(
         xml_content,
     )?;
     let existing_asset_ids = existing_template_asset_ids(&xml_content, &template_dir, &assets_dir);
+    let local_demo_path = existing_template_demo_path(&xml_content, &template_dir, &assets_dir);
 
     if manifest.is_none() {
         write_template_cache_manifest(
@@ -4677,6 +4717,7 @@ fn read_cached_template_assets(
         cache_mode: cache_mode.to_string(),
         template_bucket: template_bucket.trim().to_string(),
         existing_asset_ids,
+        local_demo_path,
     }))
 }
 
@@ -5693,7 +5734,7 @@ fn extract_zip(
 
     if !temp_assets_dir.join("top.mov").is_file() {
         let _ = fs::remove_dir_all(&temp_assets_dir);
-        return Err("assets-row.zip 缺少必需文件 top.mov".to_string());
+        return Err("assets.zip 缺少必需文件 top.mov".to_string());
     }
 
     if assets_dir.exists() {
@@ -5716,11 +5757,11 @@ fn prepare_template_assets_blocking(
 ) -> Result<PreparedTemplate, String> {
     let (template_dir, template_file_path, assets_dir) = cached_template_paths(&template_id)?;
     fs::create_dir_all(&template_dir).map_err(|error| error.to_string())?;
-    let material_package_path = template_dir.join("assets-row.zip");
-    let partial_package_path = template_dir.join("assets-row.zip.part");
-    let partial_metadata_path = template_dir.join("assets-row.zip.part.json");
+    let material_package_path = template_dir.join("assets.zip");
+    let partial_package_path = template_dir.join("assets.zip.part");
+    let partial_metadata_path = template_dir.join("assets.zip.part.json");
     let package_cache_key = format!(
-        "{TEMPLATE_CACHE_MODE_ROW_ONLINE}:{}:{}",
+        "{TEMPLATE_CACHE_MODE_ASSETS_ONLINE}:{}:{}",
         template_bucket.trim(),
         template_version.trim()
     );
@@ -5740,6 +5781,13 @@ fn prepare_template_assets_blocking(
         }
 
         remove_file_if_exists(&template_cache_manifest_path(&template_dir))?;
+        for legacy_package_path in [
+            template_dir.join("assets-row.zip"),
+            template_dir.join("assets-row.zip.part"),
+            template_dir.join("assets-row.zip.part.json"),
+        ] {
+            remove_file_if_exists(&legacy_package_path)?;
+        }
 
         let cached_xml_content = if template_file_path.is_file() {
             Some(fs::read_to_string(&template_file_path).map_err(|error| error.to_string())?)
@@ -5805,15 +5853,10 @@ fn prepare_template_assets_blocking(
                 &cancel_flag,
                 10,
                 90,
-                "正在下载 assets-row.zip...",
+                "正在下载 assets.zip...",
             )?;
         } else if package_metadata.is_some() {
-            emit_progress(
-                &app,
-                &download_id,
-                90,
-                "assets-row.zip 已下载，正在继续解压...",
-            );
+            emit_progress(&app, &download_id, 90, "assets.zip 已下载，正在继续解压...");
         }
 
         let extract_result = extract_zip(
@@ -5841,11 +5884,12 @@ fn prepare_template_assets_blocking(
         )?;
         let existing_asset_ids =
             existing_template_asset_ids(&xml_content, &template_dir, &assets_dir);
+        let local_demo_path = existing_template_demo_path(&xml_content, &template_dir, &assets_dir);
         write_template_cache_manifest(
             &template_dir,
             &TemplateCacheManifest {
                 schema_version: TEMPLATE_CACHE_SCHEMA_VERSION,
-                mode: TEMPLATE_CACHE_MODE_ROW_ONLINE.to_string(),
+                mode: TEMPLATE_CACHE_MODE_ASSETS_ONLINE.to_string(),
                 template_version: template_version.trim().to_string(),
                 bucket: template_bucket.trim().to_string(),
                 completed: true,
@@ -5859,9 +5903,10 @@ fn prepare_template_assets_blocking(
             material_package_path: String::new(),
             assets_dir: assets_dir.to_string_lossy().to_string(),
             xml_content,
-            cache_mode: TEMPLATE_CACHE_MODE_ROW_ONLINE.to_string(),
+            cache_mode: TEMPLATE_CACHE_MODE_ASSETS_ONLINE.to_string(),
             template_bucket: template_bucket.trim().to_string(),
             existing_asset_ids,
+            local_demo_path,
         })
     })();
 
@@ -6561,8 +6606,10 @@ fn read_project_workspace(
             PathBuf::from(filepath).is_file().then_some(asset_id)
         })
         .collect();
-    let (template_cache_dir, _, _) = cached_template_paths(&template_id)?;
+    let (template_cache_dir, _, template_assets_dir) = cached_template_paths(&template_id)?;
     let cache_manifest = read_template_cache_manifest(&template_cache_dir);
+    let local_demo_path =
+        existing_template_demo_path(&template_xml, &template_cache_dir, &template_assets_dir);
 
     Ok(LocalProjectWorkspace {
         project_dir: path_to_xml_filepath(project_dir.clone()),
@@ -6578,6 +6625,7 @@ fn read_project_workspace(
         template_bucket: cache_manifest
             .map(|manifest| manifest.bucket)
             .unwrap_or_default(),
+        local_demo_path,
     })
 }
 
@@ -8659,7 +8707,7 @@ mod tests {
     }
 
     #[test]
-    fn distinguishes_complete_legacy_cache_from_row_online_cache() {
+    fn distinguishes_complete_legacy_cache_from_assets_online_cache() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("timestamp")
@@ -8672,7 +8720,7 @@ mod tests {
         fs::create_dir_all(&assets_dir).expect("create test assets");
         fs::write(assets_dir.join("top.mov"), b"top").expect("write top.mov");
 
-        assert!(row_template_files_complete(&assets_dir));
+        assert!(assets_template_files_complete(&assets_dir));
 
         let xml = r#"<template version="1">
             <demo-path>template/assets/template.mp4</demo-path>
@@ -8689,6 +8737,10 @@ mod tests {
         for file_name in ["bottom.mp4", "template.mp4", "default.mp4"] {
             fs::write(assets_dir.join(file_name), b"video").expect("write legacy media");
         }
+        assert_eq!(
+            existing_template_demo_path(xml, &template_dir, &assets_dir),
+            path_to_xml_filepath(assets_dir.join("template.mp4"))
+        );
         assert!(legacy_template_files_complete(
             xml,
             &template_dir,
@@ -9353,12 +9405,14 @@ mod tests {
     fn maps_composer_steps_to_display_statuses() {
         let expected = [
             "初始化",
+            "美颜处理",
             "预处理片段",
             "合成画中画",
             "合并转场",
             "构建最终视频",
             "添加字幕",
             "混流音频",
+            "叠加水印",
             "合成完成",
         ];
 
@@ -9366,7 +9420,7 @@ mod tests {
             assert_eq!(composer_step_status(step as i32), status);
         }
         assert_eq!(composer_step_status(-1), "正在合成视频...");
-        assert_eq!(composer_step_status(8), "正在合成视频...");
+        assert_eq!(composer_step_status(10), "正在合成视频...");
     }
 
     #[test]
