@@ -889,6 +889,18 @@ struct ComposerBeautyFrameParams {
     transform_origin: String,
     stabilization: bool,
     one_click_beauty: bool,
+    #[serde(rename = "cropX", default, skip_serializing_if = "Option::is_none")]
+    crop_x: Option<f64>,
+    #[serde(rename = "cropY", default, skip_serializing_if = "Option::is_none")]
+    crop_y: Option<f64>,
+    #[serde(rename = "cropWidth", default, skip_serializing_if = "Option::is_none")]
+    crop_width: Option<f64>,
+    #[serde(
+        rename = "cropHeight",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    crop_height: Option<f64>,
     #[serde(
         rename = "clipStartTime",
         default,
@@ -8618,6 +8630,23 @@ mod tests {
         assert_eq!(value["startFilterDuration"], 0);
         assert_eq!(value["endFilterEffect"], "");
         assert_eq!(value["endFilterDuration"], 0);
+    }
+
+    #[test]
+    fn serializes_beauty_crop_params() {
+        let params = ComposerBeautyFrameParams {
+            crop_x: Some(10.5),
+            crop_y: Some(20.25),
+            crop_width: Some(1280.0),
+            crop_height: Some(720.0),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(params).expect("serialize crop params");
+
+        assert_eq!(value["cropX"], 10.5);
+        assert_eq!(value["cropY"], 20.25);
+        assert_eq!(value["cropWidth"], 1280.0);
+        assert_eq!(value["cropHeight"], 720.0);
     }
 
     #[test]

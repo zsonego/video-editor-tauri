@@ -1262,8 +1262,12 @@ defineExpose({
           <button
             class="material-reset-button"
             type="button"
-            :disabled="materialResetLoading || projectReadOnly || propertiesLocked"
-            @click="!propertiesLocked && (materialResetConfirmVisible = true)"
+            :disabled="materialResetLoading || projectReadOnly || onlineSource"
+            @click="
+              !projectReadOnly &&
+              !onlineSource &&
+              (materialResetConfirmVisible = true)
+            "
           >
             {{ materialResetLoading ? '重置中…' : '素材重置' }}
           </button>

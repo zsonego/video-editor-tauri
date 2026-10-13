@@ -2420,6 +2420,70 @@ function getDirectChildElements(parent, tagName) {
   );
 }
 
+function normalizeTemplateCropParams(x, y, width, height) {
+  const rawValues = [x, y, width, height];
+  if (
+    rawValues.some(
+      (value) => value === null || String(value).trim() === '',
+    )
+  ) {
+    return null;
+  }
+  const values = rawValues.map((value) => Number(value));
+  if (values.some((value) => !Number.isFinite(value))) return null;
+
+  return {
+    cropX: values[0],
+    cropY: values[1],
+    cropWidth: values[2],
+    cropHeight: values[3],
+  };
+}
+
+function parseTemplateAssetCrop(xmlContent, assetId) {
+  const normalizedAssetId = String(assetId || '').trim();
+  if (!xmlContent || !normalizedAssetId) return null;
+
+  const xml = new DOMParser().parseFromString(xmlContent, 'text/xml');
+  if (!xml.querySelector('parsererror')) {
+    const area = Array.from(xml.querySelectorAll('area')).find(
+      (candidate) =>
+        candidate.getAttribute('asset-id') === normalizedAssetId,
+    );
+    const crop = area ? getDirectChildElements(area, 'crop')[0] : null;
+    if (!crop) return null;
+
+    return normalizeTemplateCropParams(
+      crop.getAttribute('x'),
+      crop.getAttribute('y'),
+      crop.getAttribute('width'),
+      crop.getAttribute('height'),
+    );
+  }
+
+  const areaMatches = Array.from(
+    xmlContent.matchAll(/<area\b([^>]*)>([\s\S]*?)<\/area>/gi),
+  );
+  const areaMatch = areaMatches.find(
+    (match) =>
+      getAttributeValue(match[1] || '', 'asset-id') === normalizedAssetId,
+  );
+  const cropMatch = areaMatch?.[2]?.match(/<crop\b([^>]*)\/?\s*>/i);
+  if (!cropMatch) return null;
+
+  const attributes = cropMatch[1] || '';
+  return normalizeTemplateCropParams(
+    getAttributeValue(attributes, 'x'),
+    getAttributeValue(attributes, 'y'),
+    getAttributeValue(attributes, 'width'),
+    getAttributeValue(attributes, 'height'),
+  );
+}
+
+function buildAssetCropParams(assetId) {
+  return parseTemplateAssetCrop(getActiveTemplateXmlContent(), assetId) || {};
+}
+
 function parseTemplateAssetProperties(xmlContent, assetId) {
   const normalizedAssetId = String(assetId || '').trim();
   if (!xmlContent || !normalizedAssetId) return null;
@@ -3819,7 +3883,7 @@ function clampBeautyUnit(value) {
   return Math.min(1, Math.max(0, number / 100));
 }
 
-function buildBeautyFrameParams(values = {}) {
+function buildBeautyFrameParams(values = {}, assetId = '') {
   const beauty = values.beauty || {};
   const canvas = activeTemplateCanvas.value;
   const rotation = Number(values.angle) || 0;
@@ -3859,6 +3923,7 @@ function buildBeautyFrameParams(values = {}) {
     transform_origin: values.transformOrigin || 'center',
     stabilization: Boolean(beauty.stabilization),
     one_click_beauty: Boolean(beauty.oneClickBeauty),
+    ...buildAssetCropParams(assetId),
   };
 }
 
@@ -3868,7 +3933,7 @@ function buildBeautyFileParams(
   clipStartTimeMs = 0,
 ) {
   return {
-    ...buildBeautyFrameParams(values),
+    ...buildBeautyFrameParams(values, assetId),
     clipStartTime: Math.max(0, Math.round(Number(clipStartTimeMs) || 0)),
     ...buildClipTransitionParams(assetId),
   };
@@ -4348,6 +4413,7 @@ function scheduleBeautyPreview(values, delay = BEAUTY_PREVIEW_DEBOUNCE_MS) {
   pendingBeautyPreview = {
     generation: beautyPreviewGeneration,
     videoKey: selectedVideoKey.value,
+    assetId: selectedVideoAssetId.value,
     videoPath: selectedVideoPath.value,
     timestampMs: Math.max(
       0,
@@ -4585,7 +4651,13 @@ async function handleApplyGeneratedVideo(values) {
 }
 
 async function handleMaterialResetRequest() {
-  if (materialResetting.value || selectedVideoPropertiesLocked.value) return;
+  if (
+    materialResetting.value ||
+    activeProjectReadOnly.value ||
+    selectedVideoOnlineOnly.value
+  ) {
+    return;
+  }
   const projectDir = activeProjectDir.value;
   const assetId = selectedVideoAssetId.value;
   if (!projectDir || !assetId) {
@@ -4634,7 +4706,7 @@ async function processPendingBeautyPreview() {
     const result = await invoke('preview_composer_beauty_frame', {
       inputVideoPath: request.videoPath,
       timestampMs: request.timestampMs,
-      params: buildBeautyFrameParams(request.values),
+      params: buildBeautyFrameParams(request.values, request.assetId),
     });
     if (
       request.generation !== beautyPreviewGeneration ||
@@ -9102,27 +9174,8 @@ onBeforeUnmount(() => {
                 class="relative w-full bg-surface-container rounded-2xl overflow-hidden shadow-[0_30px_90px_rgba(0,0,0,0.8)] border border-electric-blue/20 modal-pop-in"
               >
                 <div
-                  class="aspect-video bg-black flex items-center justify-center relative group cursor-pointer"
+                  class="bg-black flex items-center justify-center relative group cursor-pointer"
                 >
-                  <video
-                    :key="activeTemplateDemoSource"
-                    ref="modalVideoRef"
-                    class="w-full h-full object-cover"
-                    playsinline
-                    preload="metadata"
-                    @loadedmetadata="handleModalVideoLoadedMetadata"
-                    @timeupdate="updateModalPreviewControls"
-                    @play="updateModalPreviewControls"
-                    @pause="updateModalPreviewControls"
-                    @ended="updateModalPreviewControls"
-                    @error="handleModalVideoError"
-                  >
-                    <source
-                      v-if="activeTemplateDemoSource"
-                      :src="activeTemplateDemoSource"
-                      :type="getVideoSourceType(activeTemplateDemoSource)"
-                    />
-                  </video>
                   <div
                     class="relative w-full max-h-[70vh] group cursor-pointer"
                     :style="modalPreviewFrameStyle"
@@ -9138,6 +9191,7 @@ onBeforeUnmount(() => {
                       @play="updateModalPreviewControls"
                       @pause="updateModalPreviewControls"
                       @ended="updateModalPreviewControls"
+                      @error="handleModalVideoError"
                     >
                       <source
                         v-if="activeTemplateDemoSource"
