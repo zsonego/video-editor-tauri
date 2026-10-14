@@ -1944,7 +1944,32 @@ function saveNarrationTaskDbId(projectId, taskDbId) {
   localStorage.setItem(NARRATION_TASK_STORAGE_KEY, JSON.stringify(stored));
 }
 
+function templateHasRecordingClips(xmlContent) {
+  const content = String(xmlContent || '').trim();
+  if (!content) return false;
+
+  const xml = new DOMParser().parseFromString(content, 'text/xml');
+  if (xml.querySelector('parsererror')) {
+    console.warn('[narration-task] skipped: template XML is invalid');
+    return false;
+  }
+
+  return Array.from(xml.getElementsByTagName('track')).some(
+    (track) =>
+      String(track.getAttribute('id') || '').trim() === 'recording' &&
+      track.getElementsByTagName('clip').length > 0,
+  );
+}
+
 async function ensureNarrationTask(projectId, userId) {
+  if (!templateHasRecordingClips(activeTemplateLocalInfo.value?.xmlContent)) {
+    console.log(
+      '[narration-task] skipped: template has no recording track clips',
+      { projectId },
+    );
+    return true;
+  }
+
   if (!hasBackendId(projectId) || !hasBackendId(userId)) {
     systemMessage.error('工程或用户信息不完整，无法创建旁白任务');
     return false;
