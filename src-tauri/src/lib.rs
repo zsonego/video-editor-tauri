@@ -2516,11 +2516,12 @@ fn legacy_template_files_complete(
         }) || assets_dir.join(file_name).is_file()
     };
 
-    has_named_resource("top.mov") && has_named_resource("bottom.mp4")
+    has_named_resource("bottom.mp4")
 }
 
 fn assets_template_files_complete(assets_dir: &Path) -> bool {
-    assets_dir.join("top.mov").is_file()
+    // 新版素材包允许不包含 top.mov，缓存是否完成由清单和模板版本判断。
+    assets_dir.is_dir()
 }
 
 fn existing_template_demo_path(
@@ -5732,11 +5733,6 @@ fn extract_zip(
         );
     }
 
-    if !temp_assets_dir.join("top.mov").is_file() {
-        let _ = fs::remove_dir_all(&temp_assets_dir);
-        return Err("assets.zip 缺少必需文件 top.mov".to_string());
-    }
-
     if assets_dir.exists() {
         fs::remove_dir_all(assets_dir).map_err(|error| error.to_string())?;
     }
@@ -8718,7 +8714,6 @@ mod tests {
         ));
         let assets_dir = template_dir.join("assets");
         fs::create_dir_all(&assets_dir).expect("create test assets");
-        fs::write(assets_dir.join("top.mov"), b"top").expect("write top.mov");
 
         assert!(assets_template_files_complete(&assets_dir));
 
@@ -8734,7 +8729,7 @@ mod tests {
             &assets_dir
         ));
 
-        for file_name in ["bottom.mp4", "template.mp4", "default.mp4"] {
+        for file_name in ["top.mov", "bottom.mp4", "template.mp4", "default.mp4"] {
             fs::write(assets_dir.join(file_name), b"video").expect("write legacy media");
         }
         assert_eq!(
