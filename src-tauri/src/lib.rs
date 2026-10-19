@@ -803,6 +803,42 @@ struct ComposerBeautyFrameParams {
     transform_origin: String,
     stabilization: bool,
     one_click_beauty: bool,
+    #[serde(
+        rename = "clipStartTime",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    clip_start_time: Option<serde_json::Value>,
+    #[serde(
+        rename = "clipDuration",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    clip_duration: Option<serde_json::Value>,
+    #[serde(
+        rename = "startFilterEffect",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    start_filter_effect: Option<String>,
+    #[serde(
+        rename = "startFilterDuration",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    start_filter_duration: Option<serde_json::Value>,
+    #[serde(
+        rename = "endFilterEffect",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    end_filter_effect: Option<String>,
+    #[serde(
+        rename = "endFilterDuration",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    end_filter_duration: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -6532,6 +6568,53 @@ mod tests {
         assert_eq!(value["transform_origin"], "center");
         assert_eq!(value["lut_file"], "");
         assert!(value.get("rotation_direction").is_none());
+        for key in [
+            "clipStartTime",
+            "clipDuration",
+            "startFilterEffect",
+            "startFilterDuration",
+            "endFilterEffect",
+            "endFilterDuration",
+        ] {
+            assert!(value.get(key).is_none());
+        }
+    }
+
+    #[test]
+    fn preserves_beauty_video_transition_params() {
+        let base = serde_json::to_value(ComposerBeautyFrameParams::default())
+            .expect("serialize base beauty params");
+        for transitions in [
+            serde_json::json!({
+                "clipStartTime": 3200,
+                "clipDuration": 3080,
+                "startFilterEffect": "Push-In",
+                "startFilterDuration": 450,
+                "endFilterEffect": "Flash",
+                "endFilterDuration": 250.5
+            }),
+            serde_json::json!({
+                "clipStartTime": 0,
+                "clipDuration": "",
+                "startFilterEffect": "",
+                "startFilterDuration": 0,
+                "endFilterEffect": "",
+                "endFilterDuration": 0
+            }),
+        ] {
+            let mut input = base.clone();
+            input.as_object_mut().expect("base params object").extend(
+                transitions
+                    .as_object()
+                    .expect("transition params object")
+                    .clone(),
+            );
+            let params: ComposerBeautyFrameParams =
+                serde_json::from_value(input.clone()).expect("receive frontend transition params");
+            let output = serde_json::to_value(params).expect("serialize C++ transition params");
+
+            assert_eq!(output, input);
+        }
     }
 
     #[test]

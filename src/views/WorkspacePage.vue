@@ -2174,9 +2174,22 @@ function findTemplateAreaMatchesFromDom(xmlContent, assetId) {
   const clips = Array.from(xml.querySelectorAll('clips'));
   for (const clipsElement of clips) {
     const clipElements = getDirectChildElements(clipsElement, 'clip');
-    for (const clip of clipElements) {
+    for (const [clipIndex, clip] of clipElements.entries()) {
       const clipStarttime = getDirectChildText(clip, ['starttime', 'start']);
       const clipDuration = getDirectChildText(clip, 'duration');
+      const filter = getDirectChildElements(clip, 'filter')[0];
+      const filterEffect = filter ? getDirectChildText(filter, 'effect') : '';
+      const filterDuration = filter ? getDirectChildText(filter, 'duration') : '';
+      const previousClip = clipElements[clipIndex - 1];
+      const previousFilter = previousClip
+        ? getDirectChildElements(previousClip, 'filter')[0]
+        : null;
+      const previousFilterEffect = previousFilter
+        ? getDirectChildText(previousFilter, 'effect')
+        : '';
+      const previousFilterDuration = previousFilter
+        ? getDirectChildText(previousFilter, 'duration')
+        : '';
       const areas = getDirectChildElements(clip, 'area');
       for (const area of areas) {
         if (area.getAttribute('asset-id') === assetId) {
@@ -2185,6 +2198,10 @@ function findTemplateAreaMatchesFromDom(xmlContent, assetId) {
             clipId: clip.getAttribute('id') || '',
             clipStarttime,
             clipDuration,
+            filterEffect,
+            filterDuration,
+            previousFilterEffect,
+            previousFilterDuration,
             areaId: area.getAttribute('id') || '',
             clipsAssetId: area.getAttribute('asset-id') || '',
             ...getAreaSourceDurationInfoFromElement(area),
@@ -2198,8 +2215,9 @@ function findTemplateAreaMatchesFromDom(xmlContent, assetId) {
 }
 
 function findTemplateAreaMatchesFromText(xmlContent, assetId) {
+  const xmlWithoutComments = xmlContent.replace(/<!--[\s\S]*?-->/g, '');
   const clipsMatches = Array.from(
-    xmlContent.matchAll(/<clips\b([^>]*)>([\s\S]*?)<\/clips>/gi),
+    xmlWithoutComments.matchAll(/<clips\b([^>]*)>([\s\S]*?)<\/clips>/gi),
   );
   const matches = [];
 
@@ -2210,13 +2228,26 @@ function findTemplateAreaMatchesFromText(xmlContent, assetId) {
       clipsBody.matchAll(/<clip\b([^>]*)>([\s\S]*?)<\/clip>/gi),
     );
 
-    for (const clipMatch of clipMatches) {
+    for (const [clipIndex, clipMatch] of clipMatches.entries()) {
       const clipAttributes = clipMatch[1] || '';
       const clipBody = clipMatch[2] || '';
       const clipStarttime =
         getElementText(clipBody, 'starttime') ||
         getElementText(clipBody, 'start');
       const clipDuration = getElementText(clipBody, 'duration');
+      const filterBody = getElementText(clipBody, 'filter');
+      const filterEffect = getElementText(filterBody, 'effect');
+      const filterDuration = getElementText(filterBody, 'duration');
+      const previousClipBody = clipMatches[clipIndex - 1]?.[2] || '';
+      const previousFilterBody = getElementText(previousClipBody, 'filter');
+      const previousFilterEffect = getElementText(
+        previousFilterBody,
+        'effect',
+      );
+      const previousFilterDuration = getElementText(
+        previousFilterBody,
+        'duration',
+      );
       const areaMatches = Array.from(
         clipBody.matchAll(/<area\b([^>]*)>([\s\S]*?)<\/area>/gi),
       );
@@ -2239,6 +2270,10 @@ function findTemplateAreaMatchesFromText(xmlContent, assetId) {
           clipId: getAttributeValue(clipAttributes, 'id'),
           clipStarttime,
           clipDuration,
+          filterEffect,
+          filterDuration,
+          previousFilterEffect,
+          previousFilterDuration,
           areaId: getAttributeValue(areaAttributes, 'id'),
           clipsAssetId,
           durationRaw,
@@ -2266,6 +2301,68 @@ function findTemplateAreaMatches(assetId) {
 // 为时间线选区查找当前素材对应的模板时长约束。
 function findTemplateAreaMatch(assetId) {
   return findTemplateAreaMatches(assetId)[0] || null;
+}
+
+function normalizeClipTransition(effectValue, durationValue) {
+  const effect = String(effectValue || '').trim();
+  const duration = Number(durationValue);
+  // Yellow_Glare 保留在模板中由整片合成处理，不拆分到单素材预览。
+  if (
+    !effect ||
+    effect.toLowerCase() === 'yellow_glare' ||
+    !Number.isFinite(duration) ||
+    duration <= 0
+  ) {
+    return { effect: '', duration: 0 };
+  }
+  return { effect, duration: duration / 2 };
+}
+
+function buildClipTransitionParams(assetId) {
+  const candidates = findTemplateAreaMatches(assetId).map((match) => {
+    const startTransition = normalizeClipTransition(
+      match.previousFilterEffect,
+      match.previousFilterDuration,
+    );
+    const endTransition = normalizeClipTransition(
+      match.filterEffect,
+      match.filterDuration,
+    );
+    const clipDuration = Number(match.clipDuration);
+
+    return {
+      clipDuration:
+        match.clipDuration && Number.isFinite(clipDuration) && clipDuration >= 0
+          ? clipDuration
+          : '',
+      startFilterEffect: startTransition.effect,
+      startFilterDuration: startTransition.duration,
+      endFilterEffect: endTransition.effect,
+      endFilterDuration: endTransition.duration,
+      transitionDuration:
+        startTransition.duration + endTransition.duration,
+    };
+  });
+
+  const selected = candidates.reduce((best, candidate) => {
+    if (!best || candidate.transitionDuration > best.transitionDuration) {
+      return candidate;
+    }
+    return best;
+  }, null);
+
+  if (!selected) {
+    return {
+      clipDuration: '',
+      startFilterEffect: '',
+      startFilterDuration: 0,
+      endFilterEffect: '',
+      endFilterDuration: 0,
+    };
+  }
+
+  const { transitionDuration: _transitionDuration, ...params } = selected;
+  return params;
 }
 
 function findLongestTemplateAreaMatch(assetId) {
@@ -2540,7 +2637,7 @@ async function generateAndApplyImportedVideo(
     inputVideoPath: importedVideo.localPath,
     startTimeMs,
     durationMs,
-    params: buildBeautyFrameParams(transformValues),
+    params: buildBeautyFileParams(transformValues, assetId, startTimeMs),
   });
 
   onProgress?.(0.88, '正在应用预览视频...');
@@ -3180,6 +3277,18 @@ function buildBeautyFrameParams(values = {}) {
   };
 }
 
+function buildBeautyFileParams(
+  values = {},
+  assetId = '',
+  clipStartTimeMs = 0,
+) {
+  return {
+    ...buildBeautyFrameParams(values),
+    clipStartTime: Math.max(0, Math.round(Number(clipStartTimeMs) || 0)),
+    ...buildClipTransitionParams(assetId),
+  };
+}
+
 function buildProjectAssetProperties(values = {}) {
   const normalizedValues = normalizeVideoTransformValues(values);
   const beauty = normalizedValues.beauty;
@@ -3347,6 +3456,7 @@ async function handleBeautyPreviewRequest(values) {
   const request = {
     generation: requestGeneration,
     videoKey: requestVideoKey,
+    assetId: selectedVideoAssetId.value,
     videoPath: requestVideoPath,
     startTimeMs,
     durationMs,
@@ -3559,7 +3669,11 @@ async function processBeautyVideoPreview(request) {
       inputVideoPath: request.videoPath,
       startTimeMs: request.startTimeMs,
       durationMs: request.durationMs,
-      params: buildBeautyFrameParams(request.values),
+      params: buildBeautyFileParams(
+        request.values,
+        request.assetId,
+        request.startTimeMs,
+      ),
     });
     if (
       request.generation !== beautyPreviewGeneration ||
@@ -5558,7 +5672,10 @@ function parseMediaAssetElement(mediaAsset, index, parentGroup = null) {
       ?.textContent?.trim() || '';
   const defaultAssets = defaultAsset
     ? Array.from(defaultAsset.children).filter(
-        (child) => child.tagName.toLowerCase() === 'asset',
+        (child) =>
+          child.tagName.toLowerCase() === 'asset' &&
+          String(child.getAttribute('hidden') || '').trim().toLowerCase() !==
+            'true',
       )
     : [];
   const defaultAssetItems = defaultAssets.map((asset) => ({
@@ -5653,20 +5770,26 @@ function getAttributeValue(source, name) {
 }
 
 function parseAssetTags(source) {
-  return Array.from(source.matchAll(/<asset\b([^>]*)\/?>/gi)).map((match) => {
-    const attributes = match[1] || '';
+  return Array.from(source.matchAll(/<asset\b([^>]*)\/?>/gi))
+    .filter(
+      (match) =>
+        getAttributeValue(match[1] || '', 'hidden').toLowerCase() !== 'true',
+    )
+    .map((match) => {
+      const attributes = match[1] || '';
 
-    return {
-      id: getAttributeValue(attributes, 'id'),
-      filepath: getAttributeValue(attributes, 'filepath'),
-    };
-  });
+      return {
+        id: getAttributeValue(attributes, 'id'),
+        filepath: getAttributeValue(attributes, 'filepath'),
+      };
+    });
 }
 
 function parseMediaAssetText(match, index, parentGroup = null) {
   const attributes = match[1] || '';
   const body = match[2] || '';
   const defaultAssetBody = getElementText(body, 'default-asset');
+  const defaultAssets = parseAssetTags(defaultAssetBody);
   const sourceId =
     getAttributeValue(attributes, 'id') || `media-asset-${index + 1}`;
   const name =
@@ -5679,12 +5802,12 @@ function parseMediaAssetText(match, index, parentGroup = null) {
     sourceId,
     name,
     shot: getElementText(body, 'comment'),
-    count: (defaultAssetBody.match(/<asset\b/gi) || []).length,
+    count: defaultAssets.length,
     durationRange: formatMaterialDurationRange(
       getElementText(body, 'minDuration'),
       getElementText(body, 'maxDuration'),
     ),
-    defaultAssets: parseAssetTags(defaultAssetBody),
+    defaultAssets,
     parentGroupId: parentGroup?.id || '',
     parentGroupName: parentGroup?.name || '',
   };
