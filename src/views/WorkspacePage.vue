@@ -190,6 +190,7 @@ const activeBackendProjectId = ref('');
 let activeNarrationTaskProjectId = '';
 let activeNarrationTaskDbId = '';
 let pendingNarrationScenePlanTaskId = '';
+let pendingNarrationScenePlanProjectId = '';
 let narrationScenePlanPollTimer = null;
 let narrationScenePlanPollGeneration = 0;
 const activeProjectExported = ref(false);
@@ -1174,6 +1175,7 @@ async function goHome() {
   await flushPendingAssetPropertyUpdates();
   flushPendingProjectTemplateUpdate();
   pendingNarrationScenePlanTaskId = '';
+  pendingNarrationScenePlanProjectId = '';
   stopNarrationScenePlanPolling();
   invalidateBeautyPreview();
   resetDraftBatchDelete();
@@ -1905,11 +1907,7 @@ async function confirmSelection() {
     if (started) {
       previewModalVisible.value = false;
       resetModalPreviewVideo();
-      const scenePlanTaskId = pendingNarrationScenePlanTaskId;
-      pendingNarrationScenePlanTaskId = '';
-      if (hasBackendId(scenePlanTaskId)) {
-        startNarrationScenePlanPolling(scenePlanTaskId);
-      }
+      startPendingNarrationScenePlanPolling(activeBackendProjectId.value);
     }
   } finally {
     startEditingLoading.value = false;
@@ -1923,6 +1921,22 @@ function normalizeBackendId(value) {
 
 function hasBackendId(value) {
   return value !== undefined && value !== null && String(value).trim() !== '';
+}
+
+function startPendingNarrationScenePlanPolling(projectId) {
+  if (
+    currentViewState.value !== 'import' ||
+    String(activeBackendProjectId.value) !== String(projectId) ||
+    String(pendingNarrationScenePlanProjectId) !== String(projectId) ||
+    !hasBackendId(pendingNarrationScenePlanTaskId)
+  ) {
+    return;
+  }
+
+  const taskId = pendingNarrationScenePlanTaskId;
+  pendingNarrationScenePlanTaskId = '';
+  pendingNarrationScenePlanProjectId = '';
+  startNarrationScenePlanPolling(taskId);
 }
 
 function stopNarrationScenePlanPolling() {
@@ -2012,8 +2026,12 @@ function templateHasRecordingClips(xmlContent) {
   );
 }
 
-async function ensureNarrationTask(projectId, userId) {
-  if (!templateHasRecordingClips(activeTemplateLocalInfo.value?.xmlContent)) {
+async function ensureNarrationTask(
+  projectId,
+  userId,
+  projectXml = activeTemplateLocalInfo.value?.xmlContent,
+) {
+  if (!templateHasRecordingClips(projectXml)) {
     console.log(
       '[narration-task] skipped: template has no recording track clips',
       { projectId },
@@ -2071,6 +2089,7 @@ async function ensureNarrationTask(projectId, userId) {
     activeNarrationTaskProjectId = normalizedProjectId;
     activeNarrationTaskDbId = taskDbId;
     pendingNarrationScenePlanTaskId = String(taskDbId);
+    pendingNarrationScenePlanProjectId = normalizedProjectId;
     saveNarrationTaskDbId(projectId, taskDbId);
     console.log('[narration-task] created', { projectId, taskDbId });
     return true;
@@ -2130,6 +2149,14 @@ function syncProjectTemplateUpdate(payload) {
       if (response?.code !== undefined && Number(response.code) !== 0) {
         throw new Error(response?.msg || '工程信息同步失败');
       }
+      const narrationTaskReady = await ensureNarrationTask(
+        payload.projectId,
+        getStoredUserId(),
+        payload.projectXml,
+      );
+      if (!narrationTaskReady) return false;
+
+      startPendingNarrationScenePlanPolling(payload.projectId);
       return true;
     } catch (error) {
       console.error('[project] template update sync failed:', error);
@@ -2192,10 +2219,7 @@ function flushPendingProjectTemplateUpdate() {
 
 async function createBackendProjectIfNeeded() {
   if (activeBackendProjectId.value) {
-    return ensureNarrationTask(
-      activeBackendProjectId.value,
-      getStoredUserId(),
-    );
+    return true;
   }
 
   const renterId = getStoredTenantId();
@@ -2237,7 +2261,7 @@ async function createBackendProjectIfNeeded() {
     console.log('[project] backend project created', {
       projectId: activeBackendProjectId.value,
     });
-    return ensureNarrationTask(activeBackendProjectId.value, userId);
+    return true;
   } catch (error) {
     console.error('[project] backend project create failed:', error);
     systemMessage.error(error?.message || '工程创建失败');
@@ -2247,6 +2271,7 @@ async function createBackendProjectIfNeeded() {
 
 async function startEditing() {
   pendingNarrationScenePlanTaskId = '';
+  pendingNarrationScenePlanProjectId = '';
   stopNarrationScenePlanPolling();
   cancelAllAssetVideoPreprocessTasks();
   editingFromDraftLibrary.value = false;
@@ -7957,6 +7982,7 @@ onMounted(() => {
 // 离开页面时释放全局监听、定时器和本地视频 URL。
 onBeforeUnmount(() => {
   pendingNarrationScenePlanTaskId = '';
+  pendingNarrationScenePlanProjectId = '';
   stopNarrationScenePlanPolling();
   activeTemplateDemoRequestId += 1;
   templateOnlineUrlCache.clear();
