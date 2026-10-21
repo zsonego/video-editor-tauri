@@ -30,7 +30,10 @@ import {
   updateProject,
   uploadProjectCover,
 } from '../api/project';
-import { createNarrationTask } from '../api/narration';
+import {
+  createNarrationTask,
+  getNarrationScenePlanList,
+} from '../api/narration';
 import {
   downloadTemplateCover,
   favoriteTemplate,
@@ -39,11 +42,12 @@ import {
   getTemplateDetail,
   getTemplates,
 } from '../api/template';
-import { getBosDownloadUrl } from '../api/file';
+import { getBosDownloadUrl, getUploadCredential } from '../api/file';
 import { encodeBase64Url } from '../config/windowsRuntime';
 import { systemMessage } from '../utils/message';
 import { canUseTemplateFactory } from '../utils/permissions';
 import { getStoredUploadBucket } from '../utils/uploadBuckets';
+import { uploadLocalMp4ToBos } from '../utils/baiduBosUpload';
 import dingAudio from '../assets/ding.mp3';
 import hotImage from '../assets/hot.png';
 import logoImage from '../assets/logo.png';
@@ -63,6 +67,7 @@ const router = useRouter();
 const GLOBAL_TIMELINE_VISIBLE = true;
 const PROJECT_COPY_RECOVERY_STORAGE_KEY = 'aicut-pending-project-copy';
 const NARRATION_TASK_STORAGE_KEY = 'aicut-narration-task-db-ids';
+const NARRATION_SCENE_PLAN_POLL_INTERVAL_MS = 3000;
 
 // 模板列表、收藏列表及请求状态。
 const categories = ref([]);
@@ -184,6 +189,9 @@ const activeProjectDir = ref('');
 const activeBackendProjectId = ref('');
 let activeNarrationTaskProjectId = '';
 let activeNarrationTaskDbId = '';
+let pendingNarrationScenePlanTaskId = '';
+let narrationScenePlanPollTimer = null;
+let narrationScenePlanPollGeneration = 0;
 const activeProjectExported = ref(false);
 const activeProjectHasPaid = ref(false);
 const projectCopying = ref(false);
@@ -494,6 +502,7 @@ const importProcessingFileName = ref('');
 const importProcessingCurrent = ref(0);
 const importProcessingTotal = ref(0);
 const collapsedSegmentCollectionIds = ref(new Set());
+const hiddenMediaAssetUploadIds = new Set();
 let exportInterval = null;
 let exportFinishedAudio = null;
 let exportFinishedAudioContext = null;
@@ -1164,6 +1173,8 @@ function statusMeta(status) {
 async function goHome() {
   await flushPendingAssetPropertyUpdates();
   flushPendingProjectTemplateUpdate();
+  pendingNarrationScenePlanTaskId = '';
+  stopNarrationScenePlanPolling();
   invalidateBeautyPreview();
   resetDraftBatchDelete();
   activeCategory.value = -1;
@@ -1894,6 +1905,11 @@ async function confirmSelection() {
     if (started) {
       previewModalVisible.value = false;
       resetModalPreviewVideo();
+      const scenePlanTaskId = pendingNarrationScenePlanTaskId;
+      pendingNarrationScenePlanTaskId = '';
+      if (hasBackendId(scenePlanTaskId)) {
+        startNarrationScenePlanPolling(scenePlanTaskId);
+      }
     }
   } finally {
     startEditingLoading.value = false;
@@ -1907,6 +1923,41 @@ function normalizeBackendId(value) {
 
 function hasBackendId(value) {
   return value !== undefined && value !== null && String(value).trim() !== '';
+}
+
+function stopNarrationScenePlanPolling() {
+  narrationScenePlanPollGeneration += 1;
+  if (narrationScenePlanPollTimer) {
+    window.clearTimeout(narrationScenePlanPollTimer);
+    narrationScenePlanPollTimer = null;
+  }
+}
+
+function startNarrationScenePlanPolling(taskId) {
+  stopNarrationScenePlanPolling();
+  if (!hasBackendId(taskId)) return;
+
+  const normalizedTaskId = String(taskId);
+  const generation = narrationScenePlanPollGeneration;
+
+  const poll = async () => {
+    try {
+      const response = await getNarrationScenePlanList(normalizedTaskId);
+      if (generation !== narrationScenePlanPollGeneration) return;
+      console.log('[narration-scene-plan] response:', response);
+    } catch (error) {
+      if (generation !== narrationScenePlanPollGeneration) return;
+      console.error('[narration-scene-plan] request failed:', error);
+    }
+
+    if (generation !== narrationScenePlanPollGeneration) return;
+    narrationScenePlanPollTimer = window.setTimeout(
+      poll,
+      NARRATION_SCENE_PLAN_POLL_INTERVAL_MS,
+    );
+  };
+
+  void poll();
 }
 
 function readNarrationTaskDbId(projectId) {
@@ -2019,6 +2070,7 @@ async function ensureNarrationTask(projectId, userId) {
 
     activeNarrationTaskProjectId = normalizedProjectId;
     activeNarrationTaskDbId = taskDbId;
+    pendingNarrationScenePlanTaskId = String(taskDbId);
     saveNarrationTaskDbId(projectId, taskDbId);
     console.log('[narration-task] created', { projectId, taskDbId });
     return true;
@@ -2194,6 +2246,8 @@ async function createBackendProjectIfNeeded() {
 }
 
 async function startEditing() {
+  pendingNarrationScenePlanTaskId = '';
+  stopNarrationScenePlanPolling();
   cancelAllAssetVideoPreprocessTasks();
   editingFromDraftLibrary.value = false;
   const backendProjectCreated = await createBackendProjectIfNeeded();
@@ -2710,8 +2764,9 @@ function findTemplateAreaMatchesFromDom(xmlContent, assetId) {
 }
 
 function findTemplateAreaMatchesFromText(xmlContent, assetId) {
+  const xmlWithoutComments = xmlContent.replace(/<!--[\s\S]*?-->/g, '');
   const clipsMatches = Array.from(
-    xmlContent.matchAll(/<clips\b([^>]*)>([\s\S]*?)<\/clips>/gi),
+    xmlWithoutComments.matchAll(/<clips\b([^>]*)>([\s\S]*?)<\/clips>/gi),
   );
   const matches = [];
 
@@ -2800,7 +2855,13 @@ function findTemplateAreaMatch(assetId) {
 function normalizeClipTransition(effectValue, durationValue) {
   const effect = String(effectValue || '').trim();
   const duration = Number(durationValue);
-  if (!effect || !Number.isFinite(duration) || duration <= 0) {
+  // Yellow_Glare 保留在模板中由整片合成处理，不拆分到单素材预览。
+  if (
+    !effect ||
+    effect.toLowerCase() === 'yellow_glare' ||
+    !Number.isFinite(duration) ||
+    duration <= 0
+  ) {
     return { effect: '', duration: 0 };
   }
   return { effect, duration: duration / 2 };
@@ -3018,6 +3079,10 @@ async function initializeDefaultTemplateAssets() {
   const segments = importSegments.value;
 
   for (const segment of segments) {
+    if (segment.hidden) {
+      continue;
+    }
+
     const state = getSegmentImportState(segment.id);
     if (state.videos.length > 0 || !segment.defaultAssets?.length) {
       continue;
@@ -3036,6 +3101,7 @@ async function initializeDefaultTemplateAssets() {
 }
 
 function clearProjectEditingState() {
+  stopNarrationScenePlanPolling();
   invalidateBeautyPreview();
   videoTransformerRef.value?.pause?.();
   if (offsetPersistTimer) {
@@ -3246,6 +3312,14 @@ async function pickVideoPaths(multiple) {
 
   if (!selected) return [];
   return Array.isArray(selected) ? selected : [selected];
+}
+
+async function pickMp4VideoPath() {
+  const selected = await openDialog({
+    multiple: false,
+    filters: [{ name: 'MP4 视频文件', extensions: ['mp4'] }],
+  });
+  return Array.isArray(selected) ? selected[0] || '' : selected || '';
 }
 
 async function createImportedVideoFromPath(
@@ -3638,7 +3712,132 @@ function requestOneClickImportTarget(target) {
   openOneClickImportFilePicker(normalizedTarget, 'overwrite');
 }
 
+function createRandomBosVideoFileName() {
+  const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  const randomValues = new Uint32Array(8);
+  window.crypto.getRandomValues(randomValues);
+  const basename = Array.from(
+    randomValues,
+    (value) => alphabet[value % alphabet.length],
+  ).join('');
+  return `${basename}.mp4`;
+}
+
+function normalizeBosUploadCredential(response) {
+  if (response?.code !== undefined && Number(response.code) !== 0) {
+    throw new Error(response?.msg || '获取百度 BOS 上传凭证失败');
+  }
+
+  const payload = getResponsePayload(response) || {};
+  const credentials =
+    payload.credentials || payload.credential || payload.sts || payload;
+  const firstValue = (...values) =>
+    String(values.find((value) => value !== undefined && value !== null) || '').trim();
+  const normalized = {
+    endpoint: firstValue(
+      payload.endpoint,
+      payload.endPoint,
+      payload.bosEndpoint,
+      credentials.endpoint,
+      credentials.endPoint,
+      credentials.bosEndpoint,
+    ),
+    accessKeyId: firstValue(
+      credentials.accessKeyId,
+      credentials.AccessKeyId,
+      credentials.accessKey,
+      credentials.access_key_id,
+      credentials.ak,
+    ),
+    secretAccessKey: firstValue(
+      credentials.secretAccessKey,
+      credentials.SecretAccessKey,
+      credentials.secretKey,
+      credentials.secret_access_key,
+      credentials.sk,
+    ),
+    sessionToken: firstValue(
+      credentials.sessionToken,
+      credentials.SessionToken,
+      credentials.securityToken,
+      credentials.session_token,
+      credentials.token,
+    ),
+  };
+
+  if (Object.values(normalized).some((value) => !value)) {
+    throw new Error('获取上传凭证成功，但百度 BOS 凭证字段不完整');
+  }
+  return {
+    ...normalized,
+    bucket: firstValue(payload.bucket, credentials.bucket),
+    objectKeyPrefix: firstValue(
+      payload.objectKey,
+      payload.object_key,
+      credentials.objectKey,
+      credentials.object_key,
+    ),
+  };
+}
+
+async function uploadHiddenMediaAsset(segment) {
+  if (activeProjectReadOnly.value) return;
+
+  const uploadKey = String(segment?.id || segment?.sourceId || '').trim();
+  if (!uploadKey || hiddenMediaAssetUploadIds.has(uploadKey)) return;
+  hiddenMediaAssetUploadIds.add(uploadKey);
+
+  try {
+    const filePath = await pickMp4VideoPath();
+    if (!filePath) return;
+
+    const bucket = getStoredUploadBucket('video');
+    const renterId = String(getStoredTenantId() || '').trim();
+    const projectId = String(activeBackendProjectId.value || '').trim();
+    if (!bucket) throw new Error('视频上传桶配置缺失，请重新登录');
+    if (!renterId || !projectId) {
+      throw new Error('租户或工程信息不完整，无法上传视频');
+    }
+
+    const prefix = `${renterId}/${projectId}/tmp/`;
+    const credentialResponse = await getUploadCredential({ bucket, prefix });
+    const credential = normalizeBosUploadCredential(credentialResponse);
+    if (credential.bucket && credential.bucket !== bucket) {
+      throw new Error('上传凭证返回的存储桶与本地视频桶配置不一致');
+    }
+    const credentialPrefix = credential.objectKeyPrefix.replace(/\/?$/, '/');
+    if (credentialPrefix && credentialPrefix !== prefix) {
+      throw new Error('上传凭证返回的 objectKey 与当前工程临时目录不一致');
+    }
+    const fileName = createRandomBosVideoFileName();
+    const objectKey = `${prefix}${fileName}`;
+    const result = await uploadLocalMp4ToBos({
+      filePath,
+      bucket,
+      objectKey,
+      endpoint: credential.endpoint,
+      accessKeyId: credential.accessKeyId,
+      secretAccessKey: credential.secretAccessKey,
+      sessionToken: credential.sessionToken,
+    });
+    console.log('[hidden-media-asset] BOS upload completed:', {
+      segmentId: segment.sourceId,
+      fileName,
+      ...result,
+    });
+  } catch (error) {
+    console.error('[hidden-media-asset] BOS upload failed:', error);
+    systemMessage.error(error?.message || '视频上传失败');
+  } finally {
+    hiddenMediaAssetUploadIds.delete(uploadKey);
+  }
+}
+
 function requestOneClickImport(segment) {
+  if (segment?.hidden) {
+    void uploadHiddenMediaAsset(segment);
+    return;
+  }
   requestOneClickImportTarget({ kind: 'segment', value: segment });
 }
 
@@ -7062,7 +7261,14 @@ function getStoredUserInfo() {
 
 function getStoredTenantId() {
   const userInfo = getStoredUserInfo();
-  return userInfo.tenantId || userInfo.renterId || '';
+  const profile = userInfo.user || userInfo.profile || userInfo.sysUser || {};
+  return (
+    userInfo.tenantId ||
+    userInfo.renterId ||
+    profile.tenantId ||
+    profile.renterId ||
+    ''
+  );
 }
 
 function getStoredUserId() {
@@ -7185,6 +7391,9 @@ function parseProjectMaxOffsets(projectFileXml) {
 
 function parseMediaAssetElement(mediaAsset, index, parentGroup = null) {
   const directChildren = Array.from(mediaAsset.children);
+  const hidden =
+    String(mediaAsset.getAttribute('hidden') || '').trim().toLowerCase() ===
+    'true';
   const defaultAsset = directChildren.find(
     (child) => child.tagName.toLowerCase() === 'default-asset',
   );
@@ -7204,7 +7413,10 @@ function parseMediaAssetElement(mediaAsset, index, parentGroup = null) {
       ?.textContent?.trim() || '';
   const defaultAssets = defaultAsset
     ? Array.from(defaultAsset.children).filter(
-        (child) => child.tagName.toLowerCase() === 'asset',
+        (child) =>
+          child.tagName.toLowerCase() === 'asset' &&
+          String(child.getAttribute('hidden') || '').trim().toLowerCase() !==
+            'true',
       )
     : [];
   const defaultAssetItems = defaultAssets.map((asset) => ({
@@ -7227,8 +7439,9 @@ function parseMediaAssetElement(mediaAsset, index, parentGroup = null) {
   return {
     sourceId,
     name,
+    hidden,
     shot: comment,
-    count: defaultAssets.length,
+    count: hidden ? 0 : defaultAssets.length,
     durationRange: formatMaterialDurationRange(minDuration, maxDuration),
     defaultAssets: defaultAssetItems,
     parentGroupId: parentGroup?.id || '',
@@ -7299,20 +7512,28 @@ function getAttributeValue(source, name) {
 }
 
 function parseAssetTags(source) {
-  return Array.from(source.matchAll(/<asset\b([^>]*)\/?>/gi)).map((match) => {
-    const attributes = match[1] || '';
+  return Array.from(source.matchAll(/<asset\b([^>]*)\/?>/gi))
+    .filter(
+      (match) =>
+        getAttributeValue(match[1] || '', 'hidden').toLowerCase() !== 'true',
+    )
+    .map((match) => {
+      const attributes = match[1] || '';
 
-    return {
-      id: getAttributeValue(attributes, 'id'),
-      filepath: getAttributeValue(attributes, 'filepath'),
-    };
-  });
+      return {
+        id: getAttributeValue(attributes, 'id'),
+        filepath: getAttributeValue(attributes, 'filepath'),
+      };
+    });
 }
 
 function parseMediaAssetText(match, index, parentGroup = null) {
   const attributes = match[1] || '';
   const body = match[2] || '';
+  const hidden =
+    getAttributeValue(attributes, 'hidden').toLowerCase() === 'true';
   const defaultAssetBody = getElementText(body, 'default-asset');
+  const defaultAssets = parseAssetTags(defaultAssetBody);
   const sourceId =
     getAttributeValue(attributes, 'id') || `media-asset-${index + 1}`;
   const name =
@@ -7324,13 +7545,14 @@ function parseMediaAssetText(match, index, parentGroup = null) {
   return {
     sourceId,
     name,
+    hidden,
     shot: getElementText(body, 'comment'),
-    count: (defaultAssetBody.match(/<asset\b/gi) || []).length,
+    count: hidden ? 0 : defaultAssets.length,
     durationRange: formatMaterialDurationRange(
       getElementText(body, 'minDuration'),
       getElementText(body, 'maxDuration'),
     ),
-    defaultAssets: parseAssetTags(defaultAssetBody),
+    defaultAssets,
     parentGroupId: parentGroup?.id || '',
     parentGroupName: parentGroup?.name || '',
   };
@@ -7734,6 +7956,8 @@ onMounted(() => {
 
 // 离开页面时释放全局监听、定时器和本地视频 URL。
 onBeforeUnmount(() => {
+  pendingNarrationScenePlanTaskId = '';
+  stopNarrationScenePlanPolling();
   activeTemplateDemoRequestId += 1;
   templateOnlineUrlCache.clear();
   templateOnlineUrlRequests.clear();
@@ -8361,11 +8585,17 @@ onBeforeUnmount(() => {
                             :disabled="activeProjectReadOnly"
                             @click="requestOneClickImport(style)"
                           >
-                            {{ collection.isGroup ? '导入' : '一键导入' }}
+                            {{
+                              style.hidden
+                                ? '一键导入'
+                                : collection.isGroup
+                                  ? '导入'
+                                  : '一键导入'
+                            }}
                           </button>
                         </div>
                         <div
-                          v-if="style.videos.length"
+                          v-if="!style.hidden && style.videos.length"
                           class="p-3 space-y-2 border-t border-outline-variant videoContent"
                         >
                           <div

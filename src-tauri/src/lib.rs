@@ -7667,6 +7667,65 @@ fn read_custom_template_upload_chunk(
     Ok(tauri::ipc::Response::new(bytes))
 }
 
+fn bos_upload_mp4_path(file_path: &str) -> Result<PathBuf, String> {
+    let trimmed_path = file_path.trim();
+    if trimmed_path.is_empty() {
+        return Err("上传视频路径不能为空".to_string());
+    }
+
+    let path = fs::canonicalize(PathBuf::from(trimmed_path))
+        .map_err(|error| format!("读取上传视频失败：{error}"))?;
+    if !path.is_file() {
+        return Err("所选上传视频不存在".to_string());
+    }
+    let is_mp4 = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"));
+    if !is_mp4 {
+        return Err("只能上传 MP4 视频".to_string());
+    }
+    Ok(path)
+}
+
+#[tauri::command]
+fn get_bos_upload_file_size(file_path: String) -> Result<u64, String> {
+    let path = bos_upload_mp4_path(&file_path)?;
+    fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .map_err(|error| format!("读取上传视频大小失败：{error}"))
+}
+
+#[tauri::command]
+fn read_bos_upload_file_chunk(
+    file_path: String,
+    chunk_index: u64,
+    chunk_size: u64,
+) -> Result<tauri::ipc::Response, String> {
+    const MAX_CHUNK_SIZE: u64 = 20 * 1024 * 1024;
+    if chunk_size == 0 || chunk_size > MAX_CHUNK_SIZE {
+        return Err("上传视频分片大小无效".to_string());
+    }
+
+    let path = bos_upload_mp4_path(&file_path)?;
+    let mut file = fs::File::open(path).map_err(|error| format!("读取上传视频失败：{error}"))?;
+    let file_size = file.metadata().map_err(|error| error.to_string())?.len();
+    let start = chunk_index
+        .checked_mul(chunk_size)
+        .ok_or_else(|| "上传视频分片序号无效".to_string())?;
+    if start >= file_size {
+        return Err("上传视频分片超出文件范围".to_string());
+    }
+
+    let length = (file_size - start).min(chunk_size) as usize;
+    file.seek(SeekFrom::Start(start))
+        .map_err(|error| format!("定位上传视频分片失败：{error}"))?;
+    let mut bytes = vec![0u8; length];
+    file.read_exact(&mut bytes)
+        .map_err(|error| format!("读取上传视频分片失败：{error}"))?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
 #[tauri::command]
 async fn generate_asset_thumbnail(
     composer: tauri::State<'_, ComposerState>,
@@ -8545,6 +8604,8 @@ pub fn run() {
             prepare_custom_template_upload,
             save_custom_template_upload_state,
             read_custom_template_upload_chunk,
+            get_bos_upload_file_size,
+            read_bos_upload_file_chunk,
             generate_asset_thumbnail,
             resolve_lut_resource_path,
             preview_composer_beauty_frame,

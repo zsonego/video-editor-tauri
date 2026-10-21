@@ -4,6 +4,13 @@ export function getUploadBuckets() {
   return request('/aicut/file/upload-buckets', { method: 'GET' });
 }
 
+export function getUploadCredential(data) {
+  return request('/aicut/file/upload-credential', {
+    method: 'POST',
+    data,
+  });
+}
+
 export function getFileDownloadUrl(path) {
   return request('/aicut/file/download', {
     method: 'GET',
