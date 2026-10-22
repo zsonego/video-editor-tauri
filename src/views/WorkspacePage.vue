@@ -1872,6 +1872,13 @@ function getVideoRequiredDurationSeconds(video) {
     : 0;
 }
 
+function getVideoRequiredDurationLabel(video) {
+  const requiredDuration = getVideoRequiredDurationSeconds(video);
+  return requiredDuration > 0
+    ? formatTimelineTick(Math.max(1, requiredDuration))
+    : '--';
+}
+
 function isVideoDurationTooShort(video) {
   const requiredDuration = getVideoRequiredDurationSeconds(video);
   if (!requiredDuration) return false;
@@ -3775,12 +3782,12 @@ async function handleApplyGeneratedVideo(values) {
 }
 
 async function handleMaterialResetRequest() {
-  if (!activeProjectEditable.value || materialResetting.value) return;
+  if (!activeProjectEditable.value || materialResetting.value) return false;
   const projectDir = activeProjectDir.value;
   const assetId = selectedVideoAssetId.value;
   if (!projectDir || !assetId) {
     systemMessage.error('当前素材缺少工程关联信息');
-    return;
+    return false;
   }
 
   materialResetting.value = true;
@@ -3798,8 +3805,10 @@ async function handleMaterialResetRequest() {
       }
     }
     systemMessage.success('素材已重置');
+    return true;
   } catch (error) {
     systemMessage.error(error?.message || '素材重置失败');
+    return false;
   } finally {
     materialResetting.value = false;
   }
@@ -4293,7 +4302,7 @@ async function applySubtitleChange() {
 
 // 拖动选区时限制其始终落在时间线有效范围内。
 function startTimelineDrag(event) {
-  if (!activeProjectEditable.value || beautyVideoPreviewActive.value) return;
+  if (!activeProjectEditable.value || materialResetting.value) return;
   const track = timelineTrackRef.value;
   if (!track) return;
 
@@ -4305,10 +4314,15 @@ function startTimelineDrag(event) {
   const selectionRect = event.currentTarget.getBoundingClientRect();
   const offset = event.clientX - selectionRect.left;
   const maxLeft = Math.max(0, trackWidth - selectionRect.width);
+  const initialStartTime = timeline.startTime;
+  const shouldResetGeneratedVideo = Boolean(selectedVideoGeneratePath.value);
+  let hasMoved = false;
   event.currentTarget.setPointerCapture?.(event.pointerId);
   timelinePreviewSeeking.value = true;
   syncPlayheadToTimelineStart();
-  seekMainPlayerToTimelineTime(timeline.startTime);
+  if (!shouldResetGeneratedVideo) {
+    seekMainPlayerToTimelineTime(timeline.startTime);
+  }
 
   if (timelineMoveHandler) {
     window.removeEventListener('pointermove', timelineMoveHandler);
@@ -4325,16 +4339,21 @@ function startTimelineDrag(event) {
       timeline.totalDuration - timeline.selectedDuration,
     );
     timeline.startTime = maxLeft ? (clampedLeft / maxLeft) * maxStart : 0;
+    hasMoved = Math.abs(timeline.startTime - initialStartTime) >= 0.0005;
     syncPlayheadToTimelineStart();
     cacheCurrentVideoTimelineState();
     seekMainPlayerToTimelineTime(timeline.startTime);
   };
-  timelineUpHandler = () => {
+  timelineUpHandler = async () => {
     timelineDragging.value = false;
     window.removeEventListener('pointermove', timelineMoveHandler);
     window.removeEventListener('pointerup', timelineUpHandler);
     timelineMoveHandler = null;
     timelineUpHandler = null;
+    if (hasMoved && shouldResetGeneratedVideo) {
+      const resetSucceeded = await handleMaterialResetRequest();
+      if (!resetSucceeded) return;
+    }
     scheduleSelectedVideoOffsetPersist();
   };
 
@@ -6824,7 +6843,9 @@ onBeforeUnmount(() => {
                                 <div
                                   class="text-[10px] text-on-surface-variant"
                                 >
-                                  时长：{{ video.duration }}
+                                  时长：{{
+                                    getVideoRequiredDurationLabel(video)
+                                  }}
                                 </div>
                               </div>
                             </div>
@@ -6994,8 +7015,6 @@ onBeforeUnmount(() => {
                 <template #timeline>
                   <div
                     class="timeline-settings-track"
-                    :class="{ 'is-disabled': beautyVideoPreviewActive }"
-                    :aria-disabled="beautyVideoPreviewActive"
                   >
                     <div class="track-title flex items-center gap-2">
                       {{ selectedStyleName }}
@@ -7564,55 +7583,55 @@ onBeforeUnmount(() => {
           >
             <div class="relative w-full max-w-4xl mx-4">
               <div
-                class="absolute -top-12 right-0 z-20 flex items-center gap-3"
-              >
-                <button
-                  class="p-2 bg-black/40 backdrop-blur-md rounded-full transition-colors group"
-                  :class="
-                    previewFavorited
-                      ? 'text-yellow-400 hover:text-yellow-300'
-                      : 'text-white/80 hover:text-white'
-                  "
-                  type="button"
-                  :disabled="
-                    isTemplateFavoriteUpdating({ id: activeTemplateId })
-                  "
-                  @click.stop="togglePreviewFavorite"
-                >
-                  <AppIcon
-                    :name="
-                      isTemplateFavoriteUpdating({ id: activeTemplateId })
-                        ? 'progress_activity'
-                        : 'star'
-                    "
-                    :size="24"
-                    :filled="
-                      previewFavorited &&
-                      !isTemplateFavoriteUpdating({ id: activeTemplateId })
-                    "
-                    class="group-hover:scale-110"
-                    :class="{
-                      'start-editing-spinner': isTemplateFavoriteUpdating({
-                        id: activeTemplateId,
-                      }),
-                    }"
-                  />
-                </button>
-                <button
-                  class="p-2 bg-black/40 backdrop-blur-md rounded-full text-white/80 hover:text-white transition-colors group"
-                  type="button"
-                  @click="hidePreviewModal"
-                >
-                  <AppIcon
-                    name="close"
-                    :size="24"
-                    class="group-hover:scale-110"
-                  />
-                </button>
-              </div>
-              <div
                 class="relative w-full bg-surface-container rounded-2xl overflow-hidden shadow-[0_30px_90px_rgba(0,0,0,0.8)] border border-electric-blue/20 modal-pop-in"
               >
+                <div
+                  class="absolute top-4 right-4 z-30 flex items-center gap-3"
+                >
+                  <button
+                    class="p-2 bg-black/50 backdrop-blur-md rounded-full transition-colors group"
+                    :class="
+                      previewFavorited
+                        ? 'text-yellow-400 hover:text-yellow-300'
+                        : 'text-white/80 hover:text-white'
+                    "
+                    type="button"
+                    :disabled="
+                      isTemplateFavoriteUpdating({ id: activeTemplateId })
+                    "
+                    @click.stop="togglePreviewFavorite"
+                  >
+                    <AppIcon
+                      :name="
+                        isTemplateFavoriteUpdating({ id: activeTemplateId })
+                          ? 'progress_activity'
+                          : 'star'
+                      "
+                      :size="24"
+                      :filled="
+                        previewFavorited &&
+                        !isTemplateFavoriteUpdating({ id: activeTemplateId })
+                      "
+                      class="group-hover:scale-110"
+                      :class="{
+                        'start-editing-spinner': isTemplateFavoriteUpdating({
+                          id: activeTemplateId,
+                        }),
+                      }"
+                    />
+                  </button>
+                  <button
+                    class="p-2 bg-black/50 backdrop-blur-md rounded-full text-white/80 hover:text-white transition-colors group"
+                    type="button"
+                    @click="hidePreviewModal"
+                  >
+                    <AppIcon
+                      name="close"
+                      :size="24"
+                      class="group-hover:scale-110"
+                    />
+                  </button>
+                </div>
                 <div class="w-full bg-black flex items-center justify-center">
                   <div
                     class="relative w-full max-h-[70vh] group cursor-pointer"
